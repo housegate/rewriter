@@ -1,3 +1,3 @@
-[submodule "ClickHouse"]
-	path = ClickHouse
+[submodule "clickHouse"]
+	path = clickHouse
 	url = https://github.com/ClickHouse/ClickHouse.git
