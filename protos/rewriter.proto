@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package rewriter;
+
+enum RewriteOp {
+    TableNameRewrite = 0;
+    LimitRewrite = 1;
+    OffsetRewrite = 2;
+}
+
+message RewriteTableNameArgs {
+    map<string, string> table_map = 1;
+}
+
+message RewriteLimitArgs {
+    int32 limit = 1;
+}
+
+message RewriteOffsetArgs {
+    int32 offset = 1;
+}
+
+message RewriteOption {
+    RewriteOp op = 1;
+    oneof value {
+        RewriteTableNameArgs table_name_args = 2;
+        RewriteLimitArgs limit_args = 3;
+        RewriteOffsetArgs offset_args = 4;
+    }
+}
+
+message RewriteSQLRequest {
+    string sql = 1;
+    repeated RewriteOption options = 2;
+}
+
+enum RewriteCode {
+    Success = 0;
+    SyntaxError = 1;
+    RewriteError = 2;
+}
+
+message RewriteSQLResponse {
+    RewriteCode code = 1;
+    string message = 2;
+    string sql_after_rewrite = 3;
+}
+
+service RewriterService {
+  rpc Rewrite (RewriteSQLRequest) returns (RewriteSQLResponse) {}
+}

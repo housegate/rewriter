@@ -50,8 +50,26 @@ endif()
 # Add ClickHouse submodule
 add_subdirectory(ClickHouse)
 no_warning(enum-constexpr-conversion)
+
+PROTOBUF_GENERATE_GRPC_CPP(rewriter_grpc_proto_sources rewriter_grpc_proto_headers protos/rewriter.proto)
+
+# Ignore warnings while compiling protobuf-generated *.pb.h and *.pb.cpp files.
+set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
+
+# Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
+set (CMAKE_CXX_CLANG_TIDY "")
+
+add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_proto_sources})
+target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries (rewriter_grpc_protos PUBLIC ch_contrib::grpc)
+
+message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
+# include(${rewriter_grpc_proto_headers})
+# set(SOURCES src/rewriter-server.cc ${rewriter_grpc_proto_headers})
+
 # Add your executable or library
-clickhouse_add_executable(MyExecutable src/main.cc)
+clickhouse_add_executable(MyExecutable src/rewriter-server.cc)
+target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
 
 # Link ClickHouse libraries
-target_link_libraries(MyExecutable PRIVATE clickhouse_parsers clickhouse_common_io dbms)
+target_link_libraries(MyExecutable PRIVATE clickhouse_parsers clickhouse_common_io dbms rewriter_grpc_protos)
