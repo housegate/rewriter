@@ -66,10 +66,13 @@ target_link_libraries (rewriter_grpc_protos PUBLIC ch_contrib::grpc)
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 # include(${rewriter_grpc_proto_headers})
 # set(SOURCES src/rewriter-server.cc ${rewriter_grpc_proto_headers})
+set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc)
 
 # Add your executable or library
-clickhouse_add_executable(MyExecutable src/rewriter-server.cc)
+# clickhouse_add_executable(MyExecutable src/rewriter-server.cc)
+clickhouse_add_executable(MyExecutable ${SOURCES})
 target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
+target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Link ClickHouse libraries
 target_link_libraries(MyExecutable PRIVATE clickhouse_parsers clickhouse_common_io dbms rewriter_grpc_protos)

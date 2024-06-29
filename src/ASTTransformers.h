@@ -1,0 +1,112 @@
+#pragma once
+
+#include <Parsers/IAST.h>
+
+
+namespace re2
+{
+    class RE2;
+}
+
+namespace DB
+{
+
+/// A list of transformers
+class ASTTransformerList : public IAST
+{
+public:
+    String getID(char) const override { return "TransformerList"; }
+    ASTPtr clone() const override
+    {
+        auto clone = std::make_shared<ASTTransformerList>(*this);
+        clone->cloneChildren();
+        return clone;
+    }
+
+protected:
+    void formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const override;
+};
+
+class IASTTransformer : public IAST
+{
+public:
+    virtual void transform(ASTPtr & ast) const = 0;
+    static void transform(const ASTPtr & transformer, ASTPtr & ast);
+};
+
+// class ASTApplyTransformer : public IASTTransformer
+// {
+// public:
+//     String getID(char) const override { return "ApplyTransformer"; }
+//     ASTPtr clone() const override
+//     {
+//         auto res = std::make_shared<ASTApplyTransformer>(*this);
+//         // if (parameters)
+//         //     res->parameters = parameters->clone();
+//         // if (lambda)
+//         //     res->lambda = lambda->clone();
+//         return res;
+//     }
+//     void transform(ASTPtr & nodes) const override;
+//     // void appendColumnName(WriteBuffer & ostr) const override;
+//     // void updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const override;
+
+//     // // Case 1  APPLY (quantile(0.9))
+//     // String func_name;
+//     // ASTPtr parameters;
+
+//     // // Case 2 APPLY (x -> quantile(0.9)(x))
+//     // ASTPtr lambda;
+//     // String lambda_arg;
+
+//     // String column_name_prefix;
+
+// protected:
+//     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
+// };
+
+class ASTReplaceTransformer : public IASTTransformer
+{
+public:
+    // class Replacement : public IAST
+    // {
+    // public:
+    //     String getID(char) const override { return "TableNameReplaceTransformer::Replacement"; }
+    //     ASTPtr clone() const override
+    //     {
+    //         auto replacement = std::make_shared<Replacement>(*this);
+    //         replacement->cloneChildren();
+    //         return replacement;
+    //     }
+
+    //     void appendColumnName(WriteBuffer & ostr) const override;
+    //     void updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const override;
+
+    //     String name;
+
+    // protected:
+    //     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
+    // };
+
+    bool is_strict = false;
+    String getID(char) const override { return "TableNameReplaceTransformer"; }
+    ASTPtr clone() const override
+    {
+        auto clone = std::make_shared<ASTReplaceTransformer>(*this);
+        clone->cloneChildren();
+        return clone;
+    }
+    void transform(ASTPtr & ast) const override;
+    void setTableNameMap(const std::map<String, String> & table_name_map);
+
+    std::map<String, String> table_name_map;
+    // void appendColumnName(WriteBuffer & ostr) const override;
+    // void updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const override;
+
+protected:
+    void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
+};
+// private:
+//     static void replaceChildren(ASTPtr & node, const ASTPtr & replacement, const String & name);
+// };
+}

@@ -2,6 +2,12 @@
 #include <grpc++/grpc++.h>
 #include <memory>
 #include <iostream>
+#include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ParserQuery.h>
+#include <Parsers/formatAST.h>
+#include <Parsers/parseQuery.h>
+#include <IO/WriteBufferFromString.h>
+#include "ASTTransformers.h"
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -13,7 +19,28 @@ using rewriter::RewriteSQLResponse;
 
 class RewriterServiceImpl final : public RewriterService::Service {
     Status Rewrite(ServerContext* context, const RewriteSQLRequest* request, RewriteSQLResponse* response) override {
-        response->set_message("Hello " + request->sql());
+        String query = request->sql();
+        for (auto &option : request->options()) {
+            if (option.has_table_name_args()) {
+                auto table_name_map = option.table_name_args().table_map();
+                std::map<std::string, std::string> table_name_map_;
+                for (auto &kv : table_name_map) {
+                    table_name_map_[kv.first] = kv.second;
+                }
+
+                const char * pos = query.data();
+                const char * end = pos + query.size();
+
+                DB::ParserQuery parser(end, false);
+
+                DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
+                DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
+                transformer.setTableNameMap(table_name_map_);
+                transformer.transform(ast);
+                response->set_message(ast->formatForLogging());
+            }
+        }
+
         return Status::OK;
     }
 };

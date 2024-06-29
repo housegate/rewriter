@@ -12,6 +12,7 @@
 // #include <Parsers/obfuscateQueries.h>
 #include <Parsers/parseQuery.h>
 #include <IO/WriteBufferFromString.h>
+#include "ASTTransformers.h"
 
 int main(int, char **)
 {
@@ -33,6 +34,11 @@ int main(int, char **)
   DB::ParserQuery parser(end, false);
 
   DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
+  DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
+  std::map<std::string, std::string> table_name_map;
+  table_name_map["ttt"] = "ttt2";
+  transformer.setTableNameMap(table_name_map);
+  transformer.transform(ast);
   DB::WriteBufferFromOwnString out;
   ast->dumpTree(out);
   printf("%s\n", out.str().c_str());
