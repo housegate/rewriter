@@ -21,7 +21,12 @@ class RewriterServiceImpl final : public RewriterService::Service {
     Status Rewrite(ServerContext* context, const RewriteSQLRequest* request, RewriteSQLResponse* response) override {
         String query = request->sql();
         for (auto &option : request->options()) {
-            if (option.has_table_name_args()) {
+            switch (option.op())
+            {
+            case rewriter::RewriteOp::LimitRewrite:
+                /* code */
+                break;
+            case rewriter::RewriteOp::TableNameRewrite:
                 auto table_name_map = option.table_name_args().table_map();
                 std::map<std::string, std::string> table_name_map_;
                 for (auto &kv : table_name_map) {
@@ -38,6 +43,11 @@ class RewriterServiceImpl final : public RewriterService::Service {
                 transformer.setTableNameMap(table_name_map_);
                 transformer.transform(ast);
                 response->set_message(ast->formatForLogging());
+                break;
+            case rewriter::RewriteOp::OffsetRewrite:
+                break;
+            default:
+                break;
             }
         }
 
