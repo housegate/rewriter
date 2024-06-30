@@ -3,12 +3,13 @@
 #include <IO/WriteHelpers.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTSelectQuery.h>
 #include <Common/SipHash.h>
 #include <Common/quoteString.h>
 #include <Common/re2.h>
 #include <IO/Operators.h>
 #include <stack>
-
 
 namespace DB
 {
@@ -63,6 +64,66 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
     if (table_name_map.find(identifier->name()) != table_name_map.end())
     {
         identifier->setShortName(table_name_map.at(identifier->name()));
+    }
+  }
+  else
+  {
+    for (auto & child : ast->children)
+    {
+        transform(child);
+    }
+  }
+}
+
+void ASTRewriteLimitTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+{
+  settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
+  settings.ostr << "limit: " << limit;
+}
+
+void ASTRewriteLimitTransformer::setLimit(size_t limit_)
+{
+  limit = limit_;
+}
+
+void ASTRewriteLimitTransformer::transform(ASTPtr & ast) const
+{
+  // replace table identifier with table name from map
+  if (auto * identifier = ast->as<ASTSelectQuery>())
+  {
+    if (limit > 0)
+    {
+        identifier->setExpression(ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<ASTLiteral>(limit));
+    }
+  }
+  else
+  {
+    for (auto & child : ast->children)
+    {
+        transform(child);
+    }
+  }
+}
+
+void ASTRewriteOffsetTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+{
+  settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
+  settings.ostr << "offset: " << offset;
+}
+
+void ASTRewriteOffsetTransformer::setOffset(size_t offset_)
+{
+  offset = offset_;
+}
+
+void ASTRewriteOffsetTransformer::transform(ASTPtr & ast) const
+{
+  // replace table identifier with table name from map
+  if (auto * identifier = ast->as<ASTSelectQuery>())
+  {
+    if (offset > 0)
+    {
+        identifier->setExpression(ASTSelectQuery::Expression::LIMIT_OFFSET, std::make_shared<ASTLiteral>(offset));
     }
   }
   else

@@ -68,26 +68,6 @@ public:
 class ASTReplaceTransformer : public IASTTransformer
 {
 public:
-    // class Replacement : public IAST
-    // {
-    // public:
-    //     String getID(char) const override { return "TableNameReplaceTransformer::Replacement"; }
-    //     ASTPtr clone() const override
-    //     {
-    //         auto replacement = std::make_shared<Replacement>(*this);
-    //         replacement->cloneChildren();
-    //         return replacement;
-    //     }
-
-    //     void appendColumnName(WriteBuffer & ostr) const override;
-    //     void updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const override;
-
-    //     String name;
-
-    // protected:
-    //     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
-    // };
-
     bool is_strict = false;
     String getID(char) const override { return "TableNameReplaceTransformer"; }
     ASTPtr clone() const override
@@ -100,13 +80,50 @@ public:
     void setTableNameMap(const std::map<String, String> & table_name_map);
 
     std::map<String, String> table_name_map;
-    // void appendColumnName(WriteBuffer & ostr) const override;
-    // void updateTreeHashImpl(SipHash & hash_state, bool ignore_aliases) const override;
 
 protected:
     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
 };
-// private:
-//     static void replaceChildren(ASTPtr & node, const ASTPtr & replacement, const String & name);
-// };
+
+
+class ASTRewriteLimitTransformer : public IASTTransformer
+{
+public:
+    bool is_strict = false;
+    String getID(char) const override { return "RewriteLimitTransformer"; }
+    ASTPtr clone() const override
+    {
+        auto clone = std::make_shared<ASTRewriteLimitTransformer>(*this);
+        clone->cloneChildren();
+        return clone;
+    }
+    void transform(ASTPtr & ast) const override;
+    void setLimit(size_t limit);
+
+    size_t limit = 0;
+
+protected:
+    void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
+};
+
+class ASTRewriteOffsetTransformer : public IASTTransformer
+{
+public:
+    bool is_strict = false;
+    String getID(char) const override { return "RewriteOffsetTransformer"; }
+    ASTPtr clone() const override
+    {
+        auto clone = std::make_shared<ASTRewriteOffsetTransformer>(*this);
+        clone->cloneChildren();
+        return clone;
+    }
+    void transform(ASTPtr & ast) const override;
+    void setOffset(size_t offset);
+
+    size_t offset = 0;
+
+protected:
+    void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
+};
+
 }
