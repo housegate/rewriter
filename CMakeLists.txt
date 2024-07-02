@@ -18,10 +18,10 @@ set(CMAKE_DEBUG_POSTFIX "d" CACHE STRING "Generate debug library name with a pos
 # For more info see https://cmake.org/cmake/help/latest/prop_gbl/USE_FOLDERS.html
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-set (OS_DARWIN 1)
-    add_definitions(-D OS_DARWIN)
-    # For MAP_ANON/MAP_ANONYMOUS
-    add_definitions(-D _DARWIN_C_SOURCE)
+# set (OS_DARWIN 1)
+#     add_definitions(-D OS_DARWIN)
+#     # For MAP_ANON/MAP_ANONYMOUS
+#     add_definitions(-D _DARWIN_C_SOURCE)
 
 if (OS_DARWIN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
@@ -45,6 +45,36 @@ if (OS_DARWIN)
     find_package(Threads REQUIRED)
 
     set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_LIBCPP_DEBUG=0") # More checks in debug build.
+endif()
+if (OS_LINUX)
+    set (DEFAULT_LIBS "-nodefaultlibs")
+
+    # We need builtins from Clang's RT even without libcxx - for ubsan+int128.
+    # See https://bugs.llvm.org/show_bug.cgi?id=16404
+    execute_process (COMMAND ${CMAKE_CXX_COMPILER} --target=${CMAKE_CXX_COMPILER_TARGET} --print-libgcc-file-name --rtlib=compiler-rt OUTPUT_VARIABLE BUILTINS_LIBRARY OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+    # Apparently, in clang-19, the UBSan support library for C++ was moved out into ubsan_standalone_cxx.a, so we have to include both.
+    if (SANITIZE STREQUAL undefined)
+        string(REPLACE "builtins.a" "ubsan_standalone_cxx.a" EXTRA_BUILTINS_LIBRARY "${BUILTINS_LIBRARY}")
+    endif ()
+
+    if (NOT EXISTS "${BUILTINS_LIBRARY}")
+        set (BUILTINS_LIBRARY "-lgcc")
+    endif ()
+
+    if (OS_ANDROID)
+        # pthread and rt are included in libc
+        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -ldl")
+    elseif (USE_MUSL)
+        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -static -lc")
+    else ()
+        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -lrt -lpthread -ldl")
+    endif ()
+
+    message(STATUS "Default libraries: ${DEFAULT_LIBS}")
+
+    set(CMAKE_CXX_STANDARD_LIBRARIES ${DEFAULT_LIBS})
+    set(CMAKE_C_STANDARD_LIBRARIES ${DEFAULT_LIBS})
 endif()
 
 # Add ClickHouse submodule

@@ -1,5 +1,5 @@
 # Use the official Alpine image as the base
-FROM alpine:latest
+FROM alpine:3.20.1
 
 # Install dependencies
 RUN apk update && apk add --no-cache \
@@ -20,15 +20,17 @@ RUN rustup-init -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup toolchain install nightly-2024-04-01 && rustup default nightly-2024-04-01 && rustup component add rust-src
 
-# Clone ClickHouse repository
-RUN git clone --recursive --shallow-submodules https://github.com/ClickHouse/ClickHouse.git
+# Build sql rewriter
+WORKDIR /usr/sql-rewriter
 
-# Build ClickHouse
-WORKDIR ClickHouse
-RUN mkdir build && cd build \
-    && cmake -S .. -B . \
-    && cmake --build . --target clickhouse
+ARG PORT
+
+RUN mkdir build && cmake -S . -B build \
+    && cmake --build build
+
+# Expose the port your app runs on
+EXPOSE $PORT
 
 # Set entrypoint
-ENTRYPOINT ["./build/programs/clickhouse", "server"]
+ENTRYPOINT ["./build/MyExecutable", $PORT]
 
