@@ -18,10 +18,17 @@ set(CMAKE_DEBUG_POSTFIX "d" CACHE STRING "Generate debug library name with a pos
 # For more info see https://cmake.org/cmake/help/latest/prop_gbl/USE_FOLDERS.html
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-# set (OS_DARWIN 1)
-#     add_definitions(-D OS_DARWIN)
-#     # For MAP_ANON/MAP_ANONYMOUS
-#     add_definitions(-D _DARWIN_C_SOURCE)
+if (CMAKE_SYSTEM_NAME MATCHES "Linux")
+    set (OS_LINUX 1)
+    add_definitions(-D OS_LINUX)
+elseif (CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    set (OS_DARWIN 1)
+    add_definitions(-D OS_DARWIN)
+    # For MAP_ANON/MAP_ANONYMOUS
+    add_definitions(-D _DARWIN_C_SOURCE)
+else ()
+    message (FATAL_ERROR "Platform ${CMAKE_SYSTEM_NAME} is not supported")
+endif ()
 
 if (OS_DARWIN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
@@ -47,6 +54,9 @@ if (OS_DARWIN)
     set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_LIBCPP_DEBUG=0") # More checks in debug build.
 endif()
 if (OS_LINUX)
+    set (CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-pie")
+    set (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-pie")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie -Wl,-no-pie")
     set (DEFAULT_LIBS "-nodefaultlibs")
 
     # We need builtins from Clang's RT even without libcxx - for ubsan+int128.
@@ -78,14 +88,12 @@ if (OS_LINUX)
 endif()
 
 # Add ClickHouse submodule
-add_subdirectory(ClickHouse)
+add_subdirectory(clickHouse)
 no_warning(enum-constexpr-conversion)
 
 PROTOBUF_GENERATE_GRPC_CPP(rewriter_grpc_proto_sources rewriter_grpc_proto_headers protos/rewriter.proto)
-
 # Ignore warnings while compiling protobuf-generated *.pb.h and *.pb.cpp files.
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
-
 # Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
 set (CMAKE_CXX_CLANG_TIDY "")
 
