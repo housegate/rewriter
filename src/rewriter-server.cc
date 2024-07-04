@@ -58,7 +58,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     break;
                 }
             }
-            response->set_sql_after_rewrite(ast->formatForLogging());
+            response->set_sql_after_rewrite(ast->formatWithPossiblyHidingSensitiveData(0, true, true));
             response->set_message("success");
             response->set_code(rewriter::RewriteCode::Success);
             return Status::OK;
