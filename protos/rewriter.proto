@@ -9,7 +9,15 @@ enum RewriteOp {
 }
 
 message RewriteTableNameArgs {
+    message RemoteTable {
+        string addr = 1;
+        string database = 2;
+        string table = 3;
+        string user = 4;
+        string password = 5;
+    }
     map<string, string> table_map = 1;
+    map<string, RemoteTable> remote_table_map = 2;
 }
 
 message RewriteLimitArgs {

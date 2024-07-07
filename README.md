@@ -9,8 +9,11 @@ cd clickHouse && git submodule update --init --depth=1
 ## Build
 ### Linux
 ```shell
-cmake -Bbuild-cmake -H. -GNinja
-cmake --build build-cmake
+export CC=clang-18
+export CXX=clang++-18
+sudo update-alternatives --config c++
+cmake -Bbuild -H. -GNinja
+cmake --build build
 ```
 ### MacOS
 ```shell

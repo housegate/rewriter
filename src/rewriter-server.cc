@@ -44,6 +44,18 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     }
                     DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
                     transformer.setTableNameMap(table_name_map_);
+                    auto remote_table_map = option.table_name_args().remote_table_map();
+                    std::map<std::string, DB::RemoteTable> remote_table_map_;
+                    for (auto &kv : remote_table_map) {
+                        DB::RemoteTable remote_table;
+                        remote_table.addr = kv.second.addr();
+                        remote_table.database_name = kv.second.database();
+                        remote_table.table_name = kv.second.table();
+                        remote_table.user_name = kv.second.user();
+                        remote_table.password = kv.second.password();
+                        remote_table_map_[kv.first] = remote_table;
+                    }
+                    transformer.setRemoteTableMap(remote_table_map_);
                     transformer.transform(ast);
                     break;
                 }

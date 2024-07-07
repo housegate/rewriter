@@ -65,6 +65,17 @@ public:
 //     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
 // };
 
+class RemoteTable 
+{
+public:
+    String addr;
+    String database_name;
+    String table_name;
+    String user_name;
+    String password;
+};
+
+
 class ASTReplaceTransformer : public IASTTransformer
 {
 public:
@@ -78,8 +89,10 @@ public:
     }
     void transform(ASTPtr & ast) const override;
     void setTableNameMap(const std::map<String, String> & table_name_map);
+    void setRemoteTableMap(const std::map<String, RemoteTable> & remote_table_map);
 
     std::map<String, String> table_name_map;
+    std::map<String, RemoteTable> remote_table_map;
 
 protected:
     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;
