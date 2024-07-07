@@ -26,6 +26,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
         DB::ParserQuery parser(end, false);
         try {
             DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
+            std::cout << "before transformation" << ast->dumpTree() << std::endl;
             for (auto &option : request->options()) {
                 switch (option.op())
                 {
@@ -34,6 +35,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     DB::ASTRewriteLimitTransformer limit_transformer = DB::ASTRewriteLimitTransformer();
                     limit_transformer.setLimit(limit);
                     limit_transformer.transform(ast);
+                    std::cout << "after limit transformation" << ast->dumpTree() << std::endl;
                     break;
                 }
                 case rewriter::RewriteOp::TableNameRewrite: {
@@ -57,6 +59,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     }
                     transformer.setRemoteTableMap(remote_table_map_);
                     transformer.transform(ast);
+                    std::cout << "after table name transformation" << ast->dumpTree() << std::endl;
                     break;
                 }
                 case rewriter::RewriteOp::OffsetRewrite: {
@@ -64,6 +67,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     DB::ASTRewriteOffsetTransformer offset_transformer = DB::ASTRewriteOffsetTransformer();
                     offset_transformer.setOffset(offset);
                     offset_transformer.transform(ast);
+                    std::cout << "after offset transformation" << ast->dumpTree() << std::endl;
                     break;
                 }
                 default:
@@ -83,23 +87,23 @@ class RewriterServiceImpl final : public RewriterService::Service {
     }
 };
 
+// Define a constant for the version
+const std::string VERSION = "0.1.0";
+
 void RunServer(uint16_t port) {
+    // Print the version information
+    std::cout << "Rewriter Server Version: " << VERSION << std::endl;
+
     std::string server_address = "0.0.0.0:" + std::to_string(port);
     RewriterServiceImpl service;
 
     grpc::EnableDefaultHealthCheckService(true);
     ServerBuilder builder;
-    // Listen on the given address without any authentication mechanism.
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-    // Register "service" as the instance through which we'll communicate with
-    // clients. In this case it corresponds to an *synchronous* service.
     builder.RegisterService(&service);
-    // Finally assemble the server.
     std::unique_ptr<Server> server(builder.BuildAndStart());
     std::cout << "Server listening on " << server_address << std::endl;
 
-    // Wait for the server to shutdown. Note that some other thread must be
-    // responsible for shutting down the server for this call to ever return.
     server->Wait();
 }
 
