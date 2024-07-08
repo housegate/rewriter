@@ -6,6 +6,14 @@ git clone --recurse-submodules -b main --depth 1 --shallow-submodules https://gi
 cd clickHouse && git submodule update --init --depth=1
 ```
 
+## Install prerequisites
+Linux:
+https://clickhouse.com/docs/en/development/build
+
+MacOS:
+https://clickhouse.com/docs/en/development/build-osx 
+
+
 ## Build
 ### Linux
 ```shell
@@ -17,6 +25,6 @@ cmake --build build
 ```
 ### MacOS
 ```shell
-mkdir build
+cmake -Bbuild -H. -GNinja
 cmake --build build
 ```

@@ -26,7 +26,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
         DB::ParserQuery parser(end, false);
         try {
             DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
-            std::cout << "before transformation" << ast->dumpTree() << std::endl;
+            std::cout << "before transformation " << ast->dumpTree() << std::endl;
             for (auto &option : request->options()) {
                 switch (option.op())
                 {
@@ -35,7 +35,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     DB::ASTRewriteLimitTransformer limit_transformer = DB::ASTRewriteLimitTransformer();
                     limit_transformer.setLimit(limit);
                     limit_transformer.transform(ast);
-                    std::cout << "after limit transformation" << ast->dumpTree() << std::endl;
+                    std::cout << "after limit transformation " << ast->dumpTree() << std::endl;
                     break;
                 }
                 case rewriter::RewriteOp::TableNameRewrite: {
@@ -59,7 +59,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     }
                     transformer.setRemoteTableMap(remote_table_map_);
                     transformer.transform(ast);
-                    std::cout << "after table name transformation" << ast->dumpTree() << std::endl;
+                    std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
                     break;
                 }
                 case rewriter::RewriteOp::OffsetRewrite: {
@@ -67,7 +67,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     DB::ASTRewriteOffsetTransformer offset_transformer = DB::ASTRewriteOffsetTransformer();
                     offset_transformer.setOffset(offset);
                     offset_transformer.transform(ast);
-                    std::cout << "after offset transformation" << ast->dumpTree() << std::endl;
+                    std::cout << "after offset transformation " << ast->dumpTree() << std::endl;
                     break;
                 }
                 default:
@@ -88,7 +88,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
 };
 
 // Define a constant for the version
-const std::string VERSION = "0.1.0";
+const std::string VERSION = "0.1.1";
 
 void RunServer(uint16_t port) {
     // Print the version information

@@ -69,14 +69,16 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
     {
         if (table_expression->database_and_table_name) {
             auto * identifier = table_expression->database_and_table_name->as<ASTTableIdentifier>();
-            if (table_name_map.find(identifier->name()) != table_name_map.end())
+            auto origin_table_name = identifier->name();
+            if (table_name_map.find(origin_table_name) != table_name_map.end())
             {
                 identifier->setShortName(table_name_map.at(identifier->name()));
+                identifier->setAlias(origin_table_name);
             }
-            else if (remote_table_map.find(identifier->name()) != remote_table_map.end())
+            else if (remote_table_map.find(origin_table_name) != remote_table_map.end())
             {
                 // use remote() function to replace table identifier
-                auto remote_table = remote_table_map.at(identifier->name());
+                auto remote_table = remote_table_map.at(origin_table_name);
                 auto remote_function = std::make_shared<ASTFunction>();
                 auto arguments = std::make_shared<ASTExpressionList>();
                 auto addr = std::make_shared<ASTLiteral>(remote_table.addr);
@@ -88,6 +90,7 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
                 table_expression->database_and_table_name = nullptr;
                 table_expression->table_function = DB::makeASTFunction("remote", addr, database_name, table_name, user_name, password);
                 table_expression->children.push_back(table_expression->table_function);
+                table_expression->table_function->setAlias(origin_table_name);
             }
         }
     }
