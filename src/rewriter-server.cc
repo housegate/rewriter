@@ -17,6 +17,10 @@ using rewriter::RewriterService;
 using rewriter::RewriteSQLRequest;
 using rewriter::RewriteSQLResponse;
 
+#ifndef GIT_COMMIT_HASH
+#define GIT_COMMIT_HASH "?"
+#endif
+
 class RewriterServiceImpl final : public RewriterService::Service {
     Status Rewrite(ServerContext* context, const RewriteSQLRequest* request, RewriteSQLResponse* response) override {
         String query = request->sql();
@@ -89,10 +93,11 @@ class RewriterServiceImpl final : public RewriterService::Service {
 
 // Define a constant for the version
 const std::string VERSION = "0.1.1";
+const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {
     // Print the version information
-    std::cout << "Rewriter Server Version: " << VERSION << std::endl;
+    std::cout << "Rewriter Server Version: " << VERSION << " (" << hash << ")" << std::endl;
 
     std::string server_address = "0.0.0.0:" + std::to_string(port);
     RewriterServiceImpl service;

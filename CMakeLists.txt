@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
 project(MyProject)
 
+# Get the current working branch
+execute_process(
+    COMMAND git rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+# Get the latest commit hash
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
 set (CMAKE_CXX_STANDARD 23)
 set (CMAKE_CXX_EXTENSIONS OFF)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -97,6 +111,9 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 # Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
 set (CMAKE_CXX_CLANG_TIDY "")
 
+
+
+
 add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_proto_sources})
 target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries (rewriter_grpc_protos PUBLIC ch_contrib::grpc)
@@ -111,6 +128,7 @@ set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc)
 clickhouse_add_executable(MyExecutable ${SOURCES})
 target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
 target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
+target_compile_definitions(MyExecutable PRIVATE
+    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
 # Link ClickHouse libraries
 target_link_libraries(MyExecutable PRIVATE clickhouse_parsers clickhouse_common_io dbms rewriter_grpc_protos)
