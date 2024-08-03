@@ -111,9 +111,12 @@ public:
         return clone;
     }
     void transform(ASTPtr & ast) const override;
-    void setLimit(size_t limit);
+    void setLimit(size_t limit, bool force_limit = false);
+    void setThreshold(size_t threshold);
 
     size_t limit = 0;
+    bool force_limit = false;
+    size_t threshold = 0;
 
 protected:
     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;

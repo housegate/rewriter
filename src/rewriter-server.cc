@@ -35,9 +35,17 @@ class RewriterServiceImpl final : public RewriterService::Service {
                 switch (option.op())
                 {
                 case rewriter::RewriteOp::LimitRewrite: {
-                    auto limit = option.limit_args().limit();
+                    auto limit = option.limit_args().replace_limit().replace_to();
+                    auto force_limit = option.limit_args().force_limit();
+                    auto threshold = option.limit_args().replace_limit().threshold();
                     DB::ASTRewriteLimitTransformer limit_transformer = DB::ASTRewriteLimitTransformer();
-                    limit_transformer.setLimit(limit);
+                    if (force_limit) {
+                        limit_transformer.setLimit(force_limit, true);
+                    }
+                    else {
+                        limit_transformer.setLimit(limit);
+                        limit_transformer.setThreshold(threshold);
+                    }
                     limit_transformer.transform(ast);
                     std::cout << "after limit transformation " << ast->dumpTree() << std::endl;
                     break;

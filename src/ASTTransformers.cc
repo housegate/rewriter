@@ -109,9 +109,15 @@ void ASTRewriteLimitTransformer::formatImpl(const FormatSettings & settings, For
   settings.ostr << "limit: " << limit;
 }
 
-void ASTRewriteLimitTransformer::setLimit(size_t limit_)
+void ASTRewriteLimitTransformer::setLimit(size_t limit_, bool force_limit_)
 {
   limit = limit_;
+  force_limit = force_limit_;
+}
+
+void ASTRewriteLimitTransformer::setThreshold(size_t threshold_)
+{
+  threshold = threshold_;
 }
 
 void ASTRewriteLimitTransformer::transform(ASTPtr & ast) const
@@ -119,9 +125,30 @@ void ASTRewriteLimitTransformer::transform(ASTPtr & ast) const
   // replace table identifier with table name from map
   if (auto * identifier = ast->as<ASTSelectQuery>())
   {
-    if (limit > 0)
-    {
+    if (limit > 0) {
+      if (force_limit)
+      {
         identifier->setExpression(ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<ASTLiteral>(limit));
+      }
+      else {
+        // Get the original limit value
+        auto limit_expr = identifier->limitLength();
+        if (limit_expr)
+        {
+            auto * limit_literal = limit_expr->as<ASTLiteral>();
+            if (limit_literal)
+            {
+                size_t original_limit = limit_literal->value.safeGet<UInt64>();
+                if (original_limit == 0 || original_limit > threshold)
+                {
+                  identifier->setExpression(ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<ASTLiteral>(limit));
+                }
+            }
+        }
+        else {
+          identifier->setExpression(ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<ASTLiteral>(limit));
+        }
+      }
     }
   }
   else

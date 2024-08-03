@@ -21,7 +21,16 @@ message RewriteTableNameArgs {
 }
 
 message RewriteLimitArgs {
-    int32 limit = 1;
+    int32 limit = 1 [deprecated = true]; // use oneof value instead
+
+    message ReplaceLimit {
+        int32 threshold = 1;
+        int32 replace_to = 2;
+    }
+    oneof value {
+        ReplaceLimit replace_limit = 2; // replace limit if original limit is 0 or greater than [threshold].
+        int32 force_limit = 3; // force replace any limit to this value, no matter what the original limit is.
+    }
 }
 
 message RewriteOffsetArgs {
