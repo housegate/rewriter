@@ -49,6 +49,10 @@ void ASTReplaceTransformer::setRemoteTableMap(const std::map<std::string, DB::Re
   remote_table_map = remote_table_map_;
 }
 
+void ASTReplaceTransformer::setTableWithDatabaseMap(const std::map<std::string, DB::TableWithDatabase> & table_with_database_map_) {
+  table_with_database_map = table_with_database_map_;
+}
+
 void ASTReplaceTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
 {
   settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
@@ -91,6 +95,19 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
                 table_expression->table_function = DB::makeASTFunction("remote", addr, database_name, table_name, user_name, password);
                 table_expression->children.push_back(table_expression->table_function);
                 table_expression->table_function->setAlias(origin_table_name);
+            }
+            else if (table_with_database_map.find(origin_table_name) != table_with_database_map.end())
+            {
+                auto table_with_database = table_with_database_map.at(origin_table_name);
+                if (table_with_database.database_name.empty())
+                {
+                    identifier->setShortName(table_with_database.table_name);
+                }
+                else
+                {
+                    identifier->resetTable(table_with_database.database_name, table_with_database.table_name);
+                }
+                identifier->setAlias(origin_table_name);
             }
         }
     }

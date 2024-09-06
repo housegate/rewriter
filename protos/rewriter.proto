@@ -16,8 +16,13 @@ message RewriteTableNameArgs {
         string user = 4;
         string password = 5;
     }
+    message TableWithDatabase {
+        string database = 1;
+        string table = 2;
+    }
     map<string, string> table_map = 1;
     map<string, RemoteTable> remote_table_map = 2;
+    map<string, TableWithDatabase> table_with_database_map = 3;
 }
 
 message RewriteLimitArgs {

@@ -75,6 +75,13 @@ public:
     String password;
 };
 
+class TableWithDatabase
+{
+public:
+    String database_name;
+    String table_name;
+};
+
 
 class ASTReplaceTransformer : public IASTTransformer
 {
@@ -90,9 +97,11 @@ public:
     void transform(ASTPtr & ast) const override;
     void setTableNameMap(const std::map<String, String> & table_name_map);
     void setRemoteTableMap(const std::map<String, RemoteTable> & remote_table_map);
+    void setTableWithDatabaseMap(const std::map<String, TableWithDatabase> & table_with_database_map);
 
     std::map<String, String> table_name_map;
     std::map<String, RemoteTable> remote_table_map;
+    std::map<String, TableWithDatabase> table_with_database_map;
 
 protected:
     void formatImpl(const FormatSettings & settings, FormatState &, FormatStateStacked) const override;

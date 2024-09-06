@@ -51,13 +51,15 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     break;
                 }
                 case rewriter::RewriteOp::TableNameRewrite: {
+                    DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
+                    // table_name
                     auto table_name_map = option.table_name_args().table_map();
                     std::map<std::string, std::string> table_name_map_;
                     for (auto &kv : table_name_map) {
                         table_name_map_[kv.first] = kv.second;
                     }
-                    DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
                     transformer.setTableNameMap(table_name_map_);
+                    // remote_table
                     auto remote_table_map = option.table_name_args().remote_table_map();
                     std::map<std::string, DB::RemoteTable> remote_table_map_;
                     for (auto &kv : remote_table_map) {
@@ -70,6 +72,16 @@ class RewriterServiceImpl final : public RewriterService::Service {
                         remote_table_map_[kv.first] = remote_table;
                     }
                     transformer.setRemoteTableMap(remote_table_map_);
+                    // table_with_database
+                    auto table_with_database_map = option.table_name_args().table_with_database_map();
+                    std::map<std::string, DB::TableWithDatabase> table_with_database_map_;
+                    for (auto &kv : table_with_database_map) {
+                        DB::TableWithDatabase table_with_database;
+                        table_with_database.database_name = kv.second.database();
+                        table_with_database.table_name = kv.second.table();
+                        table_with_database_map_[kv.first] = table_with_database;
+                    }
+                    transformer.setTableWithDatabaseMap(table_with_database_map_);
                     transformer.transform(ast);
                     std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
                     break;
