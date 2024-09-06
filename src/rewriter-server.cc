@@ -112,7 +112,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
 };
 
 // Define a constant for the version
-const std::string VERSION = "0.1.1";
+const std::string VERSION = "0.1.2";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {
