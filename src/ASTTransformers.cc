@@ -5,6 +5,7 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Common/SipHash.h>
 #include <Common/quoteString.h>
@@ -108,6 +109,13 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
                     identifier->resetTable(table_with_database.database_name, table_with_database.table_name);
                 }
                 identifier->setAlias(origin_table_name);
+            }
+        }
+        else if (table_expression->subquery)
+        {
+            for (auto & child : ast->children)
+            {
+                transform(child);
             }
         }
     }
