@@ -75,10 +75,18 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
         if (table_expression->database_and_table_name) {
             auto * identifier = table_expression->database_and_table_name->as<ASTTableIdentifier>();
             auto origin_table_name = identifier->name();
+            auto origin_alias = identifier->tryGetAlias();
             if (table_name_map.find(origin_table_name) != table_name_map.end())
             {
                 identifier->setShortName(table_name_map.at(identifier->name()));
-                identifier->setAlias(origin_table_name);
+                if (origin_alias != "")
+                {
+                    identifier->setAlias(origin_alias);
+                }
+                else
+                {
+                    identifier->setAlias(origin_table_name);
+                }
             }
             else if (remote_table_map.find(origin_table_name) != remote_table_map.end())
             {
@@ -95,7 +103,14 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
                 table_expression->database_and_table_name = nullptr;
                 table_expression->table_function = DB::makeASTFunction("remote", addr, database_name, table_name, user_name, password);
                 table_expression->children.push_back(table_expression->table_function);
-                table_expression->table_function->setAlias(origin_table_name);
+                if (origin_alias != "")
+                {
+                    table_expression->table_function->setAlias(origin_alias);
+                }
+                else
+                {
+                    table_expression->table_function->setAlias(origin_table_name);
+                }
             }
             else if (table_with_database_map.find(origin_table_name) != table_with_database_map.end())
             {
@@ -108,7 +123,14 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
                 {
                     identifier->resetTable(table_with_database.database_name, table_with_database.table_name);
                 }
-                identifier->setAlias(origin_table_name);
+                if (origin_alias != "")
+                {
+                    identifier->setAlias(origin_alias);
+                }
+                else
+                {
+                    identifier->setAlias(origin_table_name);
+                }
             }
         }
         else if (table_expression->subquery)
