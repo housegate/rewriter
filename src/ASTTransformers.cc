@@ -284,6 +284,7 @@ void ASTSettingsTransformer::transform(ASTPtr & ast) const
             }
         } else {
             auto new_settings = std::make_shared<ASTSetQuery>();
+            new_settings->is_standalone = false;
             for (const auto & setting : settings_) {
                 switch (setting.value_type) {
                     case rewriter::SettingType::String: {
