@@ -94,6 +94,18 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     std::cout << "after offset transformation " << ast->dumpTree() << std::endl;
                     break;
                 }
+                case rewriter::RewriteOp::SettingsRewrite: {
+                    auto settings = option.settings_args().settings();
+                    DB::ASTSettingsTransformer settings_transformer = DB::ASTSettingsTransformer();
+                    std::map<std::string, std::string> settings_;
+                    for (auto &setting : settings) {
+                        settings_[setting.key()] = setting.value();
+                    }
+                    settings_transformer.setSettings(settings_);
+                    settings_transformer.transform(ast);
+                    std::cout << "after settings transformation " << ast->dumpTree() << std::endl;
+                    break;
+                }
                 default:
                     break;
                 }
@@ -112,7 +124,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
 };
 
 // Define a constant for the version
-const std::string VERSION = "0.1.4";
+const std::string VERSION = "0.1.5";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {

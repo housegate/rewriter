@@ -1,11 +1,13 @@
 syntax = "proto3";
 
-package rewriter;
+package rewriter; // Don't change this
+option go_package = "sentioxyz/sentio/service/analytic/clients";
 
 enum RewriteOp {
     TableNameRewrite = 0;
     LimitRewrite = 1;
     OffsetRewrite = 2;
+    SettingsRewrite = 3;
 }
 
 message RewriteTableNameArgs {
@@ -42,12 +44,21 @@ message RewriteOffsetArgs {
     int32 offset = 1;
 }
 
+message RewriteSettingsArgs {
+    message Setting {
+        string key = 1;
+        string value = 2;
+    }
+    repeated Setting settings = 1;
+}
+
 message RewriteOption {
     RewriteOp op = 1;
     oneof value {
         RewriteTableNameArgs table_name_args = 2;
         RewriteLimitArgs limit_args = 3;
         RewriteOffsetArgs offset_args = 4;
+        RewriteSettingsArgs settings_args = 5;
     }
 }
 

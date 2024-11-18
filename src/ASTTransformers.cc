@@ -5,11 +5,14 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTSetQuery.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Common/SipHash.h>
+#include <Common/SettingsChanges.h>
 #include <Common/quoteString.h>
 #include <Common/re2.h>
+#include <Core/Field.h>
 #include <IO/Operators.h>
 #include <stack>
 
@@ -236,4 +239,51 @@ void ASTRewriteOffsetTransformer::transform(ASTPtr & ast) const
     }
   }
 }
+
+void ASTSettingsTransformer::formatImpl(const FormatSettings & format_settings, FormatState & state, FormatStateStacked frame) const
+{
+  format_settings.ostr << (format_settings.hilite ? hilite_keyword : "") << "APPLY" << (format_settings.hilite ? hilite_none : "") << " ";
+  if (!settings_.empty()) {
+    format_settings.ostr << "settings_map: ";
+    for (const auto & kv : settings_)
+    {
+        format_settings.ostr << kv.first << " : " << kv.second << ", ";
+    }
+  }
+}
+
+void ASTSettingsTransformer::setSettings(const std::map<std::string, std::string> & settings)
+{
+  settings_ = settings;
+}
+
+void ASTSettingsTransformer::transform(ASTPtr & ast) const
+{
+    if (auto * identifier = ast->as<ASTSelectQuery>()) {
+        if (settings_.size() <= 0) {
+            return;
+        }
+        auto settings_expr = identifier->settings();
+        if (settings_expr) {
+            auto * settings = settings_expr->as<ASTSetQuery>();
+            if (settings) {
+                for (const auto & kv : settings_) {
+                    settings->changes.setSetting(std::string_view(kv.first), Field(kv.second));
+                }
+            }
+        } else {
+            auto new_settings = std::make_shared<ASTSetQuery>();
+            for (const auto & kv : settings_) {
+                new_settings->changes.setSetting(std::string_view(kv.first), Field(kv.second));
+            }
+            identifier->setExpression(ASTSelectQuery::Expression::SETTINGS, new_settings);
+        }
+    }
+    else {
+        for (auto & child : ast->children) {
+            transform(child);
+        }
+    }
+}
+
 }
