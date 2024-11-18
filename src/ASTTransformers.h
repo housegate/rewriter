@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Parsers/IAST.h>
-
+#include "rewriter.grpc.pb.h"
 
 namespace re2 {
     class RE2;
@@ -44,6 +44,15 @@ class TableWithDatabase {
 public:
     String database_name;
     String table_name;
+};
+
+class Setting {
+public:
+    String name;
+    rewriter::SettingType value_type;
+    String string_value;
+    size_t int_value;
+    bool bool_value;
 };
 
 class ASTReplaceTransformer : public IASTTransformer {
@@ -137,9 +146,9 @@ public:
 
     void transform(ASTPtr &ast) const override;
 
-    void setSettings(const std::map <String, String> &settings);
+    void setSettings(const std::vector<Setting> &settings);
 
-    std::map <String, String> settings_;
+    std::vector<Setting> settings_;
 protected:
     void formatImpl(const FormatSettings &format_settings, FormatState &, FormatStateStacked) const override;
 };

@@ -244,15 +244,11 @@ void ASTSettingsTransformer::formatImpl(const FormatSettings & format_settings, 
 {
   format_settings.ostr << (format_settings.hilite ? hilite_keyword : "") << "APPLY" << (format_settings.hilite ? hilite_none : "") << " ";
   if (!settings_.empty()) {
-    format_settings.ostr << "settings_map: ";
-    for (const auto & kv : settings_)
-    {
-        format_settings.ostr << kv.first << " : " << kv.second << ", ";
-    }
+    format_settings.ostr << "settings: " << settings_.size();
   }
 }
 
-void ASTSettingsTransformer::setSettings(const std::map<std::string, std::string> & settings)
+void ASTSettingsTransformer::setSettings(const std::vector<Setting> &settings)
 {
   settings_ = settings;
 }
@@ -267,14 +263,44 @@ void ASTSettingsTransformer::transform(ASTPtr & ast) const
         if (settings_expr) {
             auto * settings = settings_expr->as<ASTSetQuery>();
             if (settings) {
-                for (const auto & kv : settings_) {
-                    settings->changes.setSetting(std::string_view(kv.first), Field(kv.second));
+                for (const auto & setting : settings_) {
+                    switch (setting.value_type) {
+                        case rewriter::SettingType::String: {
+                            settings->changes.setSetting(std::string_view(setting.name), Field(setting.string_value));
+                            break;
+                        }
+                        case rewriter::SettingType::Int: {
+                            settings->changes.setSetting(std::string_view(setting.name), Field(setting.int_value));
+                            break;
+                        }
+                        case rewriter::SettingType::Bool: {
+                            settings->changes.setSetting(std::string_view(setting.name), Field(setting.bool_value));
+                            break;
+                        }
+                        default:
+                            break;
+                    }
                 }
             }
         } else {
             auto new_settings = std::make_shared<ASTSetQuery>();
-            for (const auto & kv : settings_) {
-                new_settings->changes.setSetting(std::string_view(kv.first), Field(kv.second));
+            for (const auto & setting : settings_) {
+                switch (setting.value_type) {
+                    case rewriter::SettingType::String: {
+                        new_settings->changes.setSetting(std::string_view(setting.name), Field(setting.string_value));
+                        break;
+                    }
+                    case rewriter::SettingType::Int: {
+                        new_settings->changes.setSetting(std::string_view(setting.name), Field(setting.int_value));
+                        break;
+                    }
+                    case rewriter::SettingType::Bool: {
+                        new_settings->changes.setSetting(std::string_view(setting.name), Field(setting.bool_value));
+                        break;
+                    }
+                    default:
+                        break;
+                }
             }
             identifier->setExpression(ASTSelectQuery::Expression::SETTINGS, new_settings);
         }

@@ -97,9 +97,28 @@ class RewriterServiceImpl final : public RewriterService::Service {
                 case rewriter::RewriteOp::SettingsRewrite: {
                     auto settings = option.settings_args().settings();
                     DB::ASTSettingsTransformer settings_transformer = DB::ASTSettingsTransformer();
-                    std::map<std::string, std::string> settings_;
-                    for (auto &setting : settings) {
-                        settings_[setting.key()] = setting.value();
+                    std::vector<DB::Setting> settings_;
+                    for (const auto & setting : settings) {
+                        DB::Setting s;
+                        s.name = setting.key();
+                        s.value_type = setting.type();
+                        switch (setting.type()) {
+                            case rewriter::SettingType::String: {
+                                s.string_value = setting.string_value();
+                                break;
+                            }
+                            case rewriter::SettingType::Int: {
+                                s.int_value = setting.int_value();
+                                break;
+                            }
+                            case rewriter::SettingType::Bool: {
+                                s.bool_value = setting.bool_value();
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                        settings_.push_back(s);
                     }
                     settings_transformer.setSettings(settings_);
                     settings_transformer.transform(ast);
@@ -124,7 +143,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
 };
 
 // Define a constant for the version
-const std::string VERSION = "0.1.5";
+const std::string VERSION = "0.1.6";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {
