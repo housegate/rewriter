@@ -6,6 +6,7 @@
 #include <Parsers/ParserQuery.h>
 #include <Parsers/formatAST.h>
 #include <Parsers/parseQuery.h>
+#include <Parsers/IdentifierQuotingStyle.h>
 #include <IO/WriteBufferFromString.h>
 #include "ASTTransformers.h"
 
@@ -129,7 +130,11 @@ class RewriterServiceImpl final : public RewriterService::Service {
                     break;
                 }
             }
-            response->set_sql_after_rewrite(ast->formatWithPossiblyHidingSensitiveData(0, true, true));
+
+            DB::IdentifierQuotingRule identifier_quoting_rule_ = DB::IdentifierQuotingRule::WhenNecessary;
+            DB::IdentifierQuotingStyle identifier_quoting_style_ = DB::IdentifierQuotingStyle::Backticks;
+            response->set_sql_after_rewrite(ast->formatWithPossiblyHidingSensitiveData(0, true, true, false,
+                                                                                       identifier_quoting_rule_, identifier_quoting_style_));
             response->set_message("success");
             response->set_code(rewriter::RewriteCode::Success);
             return Status::OK;
