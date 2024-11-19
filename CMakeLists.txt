@@ -124,11 +124,11 @@ message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc)
 
 # Add your executable or library
-# clickhouse_add_executable(MyExecutable src/rewriter-server.cc)
-clickhouse_add_executable(MyExecutable ${SOURCES})
-target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
-target_include_directories(MyExecutable SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(MyExecutable PRIVATE
+# clickhouse_add_executable(clickhouse_sentio_rewriter src/rewriter-server.cc)
+clickhouse_add_executable(clickhouse_sentio_rewriter ${SOURCES})
+target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
+target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(clickhouse_sentio_rewriter PRIVATE
     "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
 # Link ClickHouse libraries
-target_link_libraries(MyExecutable PRIVATE clickhouse_parsers clickhouse_common_io dbms rewriter_grpc_protos)
+target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos)
