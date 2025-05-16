@@ -48,6 +48,7 @@ enum SettingType {
     String = 0;
     Bool = 1;
     Int = 2;
+    Uint64 = 3;
 }
 
 message RewriteSettingsArgs {
@@ -58,6 +59,7 @@ message RewriteSettingsArgs {
             string string_value = 3;
             bool bool_value = 4;
             int32 int_value = 5;
+            uint64 uint64_value = 6;
         }
     }
     repeated Setting settings = 1;

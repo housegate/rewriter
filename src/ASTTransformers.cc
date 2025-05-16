@@ -277,6 +277,10 @@ void ASTSettingsTransformer::transform(ASTPtr & ast) const
                             settings->changes.setSetting(std::string_view(setting.name), Field(setting.bool_value));
                             break;
                         }
+                        case rewriter::SettingType::Uint64: {
+                            settings->changes.setSetting(std::string_view(setting.name), Field(setting.uint64_value));
+                            break;
+                        }
                         default:
                             break;
                     }
@@ -297,6 +301,10 @@ void ASTSettingsTransformer::transform(ASTPtr & ast) const
                     }
                     case rewriter::SettingType::Bool: {
                         new_settings->changes.setSetting(std::string_view(setting.name), Field(setting.bool_value));
+                        break;
+                    }
+                    case rewriter::SettingType::Uint64: {
+                        new_settings->changes.setSetting(std::string_view(setting.name), Field(setting.uint64_value));
                         break;
                     }
                     default:
