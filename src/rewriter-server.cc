@@ -116,6 +116,10 @@ class RewriterServiceImpl final : public RewriterService::Service {
                                 s.bool_value = setting.bool_value();
                                 break;
                             }
+                            case rewriter::SettingType::Uint64: {
+                                s.uint64_value = setting.uint64_value();
+                                break;
+                            }
                             default:
                                 break;
                         }

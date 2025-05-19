@@ -53,6 +53,7 @@ public:
     String string_value;
     size_t int_value;
     bool bool_value;
+    uint64_t uint64_value;
 };
 
 class ASTReplaceTransformer : public IASTTransformer {
