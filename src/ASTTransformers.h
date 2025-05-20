@@ -20,7 +20,7 @@ public:
     }
 
 protected:
-    void formatImpl(const FormatSettings &settings, FormatState &state, FormatStateStacked frame) const override;
+    void format(WriteBuffer & ostr, const FormatSettings & settings) const;
 };
 
 class IASTTransformer : public IAST {
@@ -81,7 +81,7 @@ public:
     std::map <String, TableWithDatabase> table_with_database_map;
 
 protected:
-    void formatImpl(const FormatSettings &settings, FormatState &, FormatStateStacked) const override;
+    void format(WriteBuffer & ostr, const FormatSettings & settings) const;
 };
 
 
@@ -108,7 +108,7 @@ public:
     size_t threshold = 0;
 
 protected:
-    void formatImpl(const FormatSettings &settings, FormatState &, FormatStateStacked) const override;
+    void format(WriteBuffer & ostr, const FormatSettings & settings) const;
 };
 
 class ASTRewriteOffsetTransformer : public IASTTransformer {
@@ -130,7 +130,7 @@ public:
     size_t offset = 0;
 
 protected:
-    void formatImpl(const FormatSettings &settings, FormatState &, FormatStateStacked) const override;
+    void format(WriteBuffer & ostr, const FormatSettings & settings) const;
 };
 
 class ASTSettingsTransformer : public IASTTransformer {
@@ -151,7 +151,7 @@ public:
 
     std::vector<Setting> settings_;
 protected:
-    void formatImpl(const FormatSettings &format_settings, FormatState &, FormatStateStacked) const override;
+    void format(WriteBuffer & ostr, const FormatSettings & settings) const;
 };
 
 }

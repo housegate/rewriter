@@ -26,12 +26,12 @@ namespace ErrorCodes
   extern const int CANNOT_COMPILE_REGEXP;
 }
 
-void ASTTransformerList::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+void ASTTransformerList::format(WriteBuffer & ostr, const FormatSettings & settings) const
 {
   for (const auto & child : children)
   {
-      settings.ostr << ' ';
-      child->formatImpl(settings, state, frame);
+      ostr << ' ';
+      child->format(ostr, settings);
   }
 }
 
@@ -57,15 +57,15 @@ void ASTReplaceTransformer::setTableWithDatabaseMap(const std::map<std::string, 
   table_with_database_map = table_with_database_map_;
 }
 
-void ASTReplaceTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+void ASTReplaceTransformer::format(WriteBuffer & ostr, const FormatSettings & settings) const
 {
-  settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
+  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
 
   if (!table_name_map.empty()) {
-    settings.ostr << "table_name_map: ";
+    ostr << "table_name_map: ";
     for (const auto & kv : table_name_map)
     {
-        settings.ostr << kv.first << " -> " << kv.second << ", ";
+        ostr << kv.first << " -> " << kv.second << ", ";
     }
   }
 }
@@ -153,10 +153,10 @@ void ASTReplaceTransformer::transform(ASTPtr & ast) const
     }
 }
 
-void ASTRewriteLimitTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+void ASTRewriteLimitTransformer::format(WriteBuffer & ostr, const FormatSettings & settings) const
 {
-  settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
-  settings.ostr << "limit: " << limit;
+  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
+  ostr << "limit: " << limit;
 }
 
 void ASTRewriteLimitTransformer::setLimit(size_t limit_, bool force_limit_)
@@ -210,10 +210,10 @@ void ASTRewriteLimitTransformer::transform(ASTPtr & ast) const
   }
 }
 
-void ASTRewriteOffsetTransformer::formatImpl(const FormatSettings & settings, FormatState & state, FormatStateStacked frame) const
+void ASTRewriteOffsetTransformer::format(WriteBuffer & ostr, const FormatSettings & settings) const
 {
-  settings.ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
-  settings.ostr << "offset: " << offset;
+  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
+  ostr << "offset: " << offset;
 }
 
 void ASTRewriteOffsetTransformer::setOffset(size_t offset_)
@@ -240,11 +240,11 @@ void ASTRewriteOffsetTransformer::transform(ASTPtr & ast) const
   }
 }
 
-void ASTSettingsTransformer::formatImpl(const FormatSettings & format_settings, FormatState & state, FormatStateStacked frame) const
+void ASTSettingsTransformer::format(WriteBuffer & ostr, const FormatSettings & settings) const
 {
-  format_settings.ostr << (format_settings.hilite ? hilite_keyword : "") << "APPLY" << (format_settings.hilite ? hilite_none : "") << " ";
+  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "") << " ";
   if (!settings_.empty()) {
-    format_settings.ostr << "settings: " << settings_.size();
+    ostr << "settings: " << settings_.size();
   }
 }
 

@@ -47,7 +47,7 @@ endif ()
 if (OS_DARWIN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-U,_inside_main")
-    
+
     set (DEFAULT_LIBS "-nodefaultlibs")
 
     set (DEFAULT_LIBS "${DEFAULT_LIBS} ${COVERAGE_OPTION} -lc -lm -lpthread -ldl")
@@ -110,9 +110,6 @@ PROTOBUF_GENERATE_GRPC_CPP(rewriter_grpc_proto_sources rewriter_grpc_proto_heade
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 # Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
 set (CMAKE_CXX_CLANG_TIDY "")
-
-
-
 
 add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_proto_sources})
 target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})

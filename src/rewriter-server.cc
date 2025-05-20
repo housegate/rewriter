@@ -4,7 +4,6 @@
 #include <iostream>
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ParserQuery.h>
-#include <Parsers/formatAST.h>
 #include <Parsers/parseQuery.h>
 #include <Parsers/IdentifierQuotingStyle.h>
 #include <IO/WriteBufferFromString.h>
