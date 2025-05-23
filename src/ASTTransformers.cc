@@ -41,18 +41,18 @@ void IASTTransformer::transform(const ASTPtr &transformer, ASTPtr &ast) {
 }
 
 void ASTReplaceTransformer::setTableNameMap(
-    const std::map<std::string, std::string> &table_name_map_) {
+  const std::map<std::string, std::string> &table_name_map_) {
   table_name_map = table_name_map_;
 }
 
 void ASTReplaceTransformer::setRemoteTableMap(
-    const std::map<std::string, DB::RemoteTable> &remote_table_map_) {
+  const std::map<std::string, DB::RemoteTable> &remote_table_map_) {
   remote_table_map = remote_table_map_;
 }
 
 void ASTReplaceTransformer::setTableWithDatabaseMap(
-    const std::map<std::string, DB::TableWithDatabase>
-        &table_with_database_map_) {
+  const std::map<std::string, DB::TableWithDatabase>
+    &table_with_database_map_) {
   table_with_database_map = table_with_database_map_;
 }
 
@@ -74,7 +74,7 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
   if (auto *table_expression = ast->as<ASTTableExpression>()) {
     if (table_expression->database_and_table_name) {
       auto *identifier =
-          table_expression->database_and_table_name->as<ASTTableIdentifier>();
+        table_expression->database_and_table_name->as<ASTTableIdentifier>();
       auto origin_table_name = identifier->name();
       auto origin_alias = identifier->tryGetAlias();
       if (table_name_map.find(origin_table_name) != table_name_map.end()) {
@@ -92,14 +92,14 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
         auto arguments = std::make_shared<ASTExpressionList>();
         auto addr = std::make_shared<ASTLiteral>(remote_table.addr);
         auto database_name =
-            std::make_shared<ASTLiteral>(remote_table.database_name);
+          std::make_shared<ASTLiteral>(remote_table.database_name);
         auto table_name = std::make_shared<ASTLiteral>(remote_table.table_name);
         auto user_name = std::make_shared<ASTLiteral>(remote_table.user_name);
         auto password = std::make_shared<ASTLiteral>(remote_table.password);
         table_expression->children.clear();
         table_expression->database_and_table_name = nullptr;
         table_expression->table_function = DB::makeASTFunction(
-            "remote", addr, database_name, table_name, user_name, password);
+          "remote", addr, database_name, table_name, user_name, password);
         table_expression->children.push_back(table_expression->table_function);
         if (origin_alias != "") {
           table_expression->table_function->setAlias(origin_alias);
@@ -109,7 +109,7 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
       } else if (table_with_database_map.find(origin_table_name) !=
                  table_with_database_map.end()) {
         auto table_with_database =
-            table_with_database_map.at(origin_table_name);
+          table_with_database_map.at(origin_table_name);
         if (table_with_database.database_name.empty()) {
           identifier->setShortName(table_with_database.table_name);
         } else {
@@ -166,8 +166,8 @@ void ASTRewriteLimitTransformer::transform(ASTPtr &ast) const {
             size_t original_limit = limit_literal->value.safeGet<UInt64>();
             if (original_limit == 0 || original_limit > threshold) {
               identifier->setExpression(
-                  ASTSelectQuery::Expression::LIMIT_LENGTH,
-                  std::make_shared<ASTLiteral>(limit));
+                ASTSelectQuery::Expression::LIMIT_LENGTH,
+                std::make_shared<ASTLiteral>(limit));
             }
           }
         } else {

@@ -41,7 +41,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
             auto force_limit = option.limit_args().force_limit();
             auto threshold = option.limit_args().replace_limit().threshold();
             DB::ASTRewriteLimitTransformer limit_transformer =
-                DB::ASTRewriteLimitTransformer();
+              DB::ASTRewriteLimitTransformer();
             if (force_limit) {
               limit_transformer.setLimit(force_limit, true);
             } else {
@@ -77,9 +77,9 @@ class RewriterServiceImpl final : public RewriterService::Service {
             transformer.setRemoteTableMap(remote_table_map_);
             // table_with_database
             auto table_with_database_map =
-                option.table_name_args().table_with_database_map();
+              option.table_name_args().table_with_database_map();
             std::map<std::string, DB::TableWithDatabase>
-                table_with_database_map_;
+              table_with_database_map_;
             for (auto &kv : table_with_database_map) {
               DB::TableWithDatabase table_with_database;
               table_with_database.database_name = kv.second.database();
@@ -95,7 +95,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
           case rewriter::RewriteOp::OffsetRewrite: {
             auto offset = option.offset_args().offset();
             DB::ASTRewriteOffsetTransformer offset_transformer =
-                DB::ASTRewriteOffsetTransformer();
+              DB::ASTRewriteOffsetTransformer();
             offset_transformer.setOffset(offset);
             offset_transformer.transform(ast);
             std::cout << "after offset transformation " << ast->dumpTree()
@@ -105,7 +105,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
           case rewriter::RewriteOp::SettingsRewrite: {
             auto settings = option.settings_args().settings();
             DB::ASTSettingsTransformer settings_transformer =
-                DB::ASTSettingsTransformer();
+              DB::ASTSettingsTransformer();
             std::vector<DB::Setting> settings_;
             for (const auto &setting : settings) {
               DB::Setting s;
@@ -145,13 +145,13 @@ class RewriterServiceImpl final : public RewriterService::Service {
       }
 
       DB::IdentifierQuotingRule identifier_quoting_rule_ =
-          DB::IdentifierQuotingRule::WhenNecessary;
+        DB::IdentifierQuotingRule::WhenNecessary;
       DB::IdentifierQuotingStyle identifier_quoting_style_ =
-          DB::IdentifierQuotingStyle::Backticks;
+        DB::IdentifierQuotingStyle::Backticks;
       response->set_sql_after_rewrite(
-          ast->formatWithPossiblyHidingSensitiveData(
-              0, true, true, false, identifier_quoting_rule_,
-              identifier_quoting_style_));
+        ast->formatWithPossiblyHidingSensitiveData(0, true, true, false,
+                                                   identifier_quoting_rule_,
+                                                   identifier_quoting_style_));
       response->set_message("success");
       response->set_code(rewriter::RewriteCode::Success);
       return Status::OK;
