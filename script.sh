@@ -65,7 +65,10 @@ build() {
     ln -s . clickHouse
     popd > /dev/null
 
-    cmake -B build -S . -GNinja
+    cmake -B build -S . -GNinja \
+      -DENABLE_RUST=OFF \
+      -DENABLE_TESTS=OFF \
+      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
 
     ARCH=$(uname -m)
     INC=clickHouse/contrib/openssl-cmake/linux_${ARCH}/include
@@ -88,7 +91,7 @@ build() {
         echo 4
     )
     echo ">>> Building with -j$JOBS"
-    ninja -C build -j"$JOBS"
+    ninja -C build -j"$JOBS" clickhouse_sentio_rewriter
 
     # 清理子模块改动
     git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null

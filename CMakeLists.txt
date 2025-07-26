@@ -101,6 +101,17 @@ if (OS_LINUX)
     set(CMAKE_C_STANDARD_LIBRARIES ${DEFAULT_LIBS})
 endif()
 
+set(_LLD_PARALLEL "-Wl,--threads=16")
+set(CMAKE_EXE_LINKER_FLAGS
+    "${CMAKE_EXE_LINKER_FLAGS} ${_LLD_PARALLEL}"
+    CACHE STRING "Global exe linker flags" FORCE)
+set(CMAKE_SHARED_LINKER_FLAGS
+    "${CMAKE_SHARED_LINKER_FLAGS} ${_LLD_PARALLEL}"
+    CACHE STRING "Global shared linker flags" FORCE)
+set(CMAKE_MODULE_LINKER_FLAGS
+    "${CMAKE_MODULE_LINKER_FLAGS} ${_LLD_PARALLEL}"
+    CACHE STRING "Global module linker flags" FORCE)
+
 # Add ClickHouse submodule
 add_subdirectory(clickHouse)
 no_warning(enum-constexpr-conversion)
@@ -128,4 +139,4 @@ target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURR
 target_compile_definitions(clickhouse_sentio_rewriter PRIVATE
     "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
 # Link ClickHouse libraries
-target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos)
+target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos absl::debugging_internal)
