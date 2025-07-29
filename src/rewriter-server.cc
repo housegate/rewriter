@@ -23,9 +23,15 @@ using rewriter::RewriteSQLResponse;
 #define GIT_COMMIT_HASH "?"
 #endif
 
+#ifndef REWRITER_NO_MAIN
+#define REWRITER_NO_MAIN 0
+#endif
+
 class RewriterServiceImpl final : public RewriterService::Service {
-  Status Rewrite(ServerContext *context, const RewriteSQLRequest *request,
-                 RewriteSQLResponse *response) override {
+public:
+  Status Rewrite(ServerContext *context,
+    const RewriteSQLRequest *request,
+    RewriteSQLResponse *response) override {
     String query = request->sql();
     const char *pos = query.data();
     const char *end = pos + query.size();
@@ -34,6 +40,14 @@ class RewriterServiceImpl final : public RewriterService::Service {
     try {
       DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
       std::cout << "before transformation " << ast->dumpTree() << std::endl;
+
+      std::map<std::string, std::string> cte_map;
+      std::map<std::string, std::string> table_name_map_;
+      std::map<std::string, DB::RemoteTable> remote_table_map_;
+      std::map<std::string, DB::TableWithDatabase> table_with_database_map_;
+      bool has_table_name_written = false;
+
+      // TODO: 把取req map的逻辑和应用transform的逻辑分离, 需判断options是否会存在多个同一op
       for (auto &option : request->options()) {
         switch (option.op()) {
           case rewriter::RewriteOp::LimitRewrite: {
@@ -50,46 +64,55 @@ class RewriterServiceImpl final : public RewriterService::Service {
             }
             limit_transformer.transform(ast);
             std::cout << "after limit transformation " << ast->dumpTree()
-                      << std::endl;
+              << std::endl;
             break;
           }
           case rewriter::RewriteOp::TableNameRewrite: {
-            DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
             // table_name
-            auto table_name_map = option.table_name_args().table_map();
-            std::map<std::string, std::string> table_name_map_;
-            for (auto &kv : table_name_map) {
-              table_name_map_[kv.first] = kv.second;
+            {
+              auto table_name_map = option.rewriter::RewriteOption::table_name_args().
+                                           rewriter::RewriteTableNameArgs::table_map();
+              table_name_map_.clear();
+              for (auto &kv : table_name_map) {
+                table_name_map_[kv.first] = kv.second;
+              }
             }
-            transformer.setTableNameMap(table_name_map_);
             // remote_table
-            auto remote_table_map = option.table_name_args().remote_table_map();
-            std::map<std::string, DB::RemoteTable> remote_table_map_;
-            for (auto &kv : remote_table_map) {
-              DB::RemoteTable remote_table;
-              remote_table.addr = kv.second.addr();
-              remote_table.database_name = kv.second.database();
-              remote_table.table_name = kv.second.table();
-              remote_table.user_name = kv.second.user();
-              remote_table.password = kv.second.password();
-              remote_table_map_[kv.first] = remote_table;
+            {
+              auto remote_table_map = option.rewriter::RewriteOption::table_name_args().
+                                             rewriter::RewriteTableNameArgs::remote_table_map();
+              remote_table_map_.clear();
+              for (auto &kv : remote_table_map) {
+                DB::RemoteTable remote_table;
+                remote_table.addr = kv.second.rewriter::RewriteTableNameArgs_RemoteTable::addr();
+                remote_table.database_name = kv.second.
+                                                rewriter::RewriteTableNameArgs_RemoteTable::database();
+                remote_table.table_name = kv.second.
+                                             rewriter::RewriteTableNameArgs_RemoteTable::table();
+                remote_table.user_name = kv.second.
+                                            rewriter::RewriteTableNameArgs_RemoteTable::user();
+                remote_table.password = kv.second.
+                                           rewriter::RewriteTableNameArgs_RemoteTable::password();
+                remote_table_map_[kv.first] = remote_table;
+              }
             }
-            transformer.setRemoteTableMap(remote_table_map_);
             // table_with_database
-            auto table_with_database_map =
-              option.table_name_args().table_with_database_map();
-            std::map<std::string, DB::TableWithDatabase>
-              table_with_database_map_;
-            for (auto &kv : table_with_database_map) {
-              DB::TableWithDatabase table_with_database;
-              table_with_database.database_name = kv.second.database();
-              table_with_database.table_name = kv.second.table();
-              table_with_database_map_[kv.first] = table_with_database;
+            {
+              auto table_with_database_map =
+                option.rewriter::RewriteOption::table_name_args().
+                       rewriter::RewriteTableNameArgs::table_with_database_map();
+              table_with_database_map_.clear();
+              for (auto &kv : table_with_database_map) {
+                DB::TableWithDatabase table_with_database;
+                table_with_database.database_name = kv.second.
+                                                       rewriter::RewriteTableNameArgs_TableWithDatabase::database();
+                table_with_database.table_name = kv.second.
+                                                    rewriter::RewriteTableNameArgs_TableWithDatabase::table();
+                table_with_database_map_[kv.first] = table_with_database;
+              }
             }
-            transformer.setTableWithDatabaseMap(table_with_database_map_);
-            transformer.transform(ast);
-            std::cout << "after table name transformation " << ast->dumpTree()
-                      << std::endl;
+            doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
+            has_table_name_written = true;
             break;
           }
           case rewriter::RewriteOp::OffsetRewrite: {
@@ -99,7 +122,7 @@ class RewriterServiceImpl final : public RewriterService::Service {
             offset_transformer.setOffset(offset);
             offset_transformer.transform(ast);
             std::cout << "after offset transformation " << ast->dumpTree()
-                      << std::endl;
+              << std::endl;
             break;
           }
           case rewriter::RewriteOp::SettingsRewrite: {
@@ -136,7 +159,28 @@ class RewriterServiceImpl final : public RewriterService::Service {
             settings_transformer.setSettings(settings_);
             settings_transformer.transform(ast);
             std::cout << "after settings transformation " << ast->dumpTree()
-                      << std::endl;
+              << std::endl;
+            break;
+          }
+          case rewriter::RewriteOp::CTERewrite: {
+            DB::ASTRewriteCTETransformer cte_transformer = DB::ASTRewriteCTETransformer();
+            auto ctes = option.cte_args().cte_map();
+            cte_map.clear();
+            std::cout << "============cte map start================" << std::endl;
+            for (auto &kv : ctes) {
+              cte_map[kv.first] = kv.second;
+              std::cout << "key is :" << kv.first << ", and val is: " << kv.second << std::endl;
+            }
+            std::cout << "============cte map end================" << std::endl;
+            cte_transformer.setCTEMap(cte_map);
+            auto before_rewrite = ast->formatForLogging();
+            cte_transformer.transform(ast);
+            auto after_rewrite = ast->formatForLogging();
+            std::cout << "before cte rewrite query: " << before_rewrite
+              << ";\nafter cte rewrite query: " << after_rewrite << std::endl;
+            if (has_table_name_written) {
+              doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
+            }
             break;
           }
           default:
@@ -148,10 +192,15 @@ class RewriterServiceImpl final : public RewriterService::Service {
         DB::IdentifierQuotingRule::WhenNecessary;
       DB::IdentifierQuotingStyle identifier_quoting_style_ =
         DB::IdentifierQuotingStyle::Backticks;
-      response->set_sql_after_rewrite(
-        ast->formatWithPossiblyHidingSensitiveData(0, true, true, false,
-                                                   identifier_quoting_rule_,
-                                                   identifier_quoting_style_));
+      std::string result_sql = ast->formatWithPossiblyHidingSensitiveData(
+        0,
+        true,
+        true,
+        false,
+        identifier_quoting_rule_,
+        identifier_quoting_style_);
+
+      response->set_sql_after_rewrite(result_sql);
       response->set_message("success");
       response->set_code(rewriter::RewriteCode::Success);
       return Status::OK;
@@ -162,16 +211,37 @@ class RewriterServiceImpl final : public RewriterService::Service {
       return Status::OK;
     }
   }
+
+private:
+  void doTableNameRewrite(DB::ASTPtr ast,
+    const std::map<std::string, std::string> &table_name_map_,
+    const std::map<std::string, DB::RemoteTable> &remote_table_map_,
+    const std::map<std::string, DB::TableWithDatabase> &table_with_database_map_) {
+    DB::ASTReplaceTransformer transformer = DB::ASTReplaceTransformer();
+    transformer.setTableNameMap(table_name_map_);
+    transformer.setRemoteTableMap(remote_table_map_);
+    transformer.setTableWithDatabaseMap(table_with_database_map_);
+    transformer.transform(ast);
+    std::cout << "after table name transformation " << ast->formatForLogging()
+      << std::endl;
+  }
+
+public:
+  Status RewriteForTest(ServerContext *context,
+    const RewriteSQLRequest *request,
+    RewriteSQLResponse *response) {
+    return Rewrite(context, request, response);
+  }
 };
 
 // Define a constant for the version
-const std::string VERSION = "0.1.7";
+const std::string VERSION = "0.1.8";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {
   // Print the version information
   std::cout << "Rewriter Server Version: " << VERSION << " (" << hash << ")"
-            << std::endl;
+    << std::endl;
 
   std::string server_address = "0.0.0.0:" + std::to_string(port);
   RewriterServiceImpl service;
@@ -186,6 +256,7 @@ void RunServer(uint16_t port) {
   server->Wait();
 }
 
+#if !REWRITER_NO_MAIN
 int main(int argc, char **argv) {
   if (argc > 1) {
     // Convert the first command line argument to an integer for the port
@@ -197,3 +268,4 @@ int main(int argc, char **argv) {
   }
   return 0;
 }
+#endif

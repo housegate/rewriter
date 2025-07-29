@@ -9,6 +9,7 @@ Usage: $0 <command> [args]
 Commands:
   prepare                   安装环境依赖（Linux/macOS 自动识别）
   build                     配置并编译整个项目
+  test                      构建并运行单元测试
   docker list               列出本地所有 Docker 镜像
   docker build <version>    根据版本号构建 Docker 镜像
   docker push  <version>    将指定版本的镜像推送到远端仓库
@@ -98,6 +99,11 @@ build() {
     echo ">>> build done"
 }
 
+test() {
+    build
+    ctest --test-dir build --output-on-failure
+}
+
 docker_list() {
     echo ">>> Docker images list:"
     docker images
@@ -137,6 +143,9 @@ case "$cmd" in
         ;;
     build)
         build
+        ;;
+    test)
+        test
         ;;
     docker)
         if [[ $# -lt 1 ]]; then

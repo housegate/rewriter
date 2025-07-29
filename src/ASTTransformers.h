@@ -3,15 +3,18 @@
 #include <Parsers/IAST.h>
 
 #include "rewriter.grpc.pb.h"
+#include "Parsers/ASTSelectQuery.h"
 
 namespace re2 {
 class RE2;
 }
-namespace DB {
 
+namespace DB {
 class ASTTransformerList : public IAST {
- public:
-  String getID(char) const override { return "TransformerList"; }
+public:
+  String getID(char) const override {
+    return "TransformerList";
+  }
 
   ASTPtr clone() const override {
     auto clone = std::make_shared<ASTTransformerList>(*this);
@@ -19,19 +22,19 @@ class ASTTransformerList : public IAST {
     return clone;
   }
 
- protected:
+protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
 
 class IASTTransformer : public IAST {
- public:
+public:
   virtual void transform(ASTPtr &ast) const = 0;
 
   static void transform(const ASTPtr &transformer, ASTPtr &ast);
 };
 
 class RemoteTable {
- public:
+public:
   String addr;
   String database_name;
   String table_name;
@@ -40,13 +43,13 @@ class RemoteTable {
 };
 
 class TableWithDatabase {
- public:
+public:
   String database_name;
   String table_name;
 };
 
 class Setting {
- public:
+public:
   String name;
   rewriter::SettingType value_type;
   String string_value;
@@ -56,10 +59,12 @@ class Setting {
 };
 
 class ASTReplaceTransformer : public IASTTransformer {
- public:
+public:
   bool is_strict = false;
 
-  String getID(char) const override { return "TableNameReplaceTransformer"; }
+  String getID(char) const override {
+    return "TableNameReplaceTransformer";
+  }
 
   ASTPtr clone() const override {
     auto clone = std::make_shared<ASTReplaceTransformer>(*this);
@@ -80,15 +85,46 @@ class ASTReplaceTransformer : public IASTTransformer {
   std::map<String, RemoteTable> remote_table_map;
   std::map<String, TableWithDatabase> table_with_database_map;
 
- protected:
+protected:
+  void format(WriteBuffer &ostr, const FormatSettings &settings) const;
+};
+
+class ASTRewriteCTETransformer : public IASTTransformer {
+public:
+  bool is_strict = false;
+
+  String getID(char) const override {
+    return "RewriteCTETransformer";
+  }
+
+  ASTPtr clone() const override {
+    auto clone = std::make_shared<ASTRewriteCTETransformer>(*this);
+    clone->cloneChildren();
+    return clone;
+  }
+
+  void transform(ASTPtr &ast) const override;
+  void setCTEMap(const std::map<String, String> &cte_map_);
+
+private:
+  bool injectOnce(ASTPtr &node) const;
+  auto buildWithList() const -> ASTPtr;
+  void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
+
+
+  std::map<String, String> cte_map;
+
+protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
 
 class ASTRewriteLimitTransformer : public IASTTransformer {
- public:
+public:
   bool is_strict = false;
 
-  String getID(char) const override { return "RewriteLimitTransformer"; }
+  String getID(char) const override {
+    return "RewriteLimitTransformer";
+  }
 
   ASTPtr clone() const override {
     auto clone = std::make_shared<ASTRewriteLimitTransformer>(*this);
@@ -106,15 +142,17 @@ class ASTRewriteLimitTransformer : public IASTTransformer {
   bool force_limit = false;
   size_t threshold = 0;
 
- protected:
+protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
 
 class ASTRewriteOffsetTransformer : public IASTTransformer {
- public:
+public:
   bool is_strict = false;
 
-  String getID(char) const override { return "RewriteOffsetTransformer"; }
+  String getID(char) const override {
+    return "RewriteOffsetTransformer";
+  }
 
   ASTPtr clone() const override {
     auto clone = std::make_shared<ASTRewriteOffsetTransformer>(*this);
@@ -128,15 +166,17 @@ class ASTRewriteOffsetTransformer : public IASTTransformer {
 
   size_t offset = 0;
 
- protected:
+protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
 
 class ASTSettingsTransformer : public IASTTransformer {
- public:
+public:
   bool is_strict = false;
 
-  String getID(char) const override { return "SettingsTransformer"; }
+  String getID(char) const override {
+    return "SettingsTransformer";
+  }
 
   ASTPtr clone() const override {
     auto clone = std::make_shared<ASTSettingsTransformer>(*this);
@@ -150,8 +190,7 @@ class ASTSettingsTransformer : public IASTTransformer {
 
   std::vector<Setting> settings_;
 
- protected:
+protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
-
-}  // namespace DB
+} // namespace DB

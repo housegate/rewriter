@@ -1,27 +1,37 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
+cmake_policy(SET CMP0135 NEW)
 project(MyProject)
+
+# 禁用不支持的链接器选项
+if (APPLE)
+    set(CMAKE_C_LINK_FLAGS "")
+    set(CMAKE_CXX_LINK_FLAGS "")
+    # 确保不会使用 --threads 选项
+    set(CMAKE_TRY_COMPILE_CONFIGURATION "Release")
+endif ()
+
 
 # Get the current working branch
 execute_process(
-    COMMAND git rev-parse --abbrev-ref HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_BRANCH
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
+        COMMAND git rev-parse --abbrev-ref HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_BRANCH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
 
 # Get the latest commit hash
 execute_process(
-    COMMAND git rev-parse HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_COMMIT_HASH
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
+        COMMAND git rev-parse HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_COMMIT_HASH
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-set (CMAKE_CXX_STANDARD 23)
-set (CMAKE_CXX_EXTENSIONS OFF)
-set (CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set (CMAKE_C_STANDARD 11)
-set (CMAKE_C_EXTENSIONS ON) # required by most contribs written in C
-set (CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_EXTENSIONS ON) # required by most contribs written in C
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1) # Write compile_commands.json
 set(CMAKE_LINK_DEPENDS_NO_SHARED 1) # Do not relink all depended targets on .so
@@ -33,24 +43,24 @@ set(CMAKE_DEBUG_POSTFIX "d" CACHE STRING "Generate debug library name with a pos
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
-    set (OS_LINUX 1)
+    set(OS_LINUX 1)
     add_definitions(-D OS_LINUX)
 elseif (CMAKE_SYSTEM_NAME MATCHES "Darwin")
-    set (OS_DARWIN 1)
+    set(OS_DARWIN 1)
     add_definitions(-D OS_DARWIN)
     # For MAP_ANON/MAP_ANONYMOUS
     add_definitions(-D _DARWIN_C_SOURCE)
 else ()
-    message (FATAL_ERROR "Platform ${CMAKE_SYSTEM_NAME} is not supported")
+    message(FATAL_ERROR "Platform ${CMAKE_SYSTEM_NAME} is not supported")
 endif ()
 
 if (OS_DARWIN)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-U,_inside_main")
 
-    set (DEFAULT_LIBS "-nodefaultlibs")
+    set(DEFAULT_LIBS "-nodefaultlibs")
 
-    set (DEFAULT_LIBS "${DEFAULT_LIBS} ${COVERAGE_OPTION} -lc -lm -lpthread -ldl")
+    set(DEFAULT_LIBS "${DEFAULT_LIBS} ${COVERAGE_OPTION} -lc -lm -lpthread -ldl")
 
     message(STATUS "Default libraries: ${DEFAULT_LIBS}")
 
@@ -65,17 +75,17 @@ if (OS_DARWIN)
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
 
-    set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_LIBCPP_DEBUG=0") # More checks in debug build.
-endif()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_LIBCPP_DEBUG=0") # More checks in debug build.
+endif ()
 if (OS_LINUX)
-    set (CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-pie")
-    set (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-pie")
-    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie -Wl,-no-pie")
-    set (DEFAULT_LIBS "-nodefaultlibs")
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-pie")
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-pie")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -no-pie -Wl,-no-pie")
+    set(DEFAULT_LIBS "-nodefaultlibs")
 
     # We need builtins from Clang's RT even without libcxx - for ubsan+int128.
     # See https://bugs.llvm.org/show_bug.cgi?id=16404
-    execute_process (COMMAND ${CMAKE_CXX_COMPILER} --target=${CMAKE_CXX_COMPILER_TARGET} --print-libgcc-file-name --rtlib=compiler-rt OUTPUT_VARIABLE BUILTINS_LIBRARY OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND ${CMAKE_CXX_COMPILER} --target=${CMAKE_CXX_COMPILER_TARGET} --print-libgcc-file-name --rtlib=compiler-rt OUTPUT_VARIABLE BUILTINS_LIBRARY OUTPUT_STRIP_TRAILING_WHITESPACE)
 
     # Apparently, in clang-19, the UBSan support library for C++ was moved out into ubsan_standalone_cxx.a, so we have to include both.
     if (SANITIZE STREQUAL undefined)
@@ -83,34 +93,34 @@ if (OS_LINUX)
     endif ()
 
     if (NOT EXISTS "${BUILTINS_LIBRARY}")
-        set (BUILTINS_LIBRARY "-lgcc")
+        set(BUILTINS_LIBRARY "-lgcc")
     endif ()
 
     if (OS_ANDROID)
         # pthread and rt are included in libc
-        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -ldl")
+        set(DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -ldl")
     elseif (USE_MUSL)
-        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -static -lc")
+        set(DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -static -lc")
     else ()
-        set (DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -lrt -lpthread -ldl")
+        set(DEFAULT_LIBS "${DEFAULT_LIBS} ${BUILTINS_LIBRARY} ${EXTRA_BUILTINS_LIBRARY} ${COVERAGE_OPTION} -lc -lm -lrt -lpthread -ldl")
     endif ()
 
     message(STATUS "Default libraries: ${DEFAULT_LIBS}")
 
     set(CMAKE_CXX_STANDARD_LIBRARIES ${DEFAULT_LIBS})
     set(CMAKE_C_STANDARD_LIBRARIES ${DEFAULT_LIBS})
-endif()
+endif ()
 
 set(_LLD_PARALLEL "-Wl,--threads=16")
 set(CMAKE_EXE_LINKER_FLAGS
-    "${CMAKE_EXE_LINKER_FLAGS} ${_LLD_PARALLEL}"
-    CACHE STRING "Global exe linker flags" FORCE)
+        "${CMAKE_EXE_LINKER_FLAGS} ${_LLD_PARALLEL}"
+        CACHE STRING "Global exe linker flags" FORCE)
 set(CMAKE_SHARED_LINKER_FLAGS
-    "${CMAKE_SHARED_LINKER_FLAGS} ${_LLD_PARALLEL}"
-    CACHE STRING "Global shared linker flags" FORCE)
+        "${CMAKE_SHARED_LINKER_FLAGS} ${_LLD_PARALLEL}"
+        CACHE STRING "Global shared linker flags" FORCE)
 set(CMAKE_MODULE_LINKER_FLAGS
-    "${CMAKE_MODULE_LINKER_FLAGS} ${_LLD_PARALLEL}"
-    CACHE STRING "Global module linker flags" FORCE)
+        "${CMAKE_MODULE_LINKER_FLAGS} ${_LLD_PARALLEL}"
+        CACHE STRING "Global module linker flags" FORCE)
 
 # Add ClickHouse submodule
 add_subdirectory(clickHouse)
@@ -118,13 +128,13 @@ no_warning(enum-constexpr-conversion)
 
 PROTOBUF_GENERATE_GRPC_CPP(rewriter_grpc_proto_sources rewriter_grpc_proto_headers protos/rewriter.proto)
 # Ignore warnings while compiling protobuf-generated *.pb.h and *.pb.cpp files.
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 # Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
-set (CMAKE_CXX_CLANG_TIDY "")
+set(CMAKE_CXX_CLANG_TIDY "")
 
 add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_proto_sources})
 target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries (rewriter_grpc_protos PUBLIC ch_contrib::grpc)
+target_link_libraries(rewriter_grpc_protos PUBLIC ch_contrib::grpc)
 
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 # include(${rewriter_grpc_proto_headers})
@@ -137,6 +147,12 @@ clickhouse_add_executable(clickhouse_sentio_rewriter ${SOURCES})
 target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
 target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(clickhouse_sentio_rewriter PRIVATE
-    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
+        "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
 # Link ClickHouse libraries
 target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos absl::debugging_internal)
+
+option(BUILD_TESTING "Build unit tests" ON)
+if (BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif ()
