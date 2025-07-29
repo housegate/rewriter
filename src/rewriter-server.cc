@@ -166,18 +166,13 @@ public:
             DB::ASTRewriteCTETransformer cte_transformer = DB::ASTRewriteCTETransformer();
             auto ctes = option.cte_args().cte_map();
             cte_map.clear();
-            std::cout << "============cte map start================" << std::endl;
             for (auto &kv : ctes) {
               cte_map[kv.first] = kv.second;
-              std::cout << "key is :" << kv.first << ", and val is: " << kv.second << std::endl;
             }
-            std::cout << "============cte map end================" << std::endl;
             cte_transformer.setCTEMap(cte_map);
             auto before_rewrite = ast->formatForLogging();
             cte_transformer.transform(ast);
             auto after_rewrite = ast->formatForLogging();
-            std::cout << "before cte rewrite query: " << before_rewrite
-              << ";\nafter cte rewrite query: " << after_rewrite << std::endl;
             if (has_table_name_written) {
               doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
             }
@@ -222,7 +217,7 @@ private:
     transformer.setRemoteTableMap(remote_table_map_);
     transformer.setTableWithDatabaseMap(table_with_database_map_);
     transformer.transform(ast);
-    std::cout << "after table name transformation " << ast->formatForLogging()
+    std::cout << "after table name transformation " << ast->dumpTree()
       << std::endl;
   }
 
