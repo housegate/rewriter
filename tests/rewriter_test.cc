@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include <utility>
+#include <iostream>
 
 // ------------------------ Debug dump helpers ------------------------
 static std::string DumpMap(const std::map<std::string, std::string> &m) {
@@ -27,8 +28,8 @@ static std::string DumpContext(const std::string &origin_sql,
   s += "=== Rewrite Context ===\n";
   s += "Origin SQL:\n" + origin_sql + "\n\n";
   s += "Rewritten SQL:\n" + rewritten_sql + "\n\n";
-  s += "CTE Map:\n" + DumpMap(cte_map) + "\n\n";
-  s += "Table Map:\n" + DumpMap(table_map) + "\n";
+  if (!cte_map.empty()) s += "CTE Map:\n" + DumpMap(cte_map) + "\n\n";
+  if (!table_map.empty()) s += "Table Map:\n" + DumpMap(table_map) + "\n";
   s += "=======================\n";
   return s;
 }
@@ -202,6 +203,9 @@ static std::string RunCTERewrite(const std::string &origin_sql,
   }
   auto out = resp.sql_after_rewrite();
   g_last_debug = DumpContext(origin_sql, out, cte_map, /*table_map*/ {});
+  std::cout << "\n******************** REWRITE DEBUG START (CTE) ********************\n";
+  std::cout << g_last_debug;
+  std::cout << "******************** REWRITE DEBUG END (CTE) **********************\n" << std::endl;
   return out;
 }
 
@@ -247,6 +251,10 @@ static std::string RunCTEAndTableRewrite(const std::string &origin_sql,
   }
   auto out = resp.sql_after_rewrite();
   g_last_debug = DumpContext(origin_sql, out, cte_map, table_map);
+  std::cout << "\n****************** REWRITE DEBUG START (CTE+TABLE) ******************\n";
+  std::cout << g_last_debug;
+  std::cout << "****************** REWRITE DEBUG END (CTE+TABLE) ********************\n" <<
+    std::endl;
   return out;
 }
 
