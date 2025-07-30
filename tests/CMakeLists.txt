@@ -14,7 +14,9 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(rewriter_tests
     rewriter_test.cc
-    ${PROJECT_SOURCE_DIR}/src/ASTTransformers.cc)
+    ${PROJECT_SOURCE_DIR}/src/ASTTransformers.cc
+    ${PROJECT_SOURCE_DIR}/src/rewriter-server.cc
+)
 
 target_include_directories(rewriter_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/protos
@@ -23,6 +25,8 @@ target_include_directories(rewriter_tests PRIVATE
     ${PROJECT_BINARY_DIR}/src)
 
 find_package(Threads REQUIRED)
+
+target_compile_definitions(rewriter_tests PRIVATE REWRITER_RELEASE_MAIN=0)
 
 target_compile_options(rewriter_tests PRIVATE -stdlib=libc++)
 target_link_options(  rewriter_tests PRIVATE -stdlib=libc++)

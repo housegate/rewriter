@@ -39,7 +39,7 @@ prepare() {
                 exit 1
             fi
             brew update
-            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm@19
+            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm@19 grpc protobuf
             export CC="/opt/homebrew/opt/llvm@19/bin/clang"
             export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
             export CPPFLAGS="-I/opt/homebrew/opt/llvm@19/include"
@@ -55,7 +55,6 @@ prepare() {
 
 # 编译项目
 build() {
-    prepare
     echo ">>> Starting build"
     if [[ "$(uname -s)" == "Darwin" ]]; then
       gsed -i 's/const size_type count_/size_type count_/' \
@@ -70,24 +69,39 @@ build() {
     ln -s . clickHouse
     popd > /dev/null
 
-    cmake -B build -S . -GNinja \
-      -DENABLE_RUST=OFF \
-      -DOPENSSL_ROOT_DIR="$OPENSSL_DIR"
-#      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
+    case "$(uname -s)" in
+        Linux*)
+            cmake -B build -S . -GNinja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_RUST=OFF \
+            -DENABLE_SSL=ON \
+            -DCMAKE_C_COMPILER=clang-19 \
+            -DCMAKE_CXX_COMPILER=clang++-19 \
+            -DCMAKE_LINKER=ld.lld-19 \
+            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld \
+            -DBUILD_TESTING=ON
+            ;;
+        Darwin*)
+            # mac book pro
+            cmake -B build -S . -G Ninja \
+            -DRust_TOOLCHAIN=stable-aarch64-apple-darwin \
+            -DRust_RUSTUP_INSTALL_MISSING_TARGET=OFF \
+            -DRust_RESOLVE_RUSTUP_TOOLCHAINS=OFF \
+            -DENABLE_RUST=OFF \
+            -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang \
+            -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+            -DCMAKE_LINKER=/opt/homebrew/opt/llvm/bin/ld.lld \
+            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld \
+            -DBUILD_TESTING=ON
+            ;;
+        *)
+            echo "Unsupported OS: $(uname -s)"
+            exit 1
+            ;;
+    esac
 
-    ARCH=$(uname -m)
-    INC=clickHouse/contrib/openssl-cmake/linux_${ARCH}/include
-    LIB=build/clickHouse/contrib/openssl-cmake
-    export OPENSSL_DIR=$PWD/$LIB
-    export OPENSSL_LIB_DIR=$PWD/$LIB
-    export OPENSSL_INCLUDE_DIR=$PWD/$INC
-    export OPENSSL_STATIC=1
-    export OPENSSL_NO_VENDOR=1
-
-    ninja -C build libcrypto.a libssl.a
-    mkdir -p build/contrib/openssl-cmake
-    ln -sf $OPENSSL_LIB_DIR/libssl.a    build/contrib/openssl-cmake/libssl.a
-    ln -sf $OPENSSL_LIB_DIR/libcrypto.a build/contrib/openssl-cmake/libcrypto.a
 
     JOBS=$(
         command -v nproc   >/dev/null && nproc ||

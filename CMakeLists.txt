@@ -111,7 +111,12 @@ if (OS_LINUX)
     set(CMAKE_C_STANDARD_LIBRARIES ${DEFAULT_LIBS})
 endif ()
 
-set(_LLD_PARALLEL "-Wl,--threads=16")
+if (OS_LINUX)
+    set(_LLD_PARALLEL "-Wl,--threads=16")
+else ()
+    set(_LLD_PARALLEL "")
+endif ()
+
 set(CMAKE_EXE_LINKER_FLAGS
         "${CMAKE_EXE_LINKER_FLAGS} ${_LLD_PARALLEL}"
         CACHE STRING "Global exe linker flags" FORCE)
@@ -144,15 +149,31 @@ set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc)
 # Add your executable or library
 # clickhouse_add_executable(clickhouse_sentio_rewriter src/rewriter-server.cc)
 clickhouse_add_executable(clickhouse_sentio_rewriter ${SOURCES})
-target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/protos)
-target_include_directories(clickhouse_sentio_rewriter SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(clickhouse_sentio_rewriter PRIVATE REWRITER_RELEASE_MAIN=1)
+target_include_directories(clickhouse_sentio_rewriter
+        SYSTEM PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}/protos
+)
 target_compile_definitions(clickhouse_sentio_rewriter PRIVATE
         "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
 # Link ClickHouse libraries
 target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos absl::debugging_internal)
 
-option(BUILD_TESTING "Build unit tests" ON)
+option(BUILD_TESTING "Build unit tests" OFF)
 if (BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
+endif ()
+
+if (OS_DARWIN)
+    # 清空 linker flags 中所有 --threads
+    string(REPLACE "-Wl,--threads=16" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+    string(REPLACE "-Wl,--threads=16" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+    string(REPLACE "-Wl,--threads=16" "" CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
+
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "Global exe linker flags" FORCE)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}" CACHE STRING "Global shared linker flags" FORCE)
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}" CACHE STRING "Global module linker flags" FORCE)
 endif ()

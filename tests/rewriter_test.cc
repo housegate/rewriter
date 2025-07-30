@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
-#define REWRITER_NO_MAIN 1
-#define REWRITER_QUIET 1
 #include "protos/rewriter.grpc.pb.h"
-#include "rewriter-server.cc"  // include implementation for testing
+#include "rewriter-server.h"
 #include <string>
 #include <map>
 #include <vector>
@@ -453,7 +451,9 @@ TEST(TableOnly, TableRewrite_NoCTE) {
   EXPECT_NE(out.find(" AS Withdraw"), std::string::npos);
 }
 
+#if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+#endif
