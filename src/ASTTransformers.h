@@ -48,6 +48,12 @@ public:
   String table_name;
 };
 
+class CommonTableExpr {
+public:
+  String alias;
+  String sql;
+};
+
 class Setting {
 public:
   String name;
@@ -104,7 +110,7 @@ public:
   }
 
   void transform(ASTPtr &ast) const override;
-  void setCTEMap(const std::map<String, String> &cte_map_);
+  void setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_);
 
 private:
   bool injectOnce(ASTPtr &node) const;
@@ -112,7 +118,7 @@ private:
   void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
 
 
-  std::map<String, String> cte_map;
+  std::map<String, DB::CommonTableExpr> cte_map;
 
 protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;

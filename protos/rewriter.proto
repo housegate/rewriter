@@ -8,7 +8,7 @@ enum RewriteOp {
     LimitRewrite = 1;
     OffsetRewrite = 2;
     SettingsRewrite = 3;
-    CTERewrite = 4;
+    CommonTableExprRewrite = 4;
 }
 
 message RewriteTableNameArgs {
@@ -45,6 +45,14 @@ message RewriteOffsetArgs {
     int32 offset = 1;
 }
 
+message RewriteCommonTableExprArgs {
+    message CommonTableExpr {
+        string alias = 1;
+        string sql = 2;
+    }
+    map<string, CommonTableExpr> cte_map = 1;
+}
+
 enum SettingType {
     String = 0;
     Bool = 1;
@@ -66,10 +74,6 @@ message RewriteSettingsArgs {
     repeated Setting settings = 1;
 }
 
-message RewriteCTEArgs {
-    map<string, string> cte_map = 1;
-}
-
 message RewriteOption {
     RewriteOp op = 1;
     oneof value {
@@ -77,7 +81,7 @@ message RewriteOption {
         RewriteLimitArgs limit_args = 3;
         RewriteOffsetArgs offset_args = 4;
         RewriteSettingsArgs settings_args = 5;
-        RewriteCTEArgs cte_args = 6;
+        RewriteCommonTableExprArgs common_table_expr_args = 6;
     }
 }
 

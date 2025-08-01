@@ -149,7 +149,7 @@ void ASTRewriteCTETransformer::format(WriteBuffer &ostr, const FormatSettings &s
   if (!cte_map.empty()) {
     ostr << "cte_map: ";
     for (const auto &kv : cte_map) {
-      ostr << kv.first << " -> " << kv.second << ", ";
+      ostr << kv.first << " -> " << kv.second.sql << ", ";
     }
   }
 }
@@ -181,7 +181,7 @@ bool ASTRewriteCTETransformer::injectOnce(ASTPtr &ast) const {
 auto ASTRewriteCTETransformer::buildWithList() const -> ASTPtr {
   auto list = std::make_shared<ASTExpressionList>();
   for (const auto &kv : cte_map) {
-    const String &sub_sql = kv.second;
+    const String &sub_sql = kv.second.sql;
     DB::ASTPtr sub_ast;
     try {
       const char *sub_pos = sub_sql.data();
@@ -249,7 +249,7 @@ void ASTRewriteCTETransformer::mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &
   }
 }
 
-void ASTRewriteCTETransformer::setCTEMap(const std::map<String, String> &cte_map_) {
+void ASTRewriteCTETransformer::setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_) {
   cte_map = cte_map_;
 }
 

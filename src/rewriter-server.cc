@@ -36,7 +36,7 @@ grpc::Status RewriterServiceImpl::Rewrite(ServerContext *context,
     DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
     std::cout << "before transformation " << ast->dumpTree() << std::endl;
 
-    std::map<std::string, std::string> cte_map;
+    std::map<std::string, DB::CommonTableExpr> cte_map_;
     std::map<std::string, std::string> table_name_map_;
     std::map<std::string, DB::RemoteTable> remote_table_map_;
     std::map<std::string, DB::TableWithDatabase> table_with_database_map_;
@@ -157,17 +157,18 @@ grpc::Status RewriterServiceImpl::Rewrite(ServerContext *context,
             << std::endl;
           break;
         }
-        case rewriter::RewriteOp::CTERewrite: {
+        case rewriter::RewriteOp::CommonTableExprRewrite: {
           DB::ASTRewriteCTETransformer cte_transformer = DB::ASTRewriteCTETransformer();
-          auto ctes = option.cte_args().cte_map();
-          cte_map.clear();
+          auto ctes = option.common_table_expr_args().cte_map();
+          cte_map_.clear();
           for (auto &kv : ctes) {
-            cte_map[kv.first] = kv.second;
+            cte_map_[kv.first] = {
+              kv.second.rewriter::RewriteCommonTableExprArgs_CommonTableExpr::alias(),
+              kv.second.rewriter::RewriteCommonTableExprArgs_CommonTableExpr::sql()
+            };
           }
-          cte_transformer.setCTEMap(cte_map);
-          auto before_rewrite = ast->formatForLogging();
+          cte_transformer.setCTEMap(cte_map_);
           cte_transformer.transform(ast);
-          auto after_rewrite = ast->formatForLogging();
           if (has_table_name_written) {
             doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
           }
