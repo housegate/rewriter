@@ -13,7 +13,6 @@
 #include "ASTTransformers.h"
 #include "rewriter.grpc.pb.h"
 
-
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
@@ -35,9 +34,8 @@ private:
     const std::map<std::string, DB::TableWithDatabase> &table_with_database_map_);
 
 public:
-  Status RewriteForTest(ServerContext *context,
-    const RewriteSQLRequest *request,
-    RewriteSQLResponse *response) {
+  Status RewriteForTest(
+    ServerContext *context, const RewriteSQLRequest *request, RewriteSQLResponse *response) {
     return Rewrite(context, request, response);
   }
 };

@@ -1,26 +1,26 @@
----
 # 基础风格：LLVM（同样适合你们现有的大括号、缩进习惯）
-BasedOnStyle: Google
+BasedOnStyle: LLVM
 
 # 缩进
-IndentWidth:      2       # 2 空格
-TabWidth:         2
-UseTab:           Never   # 禁用制表符
+IndentWidth: 2       # 2 空格
+TabWidth: 2
+UseTab: Never   # 禁用制表符
 ContinuationIndentWidth: 2
 AlignAfterOpenBracket: DontAlign
 
 # 换行 & 对齐
-ColumnLimit:      100     # 每行最大长度，超出则换行
+ColumnLimit: 100     # 每行最大长度，超出则换行
 #AlignAfterOpenBracket: Align   # 函数签名第二行对齐到第一个括号
-BinPackParameters:   false     # 函数参数超长时，每个参数另起一行
-BinPackArguments:    false
+BinPackParameters: false     # 函数参数超长时，每个参数另起一行
+BinPackArguments: false
 AllowShortFunctionsOnASingleLine: Empty    # 空函数体可写成 `{}`
-AllowShortIfStatementsOnASingleLine: false
-AllowShortBlocksOnASingleLine:       false
-
+AllowShortBlocksOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
 # 指针对齐：星号靠近变量名（auto *identifier）
 PointerAlignment: Right
 
 # 大括号风格：Attach（LLVM 默认）
 # 其它可留空使用 LLVM 默认
----
+

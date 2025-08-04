@@ -2,8 +2,8 @@
 
 #include <Parsers/IAST.h>
 
-#include "rewriter.grpc.pb.h"
 #include "Parsers/ASTSelectQuery.h"
+#include "rewriter.grpc.pb.h"
 
 namespace re2 {
 class RE2;
@@ -84,8 +84,7 @@ public:
 
   void setRemoteTableMap(const std::map<String, RemoteTable> &remote_table_map);
 
-  void setTableWithDatabaseMap(
-    const std::map<String, TableWithDatabase> &table_with_database_map);
+  void setTableWithDatabaseMap(const std::map<String, TableWithDatabase> &table_with_database_map);
 
   std::map<String, String> table_name_map;
   std::map<String, RemoteTable> remote_table_map;
@@ -116,7 +115,6 @@ private:
   bool injectOnce(ASTPtr &node) const;
   auto buildWithList() const -> ASTPtr;
   void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
-
 
   std::map<String, DB::CommonTableExpr> cte_map;
 

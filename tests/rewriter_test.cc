@@ -1,19 +1,17 @@
-#include <gtest/gtest.h>
 #include "protos/rewriter.grpc.pb.h"
 #include "rewriter-server.h"
-#include <string>
-#include <map>
-#include <vector>
-#include <utility>
+#include <gtest/gtest.h>
 #include <iostream>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
 
 // ------------------------ Debug dump helpers ------------------------
 static std::string DumpMap(const std::map<std::string, DB::CommonTableExpr> &m) {
   std::string s;
   s += "{\n";
-  for (const auto &kv : m) {
-    s += "  \"" + kv.first + "\": \"" + kv.second.sql + "\",\n";
-  }
+  for (const auto &kv : m) { s += "  \"" + kv.first + "\": \"" + kv.second.sql + "\",\n"; }
   s += "}";
   return s;
 }
@@ -21,9 +19,7 @@ static std::string DumpMap(const std::map<std::string, DB::CommonTableExpr> &m) 
 static std::string DumpMap(const std::map<std::string, std::string> &m) {
   std::string s;
   s += "{\n";
-  for (const auto &kv : m) {
-    s += "  \"" + kv.first + "\": \"" + kv.second + "\",\n";
-  }
+  for (const auto &kv : m) { s += "  \"" + kv.first + "\": \"" + kv.second + "\",\n"; }
   s += "}";
   return s;
 }
@@ -51,7 +47,6 @@ static const std::string &LastDebug() {
 
 #define TRACE_LAST_REWRITE() SCOPED_TRACE(std::string("\n") + LastDebug())
 
-
 static size_t CountSubstr(const std::string &haystack, const std::string &needle) {
   if (needle.empty()) return 0;
   size_t count = 0;
@@ -63,7 +58,8 @@ static size_t CountSubstr(const std::string &haystack, const std::string &needle
   return count;
 }
 
-// Normalize whitespace: collapse all runs of whitespace to single spaces, trim leading/trailing spaces.
+// Normalize whitespace: collapse all runs of whitespace to single spaces, trim leading/trailing
+// spaces.
 static std::string NormalizeWS(const std::string &s) {
   std::string out;
   out.reserve(s.size());
@@ -98,120 +94,98 @@ struct CTECase {
 
 inline const std::vector<CTECase> &Cases() {
   static const std::vector<CTECase> kCases = {
-    {
-      "simple_select",
+    {"simple_select",
       "SELECT * FROM c1",
       {{"c1", "SELECT 1"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS", "SELECT 1"}
-    },
-    {
-      "union_inject_once",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS", "SELECT 1"}},
+    {"union_inject_once",
       "SELECT * FROM cte1 UNION ALL SELECT * FROM t2",
       {{"cte1", "SELECT * FROM t1"}},
-      /*expect_with_count*/1,
-      {"WITH cte1 AS", "t2"}
-    },
-    {
-      "existing_with_merge",
+      /*expect_with_count*/ 1,
+      {"WITH cte1 AS", "t2"}},
+    {"existing_with_merge",
       "WITH a AS (SELECT 0) SELECT * FROM a",
       {{"a", "SELECT 1"}, {"b", "SELECT 2"}},
-      /*expect_with_count*/-1,
-      {" a AS ", " b AS "}
-    },
-    {
-      "insert_select",
+      /*expect_with_count*/ -1,
+      {" a AS ", " b AS "}},
+    {"insert_select",
       "INSERT INTO dst SELECT * FROM c1",
       {{"c1", "SELECT 1"}},
-      /*expect_with_count*/1,
-      {"INSERT INTO dst", "WITH c1 AS"}
-    },
-    {
-      "parse_failure_skips_bad",
+      /*expect_with_count*/ 1,
+      {"INSERT INTO dst", "WITH c1 AS"}},
+    {"parse_failure_skips_bad",
       "SELECT * FROM good_cte",
       {{"bad", "SELECT * FROM"}, {"good_cte", "SELECT 1"}},
-      /*expect_with_count*/-1,
-      {"WITH good_cte AS"}
-    },
+      /*expect_with_count*/ -1,
+      {"WITH good_cte AS"}},
     {
       "join_and_alias",
       "SELECT t.id FROM c1 AS t JOIN c2 USING (id)",
       {{"c1", "SELECT id FROM s1"}, {"c2", "SELECT id FROM s2"}},
-      /*expect_with_count*/1,
+      /*expect_with_count*/ 1,
       {"WITH c1 AS", "WITH c2 AS"}
       // we will not assert both prefixes literally; see specific test below
     },
-    {
-      "subquery_scope",
+    {"subquery_scope",
       "SELECT 1 FROM (SELECT * FROM c1) s",
       {{"c1", "SELECT 1"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS"}
-    },
-    {
-      "none_used_still_inject",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS"}},
+    {"none_used_still_inject",
       "SELECT 1",
       {{"a", "SELECT 1"}},
-      /*expect_with_count*/1,
-      {"WITH a AS"}
-    },
-    {
-      "db_qualified",
+      /*expect_with_count*/ 1,
+      {"WITH a AS"}},
+    {"db_qualified",
       "SELECT * FROM db.c1",
       {{"c1", "SELECT 42"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS"}
-    },
-    {
-      "multiple_refs_once",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS"}},
+    {"multiple_refs_once",
       "SELECT * FROM c1 UNION ALL SELECT * FROM c1",
       {{"c1", "SELECT 1"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS"}
-    },
-    {
-      "cte_value_with_union",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS"}},
+    {"cte_value_with_union",
       "SELECT * FROM c1",
       {{"c1", "SELECT 1 UNION ALL SELECT 2"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS"}
-    },
-    {
-      "nested_union_tree",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS"}},
+    {"nested_union_tree",
       "(SELECT * FROM c1) UNION ALL (SELECT * FROM c2)",
       {{"c1", "SELECT 1"}, {"c2", "SELECT 2"}},
-      /*expect_with_count*/1,
-      {"WITH c1 AS", "WITH c2 AS"}
-    },
-    {
-      "insert_select_with_union",
+      /*expect_with_count*/ 1,
+      {"WITH c1 AS", "WITH c2 AS"}},
+    {"insert_select_with_union",
       "INSERT INTO dst (x) SELECT * FROM c1 UNION ALL SELECT * FROM c2",
       {{"c1", "SELECT 1 AS x"}, {"c2", "SELECT 2 AS x"}},
-      /*expect_with_count*/1,
-      {"INSERT INTO dst", "WITH c1 AS", "WITH c2 AS"}
-    },
-    {
-      "huge_cte_map_unused_many",
+      /*expect_with_count*/ 1,
+      {"INSERT INTO dst", "WITH c1 AS", "WITH c2 AS"}},
+    {"huge_cte_map_unused_many",
       "SELECT 1",
-      {{"a", "SELECT 1"}, {"b", "SELECT 2"}, {"c", "SELECT 3"}, {"d", "SELECT 4"},
-       {"e", "SELECT 5"}},
-      /*expect_with_count*/1,
-      {"WITH a AS", "WITH b AS", "WITH c AS"}
-    },
+      {{"a", "SELECT 1"},
+        {"b", "SELECT 2"},
+        {"c", "SELECT 3"},
+        {"d", "SELECT 4"},
+        {"e", "SELECT 5"}},
+      /*expect_with_count*/ 1,
+      {"WITH a AS", "WITH b AS", "WITH c AS"}},
   };
   return kCases;
 }
 
 inline const CTECase *Find(const std::string &name) {
-  for (const auto &c : Cases()) if (name == c.name) return &c;
+  for (const auto &c : Cases())
+    if (name == c.name) return &c;
   return nullptr;
 }
 } // namespace TestData
 
 // ------------------------ Helpers: run CTE rewrite ------------------------
 // Core helper: run ONLY CTE rewrite and return rewritten SQL
-static std::string RunCTERewrite(const std::string &origin_sql,
-  const std::map<std::string, DB::CommonTableExpr> &cte_map) {
+static std::string RunCTERewrite(
+  const std::string &origin_sql, const std::map<std::string, DB::CommonTableExpr> &cte_map) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql(origin_sql);
@@ -222,8 +196,10 @@ static std::string RunCTERewrite(const std::string &origin_sql,
     auto *cte_args = cte_option->mutable_common_table_expr_args();
     for (const auto &kv : cte_map) {
       auto &msg = (*cte_args->mutable_cte_map())[kv.first];
-      if (!kv.second.alias.empty()) msg.set_alias(kv.second.alias);
-      else msg.set_alias(kv.first);
+      if (!kv.second.alias.empty())
+        msg.set_alias(kv.second.alias);
+      else
+        msg.set_alias(kv.first);
       msg.set_sql(kv.second.sql);
     }
   }
@@ -267,8 +243,10 @@ static std::string RunCTEAndTableRewrite(const std::string &origin_sql,
     auto *cte_args = cte_option->mutable_common_table_expr_args();
     for (const auto &kv : cte_map) {
       auto &msg = (*cte_args->mutable_cte_map())[kv.first];
-      if (!kv.second.alias.empty()) msg.set_alias(kv.second.alias);
-      else msg.set_alias(kv.first);
+      if (!kv.second.alias.empty())
+        msg.set_alias(kv.second.alias);
+      else
+        msg.set_alias(kv.first);
       msg.set_sql(kv.second.sql);
     }
   }
@@ -276,23 +254,19 @@ static std::string RunCTEAndTableRewrite(const std::string &origin_sql,
     auto *tbl_option = req.add_options();
     tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
     auto *tbl_args = tbl_option->mutable_table_name_args();
-    for (const auto &kv : table_map) {
-      (*tbl_args->mutable_table_map())[kv.first] = kv.second;
-    }
+    for (const auto &kv : table_map) { (*tbl_args->mutable_table_map())[kv.first] = kv.second; }
   }
 
   rewriter::RewriteSQLResponse resp;
   grpc::ServerContext ctx;
   auto status = service.Rewrite(&ctx, &req, &resp);
-  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
-    return "";
-  }
+  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) { return ""; }
   auto out = resp.sql_after_rewrite();
   g_last_debug = DumpContext(origin_sql, out, cte_map, table_map);
   std::cout << "\n****************** REWRITE DEBUG START (CTE+TABLE) ******************\n";
   std::cout << g_last_debug;
-  std::cout << "****************** REWRITE DEBUG END (CTE+TABLE) ********************\n" <<
-    std::endl;
+  std::cout << "****************** REWRITE DEBUG END (CTE+TABLE) ********************\n"
+            << std::endl;
   return out;
 }
 
@@ -500,8 +474,8 @@ TEST(TableOnly, TableRewrite_NoCTE) {
   EXPECT_NE(norm.find("sqlquery-123abc"), std::string::npos);
   EXPECT_NE(norm.find("autogen_456"), std::string::npos);
 
-  // 3) Ensure source table name on right branch is gone as a table source; it may remain as an alias.
-  // Old name should not be used as a table source; it may remain as an alias.
+  // 3) Ensure source table name on right branch is gone as a table source; it may remain as an
+  // alias. Old name should not be used as a table source; it may remain as an alias.
   EXPECT_EQ(norm.find(" FROM Withdraw"), std::string::npos);
   EXPECT_EQ(norm.find(" JOIN Withdraw"), std::string::npos);
   EXPECT_NE(norm.find(" AS Withdraw"), std::string::npos);
