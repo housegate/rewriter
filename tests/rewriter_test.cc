@@ -286,8 +286,12 @@ TEST(CTEOnly, RunByName_ExistingWithMerge) {
   auto norm = NormalizeWS(out);
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, " a AS "), 1u); // ensure no duplicate a
-  EXPECT_NE(norm.find(" b AS "), std::string::npos);
+  // Only one WITH clause should be present, merging existing CTEs without duplication
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
+  // Only 'a' is injected; 'b' is unused and should not be injected
+  EXPECT_EQ(CountSubstr(norm, " a AS "), 1u);
+  // 'b' is unused and should not be injected
+  EXPECT_EQ(CountSubstr(norm, " b AS "), 0u);
 }
 
 TEST(CTEOnly, RunByName_UnionOnce) {
@@ -340,13 +344,14 @@ TEST(CTEOnly, RunByName_SubqueryScope) {
   EXPECT_NE(norm.find("WITH c1 AS"), std::string::npos);
 }
 
-TEST(CTEOnly, RunByName_NoneUsedStillInject) {
+TEST(CTEOnly, RunByName_NoneUsedNoInject) {
   auto out = RunCTERewriteByName("none_used_still_inject");
   auto norm = NormalizeWS(out);
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
-  EXPECT_NE(norm.find("WITH a AS"), std::string::npos);
+  // No CTE should be injected when none of the CTE keys are referenced
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 0u);
+  EXPECT_EQ(norm.find("WITH a AS"), std::string::npos);
 }
 
 TEST(CTEOnly, RunByName_DbQualified) {
@@ -382,7 +387,8 @@ TEST(CTEOnly, RunByName_NestedUnionTree) {
   auto norm = NormalizeWS(out);
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
+  // Two WITH clauses are injected, one per union branch
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 2u);
   EXPECT_NE(norm.find(" c1 AS "), std::string::npos);
   EXPECT_NE(norm.find(" c2 AS "), std::string::npos);
 }
@@ -392,8 +398,10 @@ TEST(CTEOnly, RunByName_InsertSelectWithUnion) {
   auto norm = NormalizeWS(out);
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 2u);
   EXPECT_NE(norm.find("INSERT INTO dst"), std::string::npos);
+  EXPECT_NE(norm.find(" c1 AS "), std::string::npos);
+  EXPECT_NE(norm.find(" c2 AS "), std::string::npos);
 }
 
 TEST(CTEOnly, RunByName_HugeCTEMapUnusedMany) {
@@ -401,11 +409,11 @@ TEST(CTEOnly, RunByName_HugeCTEMapUnusedMany) {
   auto norm = NormalizeWS(out);
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
-  // spot-check a few names exist in WITH list
-  EXPECT_NE(norm.find(" a AS "), std::string::npos);
-  EXPECT_NE(norm.find(" b AS "), std::string::npos);
-  EXPECT_NE(norm.find(" c AS "), std::string::npos);
+  // No CTE should be injected when none of the entries are referenced
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 0u);
+  EXPECT_EQ(norm.find(" a AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" b AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" c AS "), std::string::npos);
 }
 
 TEST(CTE_Table, Combine_CTE_and_TableName) {
@@ -479,6 +487,107 @@ TEST(TableOnly, TableRewrite_NoCTE) {
   EXPECT_EQ(norm.find(" FROM Withdraw"), std::string::npos);
   EXPECT_EQ(norm.find(" JOIN Withdraw"), std::string::npos);
   EXPECT_NE(norm.find(" AS Withdraw"), std::string::npos);
+}
+
+// 仅在使用到的 key 注入（大 map 中只取子集）
+TEST(CTEOnly, LargeMap_OnlyUsedInjected_Subset) {
+  const std::string origin_sql = "SELECT * FROM c3 JOIN e5 USING (id)";
+
+  std::map<std::string, DB::CommonTableExpr> cte_map{
+    {"a1", {"a1", "SELECT 1 AS id"}},
+    {"a2", {"a2", "SELECT 2 AS id"}},
+    {"b1", {"b1", "SELECT 3 AS id"}},
+    {"b2", {"b2", "SELECT 4 AS id"}},
+    {"c3", {"c3", "SELECT 5 AS id"}},
+    {"c4", {"c4", "SELECT 6 AS id"}},
+    {"d1", {"d1", "SELECT 7 AS id"}},
+    {"d2", {"d2", "SELECT 8 AS id"}},
+    {"e5", {"e5", "SELECT 9 AS id"}},
+    {"f6", {"f6", "SELECT 10 AS id"}},
+  };
+
+  auto out = RunCTERewrite(origin_sql, cte_map);
+  auto norm = NormalizeWS(out);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(norm.empty());
+
+  // 仅一次 WITH
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
+
+  // 仅注入 c3/e5
+  EXPECT_EQ(CountSubstr(norm, " c3 AS "), 1u);
+  EXPECT_EQ(CountSubstr(norm, " e5 AS "), 1u);
+
+  // 未使用的 key 不应出现
+  EXPECT_EQ(norm.find(" a1 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" a2 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" b1 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" b2 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" c4 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" d1 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" d2 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" f6 AS "), std::string::npos);
+
+  // JOIN 仍然存在
+  EXPECT_NE(norm.find("JOIN"), std::string::npos);
+}
+
+// fixme:
+// Origin SQL:
+// SELECT * FROM c1 UNION ALL SELECT * FROM c1 UNION ALL SELECT * FROM d2
+// Rewritten SQL:
+// WITH c1 AS (SELECT 1) SELECT * FROM c1 UNION ALL SELECT * FROM c1 UNION ALL SELECT * FROM d2
+TEST(CTEOnly, LargeMap_MultiRefs_DedupAndOnlyUsed) {
+  const std::string origin_sql =
+    "SELECT * FROM c1 UNION ALL SELECT * FROM c1 UNION ALL SELECT * FROM d2";
+
+  std::map<std::string, DB::CommonTableExpr> cte_map{
+    {"a0", {"a0", "SELECT 0"}},
+    {"c1", {"c1", "SELECT 1"}},
+    {"c2", {"c2", "SELECT 2"}},
+    {"d2", {"d2", "SELECT 3"}},
+    {"x9", {"x9", "SELECT 9"}},
+  };
+
+  auto out = RunCTERewrite(origin_sql, cte_map);
+  auto norm = NormalizeWS(out);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(norm.empty());
+
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 2u);
+  EXPECT_EQ(CountSubstr(norm, " c1 AS "), 1u);
+  EXPECT_EQ(CountSubstr(norm, " d2 AS "), 1u);
+
+  // 未使用的不应出现
+  EXPECT_EQ(norm.find(" a0 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" c2 AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" x9 AS "), std::string::npos);
+
+  // UNION 结构保留
+  EXPECT_NE(norm.find("UNION ALL"), std::string::npos);
+}
+
+TEST(CTEOnly, LargeMap_NoneUsed_NoInjection) {
+  const std::string origin_sql = "SELECT 1";
+  std::map<std::string, DB::CommonTableExpr> cte_map{
+    {"a", {"a", "SELECT 1"}},
+    {"b", {"b", "SELECT 2"}},
+    {"c", {"c", "SELECT 3"}},
+    {"d", {"d", "SELECT 4"}},
+    {"e", {"e", "SELECT 5"}},
+  };
+
+  auto out = RunCTERewrite(origin_sql, cte_map);
+  auto norm = NormalizeWS(out);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(norm.empty());
+
+  EXPECT_EQ(CountSubstr(norm, "WITH "), 0u);
+  EXPECT_EQ(norm.find(" a AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" b AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" c AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" d AS "), std::string::npos);
+  EXPECT_EQ(norm.find(" e AS "), std::string::npos);
 }
 
 #if !REWRITER_RELEASE_MAIN

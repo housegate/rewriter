@@ -112,8 +112,11 @@ public:
   void setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_);
 
 private:
-  bool injectOnce(ASTPtr &node) const;
-  auto buildWithList() const -> ASTPtr;
+  ASTPtr buildWithList(
+    const DB::ASTSelectQuery *select_ast, const std::unordered_set<String> &used_key) const;
+  std::unordered_set<String> collectCTEKeysForSelect(
+    const DB::ASTSelectQuery *select_ast, std::unordered_map<String, bool> &used_cte_key_map) const;
+  void injectOnce(const ASTPtr &ast, std::unordered_map<String, bool> &used_cte_key_map) const;
   void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
 
   std::map<String, DB::CommonTableExpr> cte_map;

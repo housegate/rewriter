@@ -137,31 +137,68 @@ void ASTRewriteCTETransformer::format(WriteBuffer &ostr, const FormatSettings &s
 
 void ASTRewriteCTETransformer::transform(ASTPtr &ast) const {
   if (cte_map.empty() || !ast) return;
-  injectOnce(ast);
+  std::unordered_map<String, bool> used_cte_key_map;
+  injectOnce(ast, used_cte_key_map);
 }
 
-bool ASTRewriteCTETransformer::injectOnce(ASTPtr &ast) const {
-  if (!ast) return false;
+void ASTRewriteCTETransformer::injectOnce(
+  const ASTPtr &ast, std::unordered_map<String, bool> &used_cte_key_map) const {
+  if (!ast) return;
 
   if (auto *select = ast->as<DB::ASTSelectQuery>()) {
-    ASTPtr with_list = buildWithList();
+    const auto used_key = collectCTEKeysForSelect(select, used_cte_key_map);
+    ASTPtr with_list = buildWithList(select, used_key);
     if (!with_list || !with_list->as<ASTExpressionList>() || with_list->children.empty()) {
-      return false;
+      return;
     }
     mergeWithIntoSelect(select /*ASTSelectQuery**/, with_list /*ASTPtr&*/);
-    return true;
   }
-  for (auto &child : ast->children) {
-    // 针对union/INTERSECT/EXCEPT等, 只在最左侧注入一次
-    if (injectOnce(child)) return true;
-  }
-  return false;
+  for (auto &child : ast->children) { injectOnce(child, used_cte_key_map); }
 }
 
-auto ASTRewriteCTETransformer::buildWithList() const -> ASTPtr {
+std::unordered_set<String> ASTRewriteCTETransformer::collectCTEKeysForSelect(
+  const DB::ASTSelectQuery *select_ast, std::unordered_map<String, bool> &used_cte_key_map) const {
+  std::unordered_set<String> used;
+  if (!select_ast) return used;
+
+  auto has_key = [&](const String &k) { return cte_map.contains(k); };
+
+  std::function<void(const ASTPtr &)> dfs = [&](const ASTPtr &n) {
+    if (!n) return;
+
+    if (const auto *tid = n->as<DB::ASTTableIdentifier>()) {
+      if (const String key = tid->shortName(); has_key(key) && !used_cte_key_map[key]) {
+        used.insert(key);
+        used_cte_key_map[key] = true;
+      }
+    } else if (const auto *id = dynamic_cast<DB::ASTIdentifier *>(n.get())) {
+      if (const String key = id->shortName(); has_key(key) && !used_cte_key_map[key]) {
+        used.insert(key);
+        used_cte_key_map[key] = true;
+      }
+    }
+
+    for (auto &ch : n->children) dfs(ch);
+  };
+  const ASTPtr root = const_cast<DB::ASTSelectQuery *>(select_ast)->shared_from_this();
+  dfs(root);
+
+  return used;
+}
+
+// 为每个select子句构建with ... as ...
+ASTPtr ASTRewriteCTETransformer::buildWithList(
+  const DB::ASTSelectQuery *select_ast, const std::unordered_set<String> &used_key) const {
+  std::cout << "========cout used_key========" << std::endl;
+  for (auto key : used_key) { std::cout << key << ", "; }
+  std::cout << "========cout used_key========" << std::endl;
+
+  if (!select_ast || used_key.empty()) return nullptr;
   auto list = std::make_shared<ASTExpressionList>();
-  for (const auto &kv : cte_map) {
-    const String &sub_sql = kv.second.sql;
+  for (const auto &[alias, cte] : cte_map) {
+    if (!used_key.contains(alias) || cte.sql.empty()) continue;
+
+    const String &sub_sql = cte.sql;
     DB::ASTPtr sub_ast;
     try {
       const char *sub_pos = sub_sql.data();
@@ -169,17 +206,18 @@ auto ASTRewriteCTETransformer::buildWithList() const -> ASTPtr {
       DB::ParserQuery sub_parser(sub_end, false);
       sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
     } catch (const DB::Exception &) {
-      std::cout << "CTE Query Parse Failed: " << sub_sql << "; it's CTE key is: " << kv.first
+      std::cout << "CTE Query Parse Failed: " << sub_sql << "; it's CTE key is: " << alias
                 << std::endl;
       continue;
     }
     if (!sub_ast) continue;
-    auto sub = std::make_shared<ASTSubquery>();
+
+    const auto sub = std::make_shared<ASTSubquery>();
     sub->children.clear();
     sub->children.push_back(sub_ast);
 
     auto elem = std::make_shared<ASTWithElement>();
-    elem->name = kv.first;
+    elem->name = alias;
     elem->subquery = sub;
     elem->children.clear();
     elem->children.push_back(elem->subquery);
@@ -230,7 +268,8 @@ void ASTRewriteCTETransformer::mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &
   }
 }
 
-void ASTRewriteCTETransformer::setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_) {
+void ASTRewriteCTETransformer::setCTEMap(
+  const std::map<String, DB::CommonTableExpr> &cte_map_) {
   cte_map = cte_map_;
 }
 
