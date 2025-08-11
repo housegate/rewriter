@@ -1,4 +1,8 @@
+
 #pragma once
+
+#include <unordered_map>
+#include <unordered_set>
 
 #include <Parsers/IAST.h>
 
@@ -110,6 +114,7 @@ public:
 
   void transform(ASTPtr &ast) const override;
   void setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_);
+  void setCTEASTMap(const std::unordered_map<String, ASTPtr> &cte_ast_map);
 
 private:
   ASTPtr buildWithList(
@@ -119,6 +124,7 @@ private:
   void injectOnce(const ASTPtr &ast, std::unordered_map<String, bool> &used_cte_key_map) const;
   void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
 
+  std::unordered_map<String, ASTPtr> cte_ast_map;
   std::map<String, DB::CommonTableExpr> cte_map;
 
 protected:
@@ -200,4 +206,15 @@ public:
 protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
+
+void collectTableNamesFromAST(const DB::ASTPtr &node, std::unordered_set<std::string> &out);
+
+// Parse each CTE's SQL into an AST once; invalid entries are skipped but others continue.
+std::unordered_map<String, ASTPtr> parseCTEMapToAST(
+    const std::map<String, CommonTableExpr> &cte_map);
+
+// Convenience: collect table names from all CTE ASTs.
+void collectTableNamesFromCTEMap(
+    const std::map<String, CommonTableExpr> &cte_map,
+    std::unordered_set<std::string> &out);
 } // namespace DB

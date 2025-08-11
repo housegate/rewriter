@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 // ------------------------ Debug dump helpers ------------------------
@@ -227,6 +228,75 @@ static std::string RunCTERewriteByName(const std::string &case_name) {
     m.emplace(kv.first, DB::CommonTableExpr{kv.first, kv.second});
   }
   return RunCTERewrite(c->origin_sql, m);
+}
+
+// Run CTE rewrite and also return the collected original table names
+static std::pair<std::string, std::vector<std::string>>
+RunCTERewriteWithNames(const std::string &origin_sql,
+                       const std::map<std::string, DB::CommonTableExpr> &cte_map) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(origin_sql);
+
+  if (!cte_map.empty()) {
+    auto *cte_option = req.add_options();
+    cte_option->set_op(rewriter::RewriteOp::CommonTableExprRewrite);
+    auto *cte_args = cte_option->mutable_common_table_expr_args();
+    for (const auto &kv : cte_map) {
+      auto &msg = (*cte_args->mutable_cte_map())[kv.first];
+      msg.set_alias(kv.second.alias.empty() ? kv.first : kv.second.alias);
+      msg.set_sql(kv.second.sql);
+    }
+  }
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
+    return {"", {}}; // or throw
+  }
+  std::vector<std::string> names(resp.original_accessed_table_names().begin(),
+                                 resp.original_accessed_table_names().end());
+  return {resp.sql_after_rewrite(), std::move(names)};
+}
+
+// Run CTE + TableName rewrite and also return the collected original table names
+static std::pair<std::string, std::vector<std::string>>
+RunCTEAndTableRewriteWithNames(const std::string &origin_sql,
+                               const std::map<std::string, DB::CommonTableExpr> &cte_map,
+                               const std::map<std::string, std::string> &table_map) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(origin_sql);
+
+  if (!cte_map.empty()) {
+    auto *cte_option = req.add_options();
+    cte_option->set_op(rewriter::RewriteOp::CommonTableExprRewrite);
+    auto *cte_args = cte_option->mutable_common_table_expr_args();
+    for (const auto &kv : cte_map) {
+      auto &msg = (*cte_args->mutable_cte_map())[kv.first];
+      msg.set_alias(kv.second.alias.empty() ? kv.first : kv.second.alias);
+      msg.set_sql(kv.second.sql);
+    }
+  }
+  if (!table_map.empty()) {
+    auto *tbl_option = req.add_options();
+    tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
+    auto *tbl_args = tbl_option->mutable_table_name_args();
+    for (const auto &kv : table_map) {
+      (*tbl_args->mutable_table_map())[kv.first] = kv.second;
+    }
+  }
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
+    return {"", {}}; // or throw
+  }
+  std::vector<std::string> names(resp.original_accessed_table_names().begin(),
+                                 resp.original_accessed_table_names().end());
+  return {resp.sql_after_rewrite(), std::move(names)};
 }
 
 // ------------------------ Helpers: run CTE + TableName rewrite ------------------------
@@ -588,6 +658,67 @@ TEST(CTEOnly, LargeMap_NoneUsed_NoInjection) {
   EXPECT_EQ(norm.find(" c AS "), std::string::npos);
   EXPECT_EQ(norm.find(" d AS "), std::string::npos);
   EXPECT_EQ(norm.find(" e AS "), std::string::npos);
+}
+
+TEST(OriginalNames, CTEOnly_MainAndCTEBody) {
+  const std::string origin_sql = "SELECT * FROM c1";
+  std::map<std::string, DB::CommonTableExpr> cte_map{{"c1", {"c1", "SELECT id FROM s1"}}};
+
+  auto [out, names] = RunCTERewriteWithNames(origin_sql, cte_map);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(out.empty());
+
+  std::unordered_set<std::string> s(names.begin(), names.end());
+  // Expect the identifier used in the main query and the base table inside CTE body.
+  EXPECT_TRUE(s.count("c1")) << "main query identifier should be present";
+  EXPECT_TRUE(s.count("s1")) << "cte body base table should be present";
+}
+
+TEST(OriginalNames, TableOnly_KeepOriginalNames) {
+  const std::string origin_sql = "SELECT * FROM Withdraw";
+  std::map<std::string, DB::CommonTableExpr> cte_map{};
+  std::map<std::string, std::string> table_map{{"Withdraw", "autogen_456"}};
+
+  auto [out, names] = RunCTEAndTableRewriteWithNames(origin_sql, cte_map, table_map);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(out.empty());
+
+  std::unordered_set<std::string> s(names.begin(), names.end());
+  EXPECT_TRUE(s.count("Withdraw"));
+  EXPECT_FALSE(s.count("autogen_456")) << "rewritten name should not appear in original names";
+}
+
+TEST(OriginalNames, CTEAndTableRewrite_Combined) {
+  const std::string origin_sql =
+      "SELECT * FROM `sqlquery-123abc` LIMIT 1 UNION SELECT * FROM Withdraw";
+
+  std::map<std::string, DB::CommonTableExpr> cte_map{
+      {"sqlquery-123abc", {"sqlquery-123abc", "SELECT * FROM Transfer"}},
+  };
+  std::map<std::string, std::string> table_map{{"Transfer", "autogen_123"}, {"Withdraw", "autogen_456"}};
+
+  auto [out, names] = RunCTEAndTableRewriteWithNames(origin_sql, cte_map, table_map);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(out.empty());
+
+  std::unordered_set<std::string> s(names.begin(), names.end());
+  // CTE name in main query, base table inside CTE body, and table on the second UNION branch.
+  EXPECT_TRUE(s.count("sqlquery-123abc"));
+  EXPECT_TRUE(s.count("Transfer"));
+  EXPECT_TRUE(s.count("Withdraw"));
+  // Rewritten names must not appear in original list.
+  EXPECT_FALSE(s.count("autogen_123"));
+  EXPECT_FALSE(s.count("autogen_456"));
+}
+
+TEST(OriginalNames, NoTables_NoCTE) {
+  const std::string origin_sql = "SELECT 1";
+  std::map<std::string, DB::CommonTableExpr> cte_map{};
+
+  auto [out, names] = RunCTERewriteWithNames(origin_sql, cte_map);
+  TRACE_LAST_REWRITE();
+  ASSERT_FALSE(out.empty());
+  EXPECT_TRUE(names.empty());
 }
 
 #if !REWRITER_RELEASE_MAIN

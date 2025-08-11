@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <memory>
+#include <unordered_set>
 
 #include "ASTTransformers.h"
 #include "rewriter.grpc.pb.h"
@@ -39,7 +40,10 @@ grpc::Status RewriterServiceImpl::Rewrite(
     std::map<std::string, std::string> table_name_map_;
     std::map<std::string, DB::RemoteTable> remote_table_map_;
     std::map<std::string, DB::TableWithDatabase> table_with_database_map_;
+    std::unordered_set<std::string> original_accessed_table_names_set_;
     bool has_table_name_written = false;
+
+    DB::collectTableNamesFromAST(ast, original_accessed_table_names_set_);
 
     // TODO: 把取req map的逻辑和应用transform的逻辑分离, 需判断options是否会存在多个同一op
     for (auto &option : request->options()) {
@@ -154,8 +158,23 @@ grpc::Status RewriterServiceImpl::Rewrite(
             kv.second.rewriter::RewriteCommonTableExprArgs_CommonTableExpr::alias(),
             kv.second.rewriter::RewriteCommonTableExprArgs_CommonTableExpr::sql()};
         }
+
+        auto cte_ast_map = DB::parseCTEMapToAST(cte_map_);
+        // Collect original table names that appear inside CTE subqueries (before any CTE rewrite)
+        for (const auto &kv : cte_ast_map) {
+          // 如果不希望把 CTE 的别名当作“表名”统计，则在此移除
+          if (auto it = original_accessed_table_names_set_.find(kv.first);
+            it != original_accessed_table_names_set_.end()) {
+            original_accessed_table_names_set_.erase(it);
+          }
+          DB::collectTableNamesFromAST(kv.second, original_accessed_table_names_set_);
+        }
+
+        cte_transformer.setCTEASTMap(cte_ast_map);
         cte_transformer.setCTEMap(cte_map_);
+        // cte_transformer.
         cte_transformer.transform(ast);
+        // table name will rewrite after cte.
         if (has_table_name_written) {
           doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
         }
@@ -170,6 +189,9 @@ grpc::Status RewriterServiceImpl::Rewrite(
     std::string result_sql = ast->formatWithPossiblyHidingSensitiveData(
       0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
 
+    for (const auto &name : original_accessed_table_names_set_) {
+      response->add_original_accessed_table_names(name);
+    }
     response->set_sql_after_rewrite(result_sql);
     response->set_message("success");
     response->set_code(rewriter::RewriteCode::Success);
@@ -195,7 +217,7 @@ void RewriterServiceImpl::doTableNameRewrite(DB::ASTPtr ast,
 }
 
 // Define a constant for the version
-const std::string VERSION = "0.1.16";
+const std::string VERSION = "0.1.17";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {

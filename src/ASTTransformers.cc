@@ -35,6 +35,48 @@ extern const int NO_SUCH_COLUMN_IN_TABLE;
 extern const int CANNOT_COMPILE_REGEXP;
 } // namespace ErrorCodes
 
+void collectTableNamesFromAST(const DB::ASTPtr &node, std::unordered_set<std::string> &out) {
+  if (!node) return;
+
+  if (auto *te = node->as<DB::ASTTableExpression>()) {
+    if (te->database_and_table_name) {
+      if (auto *id = te->database_and_table_name->as<ASTTableIdentifier>()) {
+        const auto n = id->name(); // "db.table"
+        if (!n.empty()) out.insert(n);
+      }
+    }
+  }
+
+  for (auto &ch : node->children) { collectTableNamesFromAST(ch, out); }
+}
+
+std::unordered_map<String, ASTPtr> parseCTEMapToAST(
+  const std::map<String, CommonTableExpr> &cte_map) {
+  std::unordered_map<String, ASTPtr> out;
+  for (const auto &kv : cte_map) {
+    const String &alias = kv.first;
+    const CommonTableExpr &cte = kv.second;
+    const String &sub_sql = cte.sql;
+    if (sub_sql.empty()) continue;
+    try {
+      const char *sub_pos = sub_sql.data();
+      const char *sub_end = sub_pos + sub_sql.size();
+      ParserQuery sub_parser(sub_end, false);
+      ASTPtr sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
+      if (sub_ast) out.emplace(alias, std::move(sub_ast));
+    } catch (const Exception &) {
+      // Skip invalid CTE entries but continue others
+    }
+  }
+  return out;
+}
+
+void collectTableNamesFromCTEMap(
+  const std::map<String, CommonTableExpr> &cte_map, std::unordered_set<std::string> &out) {
+  const auto ast_map = parseCTEMapToAST(cte_map);
+  for (const auto &p : ast_map) { collectTableNamesFromAST(p.second, out); }
+}
+
 void ASTTransformerList::format(WriteBuffer &ostr, const FormatSettings &settings) const {
   for (const auto &child : children) {
     ostr << ' ';
@@ -126,6 +168,11 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
 }
 
 /*============================CTE Rewriting Start============================*/
+
+void ASTRewriteCTETransformer::setCTEASTMap(const std::unordered_map<String, ASTPtr> &cte_ast_map) {
+  this->cte_ast_map = cte_ast_map;
+}
+
 void ASTRewriteCTETransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
   ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
        << " ";
@@ -195,21 +242,19 @@ ASTPtr ASTRewriteCTETransformer::buildWithList(
 
   if (!select_ast || used_key.empty()) return nullptr;
   auto list = std::make_shared<ASTExpressionList>();
+  const std::unordered_map<String, ASTPtr> *cte_ast_map_ptr = &cte_ast_map;
+  std::unordered_map<String, ASTPtr> local_cte_ast_map;
+  if (cte_ast_map_ptr->empty()) {
+    local_cte_ast_map = parseCTEMapToAST(cte_map);
+    cte_ast_map_ptr = &local_cte_ast_map;
+  }
+  // const auto cte_ast_map = parseCTEMapToAST(cte_map);
   for (const auto &[alias, cte] : cte_map) {
     if (!used_key.contains(alias) || cte.sql.empty()) continue;
 
-    const String &sub_sql = cte.sql;
-    DB::ASTPtr sub_ast;
-    try {
-      const char *sub_pos = sub_sql.data();
-      const char *sub_end = sub_pos + sub_sql.size();
-      DB::ParserQuery sub_parser(sub_end, false);
-      sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
-    } catch (const DB::Exception &) {
-      std::cout << "CTE Query Parse Failed: " << sub_sql << "; it's CTE key is: " << alias
-                << std::endl;
-      continue;
-    }
+    auto it = cte_ast_map_ptr->find(alias);
+    if (it == cte_ast_map_ptr->end()) continue;
+    ASTPtr sub_ast = it->second;
     if (!sub_ast) continue;
 
     const auto sub = std::make_shared<ASTSubquery>();
@@ -268,8 +313,7 @@ void ASTRewriteCTETransformer::mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &
   }
 }
 
-void ASTRewriteCTETransformer::setCTEMap(
-  const std::map<String, DB::CommonTableExpr> &cte_map_) {
+void ASTRewriteCTETransformer::setCTEMap(const std::map<String, DB::CommonTableExpr> &cte_map_) {
   cte_map = cte_map_;
 }
 
