@@ -17,6 +17,8 @@ using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
+using rewriter::RewriteErrorMessageRequest;
+using rewriter::RewriteErrorMessageResponse;
 using rewriter::RewriterService;
 using rewriter::RewriteSQLRequest;
 using rewriter::RewriteSQLResponse;
@@ -27,7 +29,14 @@ public:
     const RewriteSQLRequest *request,
     RewriteSQLResponse *response) override;
 
+  Status RewriteErrorMessage(ServerContext *context,
+    const RewriteErrorMessageRequest *request,
+    RewriteErrorMessageResponse *response) override;
+
 private:
+  DB::ASTPtr rewriteSQLImpl(
+    const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options, DB::ASTPtr ast);
+
   void doTableNameRewrite(DB::ASTPtr ast,
     const std::map<std::string, std::string> &table_name_map_,
     const std::map<std::string, DB::RemoteTable> &remote_table_map_,

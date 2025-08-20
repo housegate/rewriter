@@ -105,4 +105,17 @@ message RewriteSQLResponse {
 
 service RewriterService {
     rpc Rewrite (RewriteSQLRequest) returns (RewriteSQLResponse) {}
+    rpc RewriteErrorMessage (RewriteErrorMessageRequest) returns (RewriteErrorMessageResponse) {}
+}
+
+message RewriteErrorMessageRequest {
+    string sql = 1;
+    string error_message = 2;
+    repeated RewriteOption options = 3;
+}
+
+message RewriteErrorMessageResponse {
+    RewriteCode code = 1;
+    string message = 2;
+    string error_after_rewrite = 3;
 }
