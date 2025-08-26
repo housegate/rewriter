@@ -134,7 +134,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
     std::unordered_set<std::string> original_accessed_table_names_set_;
     DB::collectTableNamesFromAST(ast, original_accessed_table_names_set_);
 
-    // 预扫描 CTE，用于收集 CTE 子查询中访问到的原始表名（不改变 AST）
+    // Pre-scan CTE to collect the original table names accessed in the CTE subquery (without altering the AST).
     for (const auto &option : request->options()) {
       if (option.op() == rewriter::RewriteOp::CommonTableExprRewrite) {
         std::map<std::string, DB::CommonTableExpr> cte_map_;
@@ -156,7 +156,6 @@ grpc::Status RewriterServiceImpl::Rewrite(
       }
     }
 
-    // 提取的 AST 重写逻辑
     ast = rewriteSQLImpl(request->options(), ast);
 
     DB::IdentifierQuotingRule identifier_quoting_rule_ = DB::IdentifierQuotingRule::WhenNecessary;
@@ -304,7 +303,7 @@ DB::ASTPtr RewriterServiceImpl::rewriteSQLImpl(
       cte_transformer.setCTEMap(cte_map_);
       cte_transformer.transform(ast);
 
-      // 若之前已做过表名改写，则在 CTE 改写后再次应用一次
+      // If the table name has been rewritten previously, apply it again after the CTE rewrite.
       if (has_table_name_written) {
         doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
       }
@@ -403,7 +402,7 @@ void RewriterServiceImpl::doTableNameRewrite(DB::ASTPtr ast,
 }
 
 // Define a constant for the version
-const std::string VERSION = "0.1.17";
+const std::string VERSION = "0.1.18";
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t port) {
