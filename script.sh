@@ -8,11 +8,18 @@ Usage: $0 <command> [args]
 
 Commands:
   prepare                   安装环境依赖（Linux/macOS 自动识别）
-  build                     配置并编译整个项目
+  build                     完整重新构建（删除 build 目录）
+  rebuild                   增量编译（快速，推荐用于日常开发）
   test                      构建并运行单元测试
+  clean                     清理 build 目录
   docker list               列出本地所有 Docker 镜像
   docker build <version>    根据版本号构建 Docker 镜像
   docker push  <version>    将指定版本的镜像推送到远端仓库
+
+优化建议:
+  - 首次构建使用: ./script.sh build
+  - 后续修改使用: ./script.sh rebuild (快 10 倍以上)
+  - 测试优化:     ./script.sh test
 EOF
 }
 
@@ -53,11 +60,19 @@ prepare() {
     echo ">>> prepare done"
 }
 
-# 编译项目
+# 编译项目（完整重新构建）
 build() {
+    echo "=========================================="
+    echo "完整重新构建（删除 build 目录）"
+    echo "注意：首次构建约需 15-20 分钟"
+    echo "=========================================="
+    START_TIME=$(date +%s)
+    
     prepare
-    echo ">>> Starting build"
+    echo ">>> [1/5] 清理旧的构建目录"
     rm -rf build/
+    
+    echo ">>> [2/5] 修补子模块兼容性问题"
     sed -i 's/const size_type count_/size_type count_/' \
         clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
 
@@ -66,11 +81,16 @@ build() {
     ln -s . clickHouse
     popd > /dev/null
 
+    echo ">>> [3/5] 配置 CMake（优化：禁用 ThinLTO + 使用 mold 链接器）"
     cmake -B build -S . -GNinja \
       -DENABLE_RUST=OFF \
       -DENABLE_TESTS=OFF \
-      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
+      -DBUILD_TESTING=ON \
+      -DENABLE_THINLTO=OFF \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 
+    echo ">>> [4/5] 构建 OpenSSL 库"
     ARCH=$(uname -m)
     INC=clickHouse/contrib/openssl-cmake/linux_${ARCH}/include
     LIB=build/clickHouse/contrib/openssl-cmake
@@ -91,12 +111,72 @@ build() {
         getconf _NPROCESSORS_ONLN 2>/dev/null ||
         echo 4
     )
-    echo ">>> Building with -j$JOBS"
+    echo ">>> [5/5] 编译主程序（使用 $JOBS 个并行任务）"
     ninja -C build -j"$JOBS" clickhouse_sentio_rewriter
+    
+    # 如果启用了测试，也编译测试
+    if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
+        echo ">>> [5.1/5] 编译测试程序"
+        ninja -C build -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
+    fi
 
     # 清理子模块改动
     git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null
-    echo ">>> build done"
+    
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    echo "=========================================="
+    echo "✅ 构建完成！总耗时: ${DURATION} 秒 ($((DURATION / 60)) 分 $((DURATION % 60)) 秒)"
+    echo "可执行文件: build/clickhouse_sentio_rewriter"
+    echo "=========================================="
+}
+
+# 增量编译（快速，适合日常开发）
+rebuild() {
+    echo "=========================================="
+    echo "增量编译模式（只重新编译修改的文件）"
+    echo "预计耗时: 30秒 - 3分钟"
+    echo "=========================================="
+    START_TIME=$(date +%s)
+    
+    if [ ! -d "build" ]; then
+        echo "❌ build 目录不存在，请先运行: ./script.sh build"
+        exit 1
+    fi
+    
+    JOBS=$(
+        command -v nproc   >/dev/null && nproc ||
+        sysctl -n hw.ncpu  2>/dev/null ||
+        getconf _NPROCESSORS_ONLN 2>/dev/null ||
+        echo 4
+    )
+    
+    echo ">>> [1/2] 重新编译修改的源文件"
+    cd build
+    ninja -j"$JOBS" clickhouse_sentio_rewriter
+    cd ..
+    
+    # 如果启用了测试，也编译测试
+    if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
+        echo ">>> [2/2] 重新编译测试程序"
+        cd build
+        ninja -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
+        cd ..
+    fi
+    
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    echo "=========================================="
+    echo "✅ 增量编译完成！耗时: ${DURATION} 秒"
+    echo "可执行文件: build/clickhouse_sentio_rewriter"
+    echo "=========================================="
+}
+
+# 清理构建目录
+clean() {
+    echo ">>> 清理 build 目录..."
+    rm -rf build/
+    echo ">>> 清理完成"
 }
 
 test() {
@@ -111,13 +191,36 @@ docker_list() {
 
 docker_build_image() {
     local ver=$1
-    echo ">>> Building Docker image with tag: $ver"
+    echo "=========================================="
+    echo "构建 Docker 镜像: $ver"
+    echo "=========================================="
+    
+    # 检查本地二进制文件是否存在
+    if [ ! -f "build/clickhouse_sentio_rewriter" ]; then
+        echo "❌ 错误: build/clickhouse_sentio_rewriter 不存在"
+        echo "请先运行: ./script.sh build 或 ./script.sh rebuild"
+        exit 1
+    fi
+    
+    echo ">>> [1/3] 更新 Docker 中的二进制文件"
+    cp -v build/clickhouse_sentio_rewriter docker/bare/root/clickhouse_sentio_rewriter
+    
+    local old_size=$(du -h docker/bare/root/clickhouse_sentio_rewriter | awk '{print $1}')
+    echo "二进制文件大小: $old_size"
+    
+    echo ">>> [2/3] 构建 Docker 镜像"
     (
       cd docker/bare
       docker buildx build --platform linux/amd64 . \
           -t us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:"${ver}"
     )
-    echo ">>> Back to project root ($(pwd))"
+    
+    echo ">>> [3/3] Docker 镜像构建完成"
+    echo "=========================================="
+    echo "✅ 镜像标签: sql-rewriter:$ver"
+    echo "=========================================="
+    echo "下一步: ./script.sh docker push $ver"
+    echo "=========================================="
 }
 
 docker_push_image() {
@@ -143,6 +246,12 @@ case "$cmd" in
         ;;
     build)
         build
+        ;;
+    rebuild)
+        rebuild
+        ;;
+    clean)
+        clean
         ;;
     test)
         test

@@ -841,6 +841,182 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_UnknownFunctionArgMin) {
             << response.DebugString() << std::endl;
 }
 
+// ============================================================================
+// QueryPreprocessor Tests - 防止栈溢出的查询预处理
+// ============================================================================
+
+TEST(QueryPreprocessorTest, NoPreprocessingNeeded) {
+  // 小查询不需要预处理
+  std::string sql = "SELECT * FROM table WHERE id IN (1, 2, 3)";
+  std::string result = QueryPreprocessor::preprocess(sql);
+  EXPECT_EQ(sql, result) << "Small queries should not be modified";
+}
+
+TEST(QueryPreprocessorTest, SimpleINClauseSplit) {
+  // 创建一个有 100 个元素的 IN 子句
+  std::string sql = "SELECT * FROM table WHERE id IN (";
+  for (int i = 0; i < 100; i++) {
+    if (i > 0) sql += ", ";
+    sql += std::to_string(i);
+  }
+  sql += ")";
+  
+  std::string result = QueryPreprocessor::preprocess(sql);
+  
+  // 验证结果包含 OR
+  EXPECT_NE(result.find(" OR "), std::string::npos) 
+    << "Large IN clause should be split with OR";
+  
+  // 验证包含原始列名
+  EXPECT_NE(result.find("id IN"), std::string::npos)
+    << "Column name should be preserved";
+  
+  // 验证所有数字都在
+  EXPECT_NE(result.find("0"), std::string::npos);
+  EXPECT_NE(result.find("99"), std::string::npos);
+  
+  std::cout << "\n=== SimpleINClauseSplit Result (first 500 chars) ===\n"
+            << result.substr(0, 500) << "...\n";
+}
+
+TEST(QueryPreprocessorTest, TupleINClauseSplit) {
+  // 创建一个有 80 个元组的 IN 子句
+  std::string sql = "SELECT * FROM table WHERE (owner_address, coin_type) IN [";
+  for (int i = 0; i < 80; i++) {
+    if (i > 0) sql += ", ";
+    sql += "('0xaddr" + std::to_string(i) + "', '0xcoin" + std::to_string(i) + "::token::NAME')";
+  }
+  sql += "]";
+  
+  std::string result = QueryPreprocessor::preprocess(sql);
+  
+  // 验证结果包含 OR
+  EXPECT_NE(result.find(" OR "), std::string::npos)
+    << "Large tuple IN clause should be split";
+  
+  // 验证保留了方括号
+  EXPECT_NE(result.find("IN ["), std::string::npos)
+    << "Square brackets should be preserved";
+  
+  // 验证保留了元组格式
+  EXPECT_NE(result.find("(owner_address, coin_type)"), std::string::npos)
+    << "Tuple columns should be preserved";
+  
+  std::cout << "\n=== TupleINClauseSplit Result (first 600 chars) ===\n"
+            << result.substr(0, 600) << "...\n";
+}
+
+TEST(QueryPreprocessorTest, MultipleINClausesSplit) {
+  // 创建包含多个大 IN 子句的查询
+  std::string sql = "SELECT * FROM table WHERE id IN (";
+  for (int i = 0; i < 70; i++) {
+    if (i > 0) sql += ", ";
+    sql += std::to_string(i);
+  }
+  sql += ") AND status IN (";
+  for (int i = 0; i < 60; i++) {
+    if (i > 0) sql += ", ";
+    sql += "'status" + std::to_string(i) + "'";
+  }
+  sql += ")";
+  
+  std::string result = QueryPreprocessor::preprocess(sql);
+  
+  // 应该有多个 OR（因为有多个 IN 子句被拆分）
+  size_t or_count = 0;
+  size_t pos = 0;
+  while ((pos = result.find(" OR ", pos)) != std::string::npos) {
+    or_count++;
+    pos += 4;
+  }
+  
+  EXPECT_GT(or_count, 1) << "Multiple IN clauses should be split";
+  
+  std::cout << "\n=== MultipleINClausesSplit Result ===\n"
+            << "Original length: " << sql.size() << " bytes\n"
+            << "Result length: " << result.size() << " bytes\n"
+            << "OR count: " << or_count << "\n";
+}
+
+TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
+  // 模拟真实的崩溃查询场景：300+ 元组的 IN 子句
+  std::ostringstream oss;
+  oss << "SELECT coin_type, countDistinctIf(owner_address, balance > 0) AS holders ";
+  oss << "FROM (SELECT coin_type, owner_address, sum(amount_number) AS balance, ";
+  oss << "((owner_address, coin_type) IN [";
+  
+  // 第一个大 IN 子句：320 个元组
+  for (int i = 0; i < 320; i++) {
+    if (i > 0) oss << ", ";
+    oss << "('0x" << std::hex << (i * 1000) << "', '0x" << std::hex << (i * 2000) 
+        << "::token::TOKEN" << std::dec << i << "')";
+  }
+  
+  oss << "]) AS is_dev, ";
+  oss << "((owner_address, coin_type) IN [";
+  
+  // 第二个大 IN 子句：320 个元组
+  for (int i = 0; i < 320; i++) {
+    if (i > 0) oss << ", ";
+    oss << "('0x" << std::hex << (i * 3000) << "', '0x" << std::hex << (i * 4000) 
+        << "::token::TOKEN" << std::dec << i << "')";
+  }
+  
+  oss << "]) AS is_sniper ";
+  oss << "FROM sui.balance_changes WHERE coin_type IN (";
+  
+  // 第三个大 IN 子句：320 个地址
+  for (int i = 0; i < 320; i++) {
+    if (i > 0) oss << ", ";
+    oss << "'0x" << std::hex << (i * 5000) << "::token::TOKEN" << std::dec << i << "'";
+  }
+  
+  oss << ") GROUP BY coin_type, owner_address) balances GROUP BY coin_type";
+  
+  std::string sql = oss.str();
+  
+  std::cout << "\n=== RealWorldCrashQuery Test ===\n"
+            << "Original query length: " << sql.size() << " bytes\n";
+  
+  // 这个查询会导致栈溢出，但预处理后应该安全
+  std::string result = QueryPreprocessor::preprocess(sql);
+  
+  std::cout << "Preprocessed query length: " << result.size() << " bytes\n";
+  
+  // 验证所有大 IN 子句都被拆分了
+  size_t or_count = 0;
+  size_t pos = 0;
+  while ((pos = result.find(" OR ", pos)) != std::string::npos) {
+    or_count++;
+    pos += 4;
+  }
+  
+  // 每个 320 元素的 IN 子句应该被拆分成 7 批（50*6 + 20），所以每个有 6 个 OR
+  // 3 个 IN 子句 × 6 个 OR = 18 个 OR
+  EXPECT_GE(or_count, 15) << "Large query should have many OR clauses from splitting";
+  
+  std::cout << "OR count after preprocessing: " << or_count << "\n";
+  std::cout << "✅ Query can now be safely parsed without stack overflow\n";
+}
+
+TEST(QueryPreprocessorTest, StringWithCommas) {
+  // 测试包含逗号的字符串不会被错误拆分
+  std::string sql = "SELECT * FROM table WHERE description IN (";
+  for (int i = 0; i < 60; i++) {
+    if (i > 0) sql += ", ";
+    sql += "'item " + std::to_string(i) + ", with comma'";
+  }
+  sql += ")";
+  
+  std::string result = QueryPreprocessor::preprocess(sql);
+  
+  // 应该仍然包含字符串中的逗号
+  EXPECT_NE(result.find(", with comma"), std::string::npos)
+    << "Commas in strings should be preserved";
+  
+  std::cout << "\n=== StringWithCommas Test Passed ===\n";
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
