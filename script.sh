@@ -32,12 +32,12 @@ prepare() {
             sudo apt-get update
             sudo apt-get install -y \
                 pkg-config libssl-dev \
-                git cmake ccache python3 ninja-build \
+                git cmake ccache python3 ninja-build mold \
                 nasm yasm gawk lsb-release wget software-properties-common gnupg
             echo ">>> Installing LLVM via apt.llvm.org"
             sudo bash -c "$(wget -qO- https://apt.llvm.org/llvm.sh)"
-            export CC=clang-19
-            export CXX=clang++-19
+            export CC=clang-20
+            export CXX=clang++-20
             ;;
         Darwin*)
             echo ">>> Detected macOS, using Homebrew"
@@ -46,7 +46,7 @@ prepare() {
                 exit 1
             fi
             brew update
-            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm@19
+            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm@19 mold
             export CC="/opt/homebrew/opt/llvm@19/bin/clang"
             export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
             export CPPFLAGS="-I/opt/homebrew/opt/llvm@19/include"
@@ -75,11 +75,18 @@ build() {
     echo ">>> [2/5] 修补子模块兼容性问题"
     sed -i 's/const size_type count_/size_type count_/' \
         clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
+    
+    # 修复 ClickHouse 最新版 numactl-cmake 漏掉的 C 源码导致 link error (undefined symbol: resolve_affinity 等)
+    sed -i 's|"${LIBRARY_DIR}/syscall.c"|"${LIBRARY_DIR}/syscall.c"\n    "${LIBRARY_DIR}/distance.c"\n    "${LIBRARY_DIR}/affinity.c"\n    "${LIBRARY_DIR}/sysfs.c"\n    "${LIBRARY_DIR}/rtnetlink.c"|g' \
+        clickHouse/contrib/numactl-cmake/CMakeLists.txt
 
     pushd clickHouse/src > /dev/null
     rm -rf clickHouse
     ln -s . clickHouse
     popd > /dev/null
+
+    rm -rf contrib
+    ln -s clickHouse/contrib contrib
 
     echo ">>> [3/5] 配置 CMake（优化：禁用 ThinLTO + 使用 mold 链接器）"
     cmake -B build -S . -GNinja \

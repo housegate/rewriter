@@ -104,8 +104,7 @@ void ASTReplaceTransformer::setTableWithDatabaseMap(
 }
 
 void ASTReplaceTransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
-  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
-       << " ";
+  ostr << "APPLY ";
   if (!table_name_map.empty()) {
     ostr << "table_name_map: ";
     for (const auto &kv : table_name_map) { ostr << kv.first << " -> " << kv.second << ", "; }
@@ -174,8 +173,7 @@ void ASTRewriteCTETransformer::setCTEASTMap(const std::unordered_map<String, AST
 }
 
 void ASTRewriteCTETransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
-  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
-       << " ";
+  ostr << "APPLY ";
   if (!cte_map.empty()) {
     ostr << "cte_map: ";
     for (const auto &kv : cte_map) { ostr << kv.first << " -> " << kv.second.sql << ", "; }
@@ -320,8 +318,7 @@ void ASTRewriteCTETransformer::setCTEMap(const std::map<String, DB::CommonTableE
 /*============================CTE Rewriting End============================*/
 
 void ASTRewriteLimitTransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
-  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
-       << " ";
+  ostr << "APPLY ";
   ostr << "limit: " << limit;
 }
 
@@ -365,8 +362,7 @@ void ASTRewriteLimitTransformer::transform(ASTPtr &ast) const {
 }
 
 void ASTRewriteOffsetTransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
-  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
-       << " ";
+  ostr << "APPLY ";
   ostr << "offset: " << offset;
 }
 
@@ -387,8 +383,7 @@ void ASTRewriteOffsetTransformer::transform(ASTPtr &ast) const {
 }
 
 void ASTSettingsTransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
-  ostr << (settings.hilite ? hilite_keyword : "") << "APPLY" << (settings.hilite ? hilite_none : "")
-       << " ";
+  ostr << "APPLY ";
   if (!settings_.empty()) { ostr << "settings: " << settings_.size(); }
 }
 
