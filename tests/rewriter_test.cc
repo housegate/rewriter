@@ -1122,6 +1122,15 @@ TEST(ShowTables, ShowTablesWithProcessor) {
   std::cout << "\n=== ShowTablesWithProcessor Result ===\n" << sql << "\n";
 }
 
+TEST(ShowTables, ShowTablesWithSpecialCharProcessor) {
+  // Processor ID with _, %, and \ to verify double-backslash escaping
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_special", "proc_test%\\");
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+  // proc_test%\ should become proc\\_test\\%\\\\
+  EXPECT_NE(sql.find("proc\\\\_test\\\\%\\\\\\\\%"), std::string::npos);
+  std::cout << "\n=== ShowTablesWithSpecialCharProcessor Result ===\n" << sql << "\n";
+}
+
 TEST(ShowTables, ShowTablesFromDB_NoRewrite) {
   auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES FROM mydb", "", "");
   EXPECT_EQ(stmt_type, "SHOW_TABLES");
