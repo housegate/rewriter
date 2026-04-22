@@ -197,16 +197,18 @@ grpc::Status RewriterServiceImpl::Rewrite(
             };
             auto escapeLike = [](const String &s) {
               String result;
-              result.reserve(s.size() * 2);
+              result.reserve(s.size() * 3);
               for (char c : s) {
-                if (c == '!' || c == '%' || c == '_') result += '!';
+                if (c == '\\' || c == '%' || c == '_') {
+                  result += "\\\\";
+                }
                 result += c;
               }
               return result;
             };
             String result_sql = "SELECT name FROM system.tables WHERE database = '"
               + escapeSql(database) + "' AND name LIKE '"
-              + escapeSql(escapeLike(processor_id)) + "%' ESCAPE '!'";
+              + escapeSql(escapeLike(processor_id)) + "%'";
 
 
             response->set_sql_after_rewrite(result_sql);
