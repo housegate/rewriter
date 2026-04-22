@@ -9,6 +9,8 @@ enum RewriteOp {
     OffsetRewrite = 2;
     SettingsRewrite = 3;
     CommonTableExprRewrite = 4;
+    DatabaseNameRewrite = 5;
+    ShowTablesRewrite = 6;
 }
 
 message RewriteTableNameArgs {
@@ -53,6 +55,20 @@ message RewriteCommonTableExprArgs {
     map<string, CommonTableExpr> cte_map = 1;
 }
 
+// DatabaseNameRewrite rewrites USE <db> statements.
+// The map key is the virtual database name (e.g. processorID),
+// value is the physical database name.
+message RewriteDatabaseNameArgs {
+    map<string, string> database_map = 1;
+}
+
+// ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
+// processor_id is used as prefix filter for table names.
+message RewriteShowTablesArgs {
+    string database = 1;        // physical database to query
+    string processor_id = 2;    // processor prefix for LIKE filter
+}
+
 enum SettingType {
     String = 0;
     Bool = 1;
@@ -82,6 +98,8 @@ message RewriteOption {
         RewriteOffsetArgs offset_args = 4;
         RewriteSettingsArgs settings_args = 5;
         RewriteCommonTableExprArgs common_table_expr_args = 6;
+        RewriteDatabaseNameArgs database_name_args = 7;
+        RewriteShowTablesArgs show_tables_args = 8;
     }
 }
 
@@ -101,6 +119,7 @@ message RewriteSQLResponse {
     string message = 2;
     string sql_after_rewrite = 3;
     repeated string original_accessed_table_names = 4;
+    string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
 }
 
 service RewriterService {

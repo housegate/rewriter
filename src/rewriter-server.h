@@ -2,6 +2,8 @@
 
 #include <IO/WriteBufferFromString.h>
 #include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTShowTablesQuery.h>
+#include <Parsers/ASTUseQuery.h>
 #include <Parsers/IdentifierQuotingStyle.h>
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>

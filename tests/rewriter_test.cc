@@ -1017,6 +1017,145 @@ TEST(QueryPreprocessorTest, StringWithCommas) {
   std::cout << "\n=== StringWithCommas Test Passed ===\n";
 }
 
+// ============================================================================
+// USE Statement Tests
+// ============================================================================
+
+// Helper: run USE rewrite through the full gRPC Rewrite path
+static std::pair<std::string, std::string> RunUseRewrite(
+  const std::string &sql, const std::map<std::string, std::string> &db_map) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+
+  if (!db_map.empty()) {
+    auto *opt = req.add_options();
+    opt->set_op(rewriter::RewriteOp::DatabaseNameRewrite);
+    auto *args = opt->mutable_database_name_args();
+    for (const auto &kv : db_map) {
+      (*args->mutable_database_map())[kv.first] = kv.second;
+    }
+  }
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
+    return {"", ""};
+  }
+  return {resp.sql_after_rewrite(), resp.statement_type()};
+}
+
+TEST(UseStatement, SimpleUse_NoRewrite) {
+  auto [sql, stmt_type] = RunUseRewrite("USE mydb", {});
+  EXPECT_FALSE(sql.empty());
+  EXPECT_EQ(stmt_type, "USE");
+  // Should contain the database name
+  EXPECT_NE(sql.find("mydb"), std::string::npos);
+}
+
+TEST(UseStatement, UseWithMapping) {
+  std::map<std::string, std::string> db_map{{"coinbase", "sentio_coinbase"}};
+  auto [sql, stmt_type] = RunUseRewrite("USE coinbase", db_map);
+  EXPECT_EQ(stmt_type, "USE");
+  EXPECT_NE(sql.find("sentio_coinbase"), std::string::npos);
+  // Original name should not appear
+  EXPECT_EQ(sql.find("coinbase"), sql.find("sentio_coinbase") + std::string("sentio_").size());
+}
+
+TEST(UseStatement, UseNoMatch) {
+  // database not in map → original SQL returned
+  std::map<std::string, std::string> db_map{{"other", "sentio_other"}};
+  auto [sql, stmt_type] = RunUseRewrite("USE mydb", db_map);
+  EXPECT_EQ(stmt_type, "USE");
+  EXPECT_NE(sql.find("mydb"), std::string::npos);
+}
+
+TEST(UseStatement, UseWithBackticks) {
+  std::map<std::string, std::string> db_map{{"my-db", "sentio_mydb"}};
+  auto [sql, stmt_type] = RunUseRewrite("USE `my-db`", db_map);
+  EXPECT_EQ(stmt_type, "USE");
+  EXPECT_NE(sql.find("sentio_mydb"), std::string::npos);
+}
+
+// ============================================================================
+// SHOW TABLES Tests
+// ============================================================================
+
+// Helper: run SHOW TABLES rewrite
+static std::pair<std::string, std::string> RunShowTablesRewrite(
+  const std::string &sql, const std::string &database, const std::string &processor_id) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+
+  if (!database.empty() && !processor_id.empty()) {
+    auto *opt = req.add_options();
+    opt->set_op(rewriter::RewriteOp::ShowTablesRewrite);
+    auto *args = opt->mutable_show_tables_args();
+    args->set_database(database);
+    args->set_processor_id(processor_id);
+  }
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
+    return {"", ""};
+  }
+  return {resp.sql_after_rewrite(), resp.statement_type()};
+}
+
+TEST(ShowTables, SimpleShowTables_NoRewrite) {
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "", "");
+  EXPECT_FALSE(sql.empty());
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+}
+
+TEST(ShowTables, ShowTablesWithProcessor) {
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_coinbase", "coinbase");
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+  // Should be rewritten to a SELECT with prefix filter
+  EXPECT_NE(sql.find("system.tables"), std::string::npos);
+  EXPECT_NE(sql.find("sentio_coinbase"), std::string::npos);
+  EXPECT_NE(sql.find("coinbase%"), std::string::npos);
+  std::cout << "\n=== ShowTablesWithProcessor Result ===\n" << sql << "\n";
+}
+
+TEST(ShowTables, ShowTablesFromDB_NoRewrite) {
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES FROM mydb", "", "");
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+  // Without rewrite option, original SQL is returned
+  EXPECT_NE(sql.find("mydb"), std::string::npos);
+}
+
+TEST(ShowTables, ShowDatabases) {
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW DATABASES", "", "");
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+  EXPECT_NE(sql.find("DATABASES"), std::string::npos);
+}
+
+TEST(ShowTables, ShowTablesLike) {
+  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES LIKE 'transfer%'", "sentio_coinbase", "coinbase");
+  EXPECT_EQ(stmt_type, "SHOW_TABLES");
+  // Should be rewritten to SELECT with processor prefix
+  EXPECT_NE(sql.find("system.tables"), std::string::npos);
+  EXPECT_NE(sql.find("coinbase%"), std::string::npos);
+}
+
+// Verify SELECT statements still get statement_type = "SELECT"
+TEST(StatementType, SelectHasCorrectType) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SELECT 1");
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(resp.statement_type(), "SELECT");
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

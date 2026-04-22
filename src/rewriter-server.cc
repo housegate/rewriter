@@ -140,6 +140,94 @@ grpc::Status RewriterServiceImpl::Rewrite(
   DB::ParserQuery parser(end, false);
   try {
     DB::ASTPtr ast = parseQuery(parser, pos, end, 0, 0, 0);
+
+    DB::IdentifierQuotingRule identifier_quoting_rule_ = DB::IdentifierQuotingRule::WhenNecessary;
+    DB::IdentifierQuotingStyle identifier_quoting_style_ = DB::IdentifierQuotingStyle::Backticks;
+
+    // ===== USE statement handling =====
+    if (auto *use_query = ast->as<DB::ASTUseQuery>()) {
+      String db_name = use_query->getDatabase();
+
+      // Look up DatabaseNameRewrite option for database name mapping
+      for (const auto &option : request->options()) {
+        if (option.op() == rewriter::RewriteOp::DatabaseNameRewrite) {
+          const auto &db_map = option.database_name_args().database_map();
+          auto it = db_map.find(db_name);
+          if (it != db_map.end()) {
+            // Build rewritten USE SQL with physical database name
+            String result_sql = "USE " + it->second;
+            response->set_sql_after_rewrite(result_sql);
+            response->set_statement_type("USE");
+            response->set_message("success");
+            response->set_code(rewriter::RewriteCode::Success);
+            return Status::OK;
+          }
+        }
+      }
+      // No mapping found, return original SQL
+      String result_sql = ast->formatWithPossiblyHidingSensitiveData(
+        0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
+      response->set_sql_after_rewrite(result_sql);
+      response->set_statement_type("USE");
+      response->set_message("success");
+      response->set_code(rewriter::RewriteCode::Success);
+      return Status::OK;
+    }
+
+    // ===== SHOW TABLES statement handling =====
+    if (auto *show_query = ast->as<DB::ASTShowTablesQuery>()) {
+      // Look up ShowTablesRewrite option for processor prefix filtering
+      for (const auto &option : request->options()) {
+        if (option.op() == rewriter::RewriteOp::ShowTablesRewrite) {
+          const auto &args = option.show_tables_args();
+          String database = args.database();
+          String processor_id = args.processor_id();
+
+          if (!database.empty() && !processor_id.empty()) {
+            // Rewrite to processor-prefix-filtered SELECT
+            // Escape single quotes in database and processor_id to prevent SQL injection
+            auto escapeSql = [](const String &s) {
+              String result;
+              result.reserve(s.size());
+              for (char c : s) {
+                if (c == '\'') result += "''";
+                else result += c;
+              }
+              return result;
+            };
+            auto escapeLike = [](const String &s) {
+              String result;
+              result.reserve(s.size() * 2);
+              for (char c : s) {
+                if (c == '!' || c == '%' || c == '_') result += '!';
+                result += c;
+              }
+              return result;
+            };
+            String result_sql = "SELECT name FROM system.tables WHERE database = '"
+              + escapeSql(database) + "' AND name LIKE '"
+              + escapeSql(escapeLike(processor_id)) + "%' ESCAPE '!'";
+
+
+            response->set_sql_after_rewrite(result_sql);
+            response->set_statement_type("SHOW_TABLES");
+            response->set_message("success");
+            response->set_code(rewriter::RewriteCode::Success);
+            return Status::OK;
+          }
+        }
+      }
+      // No rewrite option, return original SQL
+      String result_sql = ast->formatWithPossiblyHidingSensitiveData(
+        0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
+      response->set_sql_after_rewrite(result_sql);
+      response->set_statement_type("SHOW_TABLES");
+      response->set_message("success");
+      response->set_code(rewriter::RewriteCode::Success);
+      return Status::OK;
+    }
+
+    // ===== SELECT / other DML statement handling (original path) =====
     std::cout << "before transformation " << ast->dumpTree() << std::endl;
 
     std::unordered_set<std::string> original_accessed_table_names_set_;
@@ -169,8 +257,6 @@ grpc::Status RewriterServiceImpl::Rewrite(
 
     ast = rewriteSQLImpl(request->options(), ast);
 
-    DB::IdentifierQuotingRule identifier_quoting_rule_ = DB::IdentifierQuotingRule::WhenNecessary;
-    DB::IdentifierQuotingStyle identifier_quoting_style_ = DB::IdentifierQuotingStyle::Backticks;
     std::string result_sql = ast->formatWithPossiblyHidingSensitiveData(
       0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
 
@@ -178,6 +264,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
       response->add_original_accessed_table_names(name);
     }
     response->set_sql_after_rewrite(result_sql);
+    response->set_statement_type("SELECT");
     response->set_message("success");
     response->set_code(rewriter::RewriteCode::Success);
     return Status::OK;
