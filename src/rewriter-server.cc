@@ -206,7 +206,11 @@ grpc::Status RewriterServiceImpl::Rewrite(
               }
               return result;
             };
-            String result_sql = "SELECT name FROM system.tables WHERE database = '"
+            String result_sql = "SELECT multiIf(startsWith(name, '" + escapeSql(processor_id) + "_'), "
+              "substring(name, length('" + escapeSql(processor_id) + "_') + 1), "
+              "startsWith(name, '" + escapeSql(processor_id) + "'), "
+              "substring(name, length('" + escapeSql(processor_id) + "') + 1), "
+              "name) AS name FROM system.tables WHERE database = '"
               + escapeSql(database) + "' AND name LIKE '"
               + escapeSql(escapeLike(processor_id)) + "%'";
 
