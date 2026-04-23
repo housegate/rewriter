@@ -110,11 +110,6 @@ inline const std::vector<CTECase> &Cases() {
       {{"a", "SELECT 1"}, {"b", "SELECT 2"}},
       /*expect_with_count*/ -1,
       {" a AS ", " b AS "}},
-    {"insert_select",
-      "INSERT INTO dst SELECT * FROM c1",
-      {{"c1", "SELECT 1"}},
-      /*expect_with_count*/ 1,
-      {"INSERT INTO dst", "WITH c1 AS"}},
     {"parse_failure_skips_bad",
       "SELECT * FROM good_cte",
       {{"bad", "SELECT * FROM"}, {"good_cte", "SELECT 1"}},
@@ -158,11 +153,6 @@ inline const std::vector<CTECase> &Cases() {
       {{"c1", "SELECT 1"}, {"c2", "SELECT 2"}},
       /*expect_with_count*/ 1,
       {"WITH c1 AS", "WITH c2 AS"}},
-    {"insert_select_with_union",
-      "INSERT INTO dst (x) SELECT * FROM c1 UNION ALL SELECT * FROM c2",
-      {{"c1", "SELECT 1 AS x"}, {"c2", "SELECT 2 AS x"}},
-      /*expect_with_count*/ 1,
-      {"INSERT INTO dst", "WITH c1 AS", "WITH c2 AS"}},
     {"huge_cte_map_unused_many",
       "SELECT 1",
       {{"a", "SELECT 1"},
@@ -381,15 +371,6 @@ TEST(CTEOnly, RunByName_UnionOnce) {
   EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
 }
 
-TEST(CTEOnly, RunByName_InsertSelect) {
-  auto out = RunCTERewriteByName("insert_select");
-  auto norm = NormalizeWS(out);
-  TRACE_LAST_REWRITE();
-  ASSERT_FALSE(norm.empty());
-  EXPECT_NE(norm.find("INSERT INTO dst"), std::string::npos);
-  EXPECT_NE(norm.find("WITH c1 AS"), std::string::npos);
-}
-
 TEST(CTEOnly, RunByName_ParseFailureSkipsBad) {
   auto out = RunCTERewriteByName("parse_failure_skips_bad");
   auto norm = NormalizeWS(out);
@@ -468,17 +449,6 @@ TEST(CTEOnly, RunByName_NestedUnionTree) {
   ASSERT_FALSE(norm.empty());
   // Two WITH clauses are injected, one per union branch
   EXPECT_EQ(CountSubstr(norm, "WITH "), 2u);
-  EXPECT_NE(norm.find(" c1 AS "), std::string::npos);
-  EXPECT_NE(norm.find(" c2 AS "), std::string::npos);
-}
-
-TEST(CTEOnly, RunByName_InsertSelectWithUnion) {
-  auto out = RunCTERewriteByName("insert_select_with_union");
-  auto norm = NormalizeWS(out);
-  TRACE_LAST_REWRITE();
-  ASSERT_FALSE(norm.empty());
-  EXPECT_EQ(CountSubstr(norm, "WITH "), 2u);
-  EXPECT_NE(norm.find("INSERT INTO dst"), std::string::npos);
   EXPECT_NE(norm.find(" c1 AS "), std::string::npos);
   EXPECT_NE(norm.find(" c2 AS "), std::string::npos);
 }
@@ -1115,19 +1085,25 @@ TEST(ShowTables, SimpleShowTables_NoRewrite) {
 TEST(ShowTables, ShowTablesWithProcessor) {
   auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_coinbase", "coinbase");
   EXPECT_EQ(stmt_type, "SHOW_TABLES");
-  // Should be rewritten to a SELECT with prefix filter
+  // Rewritten to a SELECT over system.tables with startsWith-based prefix filter.
   EXPECT_NE(sql.find("system.tables"), std::string::npos);
   EXPECT_NE(sql.find("sentio_coinbase"), std::string::npos);
-  EXPECT_NE(sql.find("coinbase%"), std::string::npos);
+  EXPECT_NE(sql.find("startsWith(name, 'coinbase')"), std::string::npos);
+  // Outer multiIf strips the prefix; inner subquery does the filtering so the
+  // WHERE clause isn't shadowed by the aliased name column.
+  EXPECT_NE(sql.find("multiIf"), std::string::npos);
+  EXPECT_NE(sql.find("FROM (SELECT name FROM system.tables"), std::string::npos);
   std::cout << "\n=== ShowTablesWithProcessor Result ===\n" << sql << "\n";
 }
 
 TEST(ShowTables, ShowTablesWithSpecialCharProcessor) {
-  // Processor ID with _, %, and \ to verify double-backslash escaping
+  // Processor ID with special characters — only single-quote escaping applies
+  // now (LIKE escaping was removed when we switched to startsWith).
   auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_special", "proc_test%\\");
   EXPECT_EQ(stmt_type, "SHOW_TABLES");
-  // proc_test%\ should become proc\\_test\\%\\\\
-  EXPECT_NE(sql.find("proc\\\\_test\\\\%\\\\\\\\%"), std::string::npos);
+  // startsWith uses exact-string match, so the processor_id appears verbatim
+  // inside a single-quoted literal (no LIKE-metachar escaping).
+  EXPECT_NE(sql.find("startsWith(name, 'proc_test%\\')"), std::string::npos);
   std::cout << "\n=== ShowTablesWithSpecialCharProcessor Result ===\n" << sql << "\n";
 }
 
@@ -1147,9 +1123,9 @@ TEST(ShowTables, ShowDatabases) {
 TEST(ShowTables, ShowTablesLike) {
   auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES LIKE 'transfer%'", "sentio_coinbase", "coinbase");
   EXPECT_EQ(stmt_type, "SHOW_TABLES");
-  // Should be rewritten to SELECT with processor prefix
+  // Input LIKE is intentionally ignored — we always filter by processor prefix.
   EXPECT_NE(sql.find("system.tables"), std::string::npos);
-  EXPECT_NE(sql.find("coinbase%"), std::string::npos);
+  EXPECT_NE(sql.find("startsWith(name, 'coinbase')"), std::string::npos);
 }
 
 // Verify SELECT statements still get statement_type = "SELECT"
@@ -1163,6 +1139,225 @@ TEST(StatementType, SelectHasCorrectType) {
   auto status = service.Rewrite(&ctx, &req, &resp);
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(resp.statement_type(), "SELECT");
+}
+
+// ============================================================================
+// Single-table write statement tests
+// ============================================================================
+
+struct WriteOpResult {
+  rewriter::RewriteCode code;
+  std::string statement_type;
+  std::string write_target_table;
+  std::string sql_after_rewrite;
+  std::string message;
+  int original_accessed_count;
+};
+
+static WriteOpResult RunWriteOp(const std::string &sql) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
+
+  return {
+    resp.code(),
+    resp.statement_type(),
+    resp.write_target_table(),
+    resp.sql_after_rewrite(),
+    resp.message(),
+    resp.original_accessed_table_names_size(),
+  };
+}
+
+// --- CREATE TABLE ---
+
+TEST(WriteOp, CreateTable_Simple) {
+  auto r = RunWriteOp("CREATE TABLE t (a Int32) ENGINE=Memory");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "CREATE_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+  EXPECT_EQ(r.original_accessed_count, 0);
+}
+
+TEST(WriteOp, CreateTable_WithDatabase) {
+  auto r = RunWriteOp("CREATE TABLE db.t (a Int32) ENGINE=Memory");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "CREATE_TABLE");
+  EXPECT_EQ(r.write_target_table, "db.t");
+}
+
+TEST(WriteOp, CreateTable_AsSelect_ReturnsTargetOnly) {
+  auto r = RunWriteOp("CREATE TABLE t ENGINE=Memory AS SELECT * FROM src");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "CREATE_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+  EXPECT_EQ(r.original_accessed_count, 0);
+}
+
+TEST(WriteOp, CreateView_Rejected) {
+  auto r = RunWriteOp("CREATE VIEW v AS SELECT 1");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+  EXPECT_TRUE(r.write_target_table.empty());
+}
+
+TEST(WriteOp, CreateMaterializedView_Rejected) {
+  auto r = RunWriteOp("CREATE MATERIALIZED VIEW mv ENGINE=Memory AS SELECT 1 AS a");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, CreateDatabase_Rejected) {
+  auto r = RunWriteOp("CREATE DATABASE d");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+// --- DROP TABLE ---
+
+TEST(WriteOp, DropTable_Simple) {
+  auto r = RunWriteOp("DROP TABLE t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "DROP_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+  EXPECT_EQ(r.original_accessed_count, 0);
+}
+
+TEST(WriteOp, DropTable_WithDatabase) {
+  auto r = RunWriteOp("DROP TABLE db.t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "DROP_TABLE");
+  EXPECT_EQ(r.write_target_table, "db.t");
+}
+
+TEST(WriteOp, DropTable_IfExists) {
+  auto r = RunWriteOp("DROP TABLE IF EXISTS t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "DROP_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, DropTable_MultiTable_Rejected) {
+  auto r = RunWriteOp("DROP TABLE t1, t2");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, DropDatabase_Rejected) {
+  auto r = RunWriteOp("DROP DATABASE d");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, DropView_Rejected) {
+  auto r = RunWriteOp("DROP VIEW v");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, Detach_Rejected) {
+  auto r = RunWriteOp("DETACH TABLE t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, Truncate_Rejected) {
+  auto r = RunWriteOp("TRUNCATE TABLE t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+// --- ALTER TABLE ---
+
+TEST(WriteOp, AlterTable_AddColumn) {
+  auto r = RunWriteOp("ALTER TABLE t ADD COLUMN c Int32");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "ALTER_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, AlterTable_Update) {
+  // ALTER TABLE ... UPDATE is a mutation, not a SQL-standard UPDATE.
+  auto r = RunWriteOp("ALTER TABLE t UPDATE a = 1 WHERE id = 0");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "ALTER_TABLE");
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, AlterTable_ReplacePartitionFromOtherTable) {
+  auto r = RunWriteOp("ALTER TABLE t REPLACE PARTITION 'p' FROM src.other");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "ALTER_TABLE");
+  // Read source is ignored; only the write target is returned.
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, AlterDatabase_Rejected) {
+  auto r = RunWriteOp("ALTER DATABASE d MODIFY SETTING x = 1");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+// --- INSERT ---
+
+TEST(WriteOp, Insert_Values) {
+  auto r = RunWriteOp("INSERT INTO t VALUES (1)");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "INSERT");
+  EXPECT_EQ(r.write_target_table, "t");
+  EXPECT_EQ(r.original_accessed_count, 0);
+}
+
+TEST(WriteOp, Insert_Select_ReturnsTargetOnly) {
+  auto r = RunWriteOp("INSERT INTO db.t SELECT * FROM src");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "INSERT");
+  EXPECT_EQ(r.write_target_table, "db.t");
+  // The SELECT source (src) is NOT reported.
+  EXPECT_EQ(r.original_accessed_count, 0);
+}
+
+TEST(WriteOp, InsertFunction_Rejected) {
+  auto r = RunWriteOp("INSERT INTO FUNCTION remote('host:9000', 'db', 't') VALUES (1)");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+// --- UPDATE / DELETE ---
+
+TEST(WriteOp, Update_Simple) {
+  auto r = RunWriteOp("UPDATE t SET a = 1 WHERE id = 0");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "UPDATE");
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, Update_WithDatabase) {
+  auto r = RunWriteOp("UPDATE db.t SET a = 1 WHERE id = 0");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "UPDATE");
+  EXPECT_EQ(r.write_target_table, "db.t");
+}
+
+TEST(WriteOp, Delete_Simple) {
+  auto r = RunWriteOp("DELETE FROM t WHERE id = 0");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "DELETE");
+  EXPECT_EQ(r.write_target_table, "t");
+}
+
+TEST(WriteOp, Delete_WithDatabase) {
+  auto r = RunWriteOp("DELETE FROM db.t WHERE id = 0");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, "DELETE");
+  EXPECT_EQ(r.write_target_table, "db.t");
+}
+
+// --- Other write-ish statements rejected by getQueryKind() catch-all ---
+
+TEST(WriteOp, Rename_Rejected) {
+  auto r = RunWriteOp("RENAME TABLE a TO b");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
+}
+
+TEST(WriteOp, Optimize_Rejected) {
+  auto r = RunWriteOp("OPTIMIZE TABLE t FINAL");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::RewriteError);
 }
 
 #if !REWRITER_RELEASE_MAIN

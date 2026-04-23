@@ -23,6 +23,35 @@ Commands:
 EOF
 }
 
+# 确保 ClickHouse 源码和 contrib 的 symlink 就绪（cmake 重配置时会引用这些路径）
+ensure_symlinks() {
+    # clickHouse/src/clickHouse -> . 让 #include "clickHouse/..." 能解析
+    if [ ! -e clickHouse/src/clickHouse ]; then
+        (cd clickHouse/src && ln -s . clickHouse)
+    fi
+    # ./contrib -> clickHouse/contrib 给顶层 CMakeLists.txt 用
+    if [ ! -e contrib ]; then
+        ln -s clickHouse/contrib contrib
+    fi
+}
+
+# 幂等地把必要的兼容性补丁打到子模块源码上。每次 build/rebuild 都调一次，
+# 避免 `git submodule foreach git clean` 或开发者手动 reset 把补丁撤销后，
+# ninja 重新编译 numactl 等库时缺符号（undefined symbol: resolve_affinity 等）。
+ensure_patches() {
+    local flatbuf=clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
+    if [ -f "$flatbuf" ] && grep -q 'const size_type count_' "$flatbuf"; then
+        sed -i 's/const size_type count_/size_type count_/' "$flatbuf"
+    fi
+
+    local numactl=clickHouse/contrib/numactl-cmake/CMakeLists.txt
+    # 检测 distance.c 是否已被追加，未追加才打补丁（避免重复追加导致无限叠加）
+    if [ -f "$numactl" ] && ! grep -q '"${LIBRARY_DIR}/distance.c"' "$numactl"; then
+        sed -i 's|"${LIBRARY_DIR}/syscall.c"|"${LIBRARY_DIR}/syscall.c"\n    "${LIBRARY_DIR}/distance.c"\n    "${LIBRARY_DIR}/affinity.c"\n    "${LIBRARY_DIR}/sysfs.c"\n    "${LIBRARY_DIR}/rtnetlink.c"|g' \
+            "$numactl"
+    fi
+}
+
 # 安装依赖
 prepare() {
     echo ">>> Preparing environment"
@@ -73,20 +102,13 @@ build() {
     rm -rf build/
     
     echo ">>> [2/5] 修补子模块兼容性问题"
-    sed -i 's/const size_type count_/size_type count_/' \
-        clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
-    
-    # 修复 ClickHouse 最新版 numactl-cmake 漏掉的 C 源码导致 link error (undefined symbol: resolve_affinity 等)
-    sed -i 's|"${LIBRARY_DIR}/syscall.c"|"${LIBRARY_DIR}/syscall.c"\n    "${LIBRARY_DIR}/distance.c"\n    "${LIBRARY_DIR}/affinity.c"\n    "${LIBRARY_DIR}/sysfs.c"\n    "${LIBRARY_DIR}/rtnetlink.c"|g' \
-        clickHouse/contrib/numactl-cmake/CMakeLists.txt
+    ensure_patches
 
     pushd clickHouse/src > /dev/null
     rm -rf clickHouse
-    ln -s . clickHouse
     popd > /dev/null
-
     rm -rf contrib
-    ln -s clickHouse/contrib contrib
+    ensure_symlinks
 
     echo ">>> [3/5] 配置 CMake（优化：禁用 ThinLTO + 使用 mold 链接器）"
     cmake -B build -S . -GNinja \
@@ -127,9 +149,13 @@ build() {
         ninja -C build -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
     fi
 
-    # 清理子模块改动
+    # 清理子模块改动（撤销打在子模块里的兼容性补丁，下次 build 重新打）
     git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null
-    
+    # 子模块清理会把 clickHouse/src/clickHouse 这个 symlink 也一并清掉，
+    # 这样 cmake 再次重新配置（例如修改 .proto 触发）时就会找不到
+    # clickHouse/Dictionaries/DictionaryFactory.h。这里补回 symlink。
+    ensure_symlinks
+
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     echo "=========================================="
@@ -150,6 +176,11 @@ rebuild() {
         echo "❌ build 目录不存在，请先运行: ./script.sh build"
         exit 1
     fi
+
+    # 补 symlink 和子模块补丁，避免 cmake 重新配置或 ninja 重新构建 numactl 等
+    # 依赖时缺文件 / 缺符号。
+    ensure_symlinks
+    ensure_patches
     
     JOBS=$(
         command -v nproc   >/dev/null && nproc ||
