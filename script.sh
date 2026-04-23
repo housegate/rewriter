@@ -12,8 +12,6 @@ Commands:
   rebuild                   增量编译（快速，推荐用于日常开发）
   test                      构建并运行单元测试
   clean                     清理 build 目录
-  install-brpc              在当前机器上源码编译并安装 brpc 到 /usr/local（POC 用）
-  brpc-build                编译 brpc POC 二进制（ENABLE_BRPC=ON）
   docker list               列出本地所有 Docker 镜像
   docker build <version>    根据版本号构建 Docker 镜像
   docker push  <version>    将指定版本的镜像推送到远端仓库
@@ -224,80 +222,6 @@ test() {
     ctest --test-dir build --output-on-failure
 }
 
-# 在 Linux 构建机上源码编译并安装 brpc 到 /usr/local（POC 用）
-# 只需要执行一次。如果 /usr/local/include/brpc/server.h 已存在则跳过。
-install-brpc() {
-    if [ -f /usr/local/include/brpc/server.h ]; then
-        echo ">>> brpc 已安装（/usr/local/include/brpc/server.h 存在），跳过"
-        return 0
-    fi
-
-    case "$(uname -s)" in
-        Linux*)
-            echo ">>> 安装 brpc 依赖（gflags / leveldb / openssl / protobuf）"
-            sudo apt-get update
-            sudo apt-get install -y \
-                libgflags-dev libprotobuf-dev libprotoc-dev protobuf-compiler \
-                libleveldb-dev libsnappy-dev libssl-dev
-            ;;
-        Darwin*)
-            echo "❌ brpc 在 macOS 上和 ClickHouse 的构建环境不兼容，请在 Linux 构建机上运行"
-            exit 1
-            ;;
-        *)
-            echo "Unsupported OS: $(uname -s)"
-            exit 1
-            ;;
-    esac
-
-    local workdir=/tmp/brpc-build
-    rm -rf "$workdir"
-    git clone --depth=1 https://github.com/apache/brpc.git "$workdir"
-    (
-        cd "$workdir"
-        mkdir -p build && cd build
-        cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DWITH_GLOG=OFF
-        make -j"$(nproc)"
-        sudo make install
-    )
-    echo ">>> brpc 安装完成: /usr/local/lib/libbrpc.a"
-}
-
-# 编译 brpc POC 二进制（假设已经跑过一次 build，cmake 缓存存在）
-brpc-build() {
-    if [ ! -d "build" ]; then
-        echo "❌ build 目录不存在，先运行: ./script.sh build"
-        exit 1
-    fi
-    if [ ! -f /usr/local/include/brpc/server.h ]; then
-        echo "❌ 未检测到 brpc，先运行: ./script.sh install-brpc"
-        exit 1
-    fi
-
-    ensure_symlinks
-    ensure_patches
-
-    # 重新 configure 时开启 ENABLE_BRPC；已经 ON 的话 CMake 会复用缓存。
-    cmake -B build -S . -DENABLE_BRPC=ON
-
-    JOBS=$(
-        command -v nproc   >/dev/null && nproc ||
-        sysctl -n hw.ncpu  2>/dev/null ||
-        getconf _NPROCESSORS_ONLN 2>/dev/null ||
-        echo 4
-    )
-    ninja -C build -j"$JOBS" clickhouse_sentio_rewriter_brpc
-    echo "=========================================="
-    echo "✅ brpc POC 构建完成"
-    echo "可执行文件: build/clickhouse_sentio_rewriter_brpc"
-    echo "运行: ./build/clickhouse_sentio_rewriter_brpc [port]"
-    echo "=========================================="
-}
-
 docker_list() {
     echo ">>> Docker images list:"
     docker images
@@ -369,12 +293,6 @@ case "$cmd" in
         ;;
     test)
         test
-        ;;
-    install-brpc)
-        install-brpc
-        ;;
-    brpc-build)
-        brpc-build
         ;;
     docker)
         if [[ $# -lt 1 ]]; then

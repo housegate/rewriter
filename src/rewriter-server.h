@@ -75,7 +75,7 @@ public:
     const RewriteErrorMessageRequest *request,
     RewriteErrorMessageResponse *response) override;
 
-  // Protocol-agnostic dispatch. brpc service (rewriter-brpc-server.cc)
+  // Protocol-agnostic dispatch. The HTTP façade (rewriter-http-server.cc)
   // delegates straight to these; the gRPC wrappers above do the same and just
   // synthesize a Status::OK. No failure paths — errors are reported inside
   // `response` via the `RewriteCode` field.

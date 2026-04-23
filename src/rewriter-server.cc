@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "ASTTransformers.h"
+#include "rewriter-http-server.h"
 #include "rewriter.grpc.pb.h"
 
 #include <s2/s2testing.h>
@@ -743,19 +744,24 @@ void RewriterServiceImpl::doTableNameRewrite(DB::ASTPtr ast,
 const std::string VERSION = "0.1.18";
 const std::string hash = GIT_COMMIT_HASH;
 
-void RunServer(uint16_t port) {
+void RunServer(uint16_t grpc_port, uint16_t http_port) {
   // Print the version information
   std::cout << "Rewriter Server Version: " << VERSION << " (" << hash << ")" << std::endl;
 
-  std::string server_address = "0.0.0.0:" + std::to_string(port);
+  std::string server_address = "0.0.0.0:" + std::to_string(grpc_port);
   RewriterServiceImpl service;
+
+  // HTTP+JSON façade — same `service` instance, different protocol. Starts a
+  // Poco HTTPServer in its own thread pool and returns immediately so the
+  // gRPC Wait() below remains the process-blocking call.
+  rewriter_http::RunHttpServer(http_port, service);
 
   grpc::EnableDefaultHealthCheckService(true);
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << std::endl;
+  std::cout << "Server listening on " << server_address << " (gRPC)" << std::endl;
 
   server->Wait();
 }
@@ -1004,14 +1010,19 @@ std::vector<std::string> QueryPreprocessor::extractElements(const std::string& c
 
 #if REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
+  // argv[1]: gRPC port (default 50051)
+  // argv[2]: HTTP port (default = grpc_port + 1)
+  uint16_t grpc_port = 50051;
   if (argc > 1) {
-    // Convert the first command line argument to an integer for the port
-    int port = std::atoi(argv[1]);
-    RunServer(port);
-  } else {
-    // Use default port 50051
-    RunServer(50051);
+    int parsed = std::atoi(argv[1]);
+    if (parsed > 0 && parsed <= 65535) grpc_port = static_cast<uint16_t>(parsed);
   }
+  uint16_t http_port = static_cast<uint16_t>(grpc_port + 1);
+  if (argc > 2) {
+    int parsed = std::atoi(argv[2]);
+    if (parsed > 0 && parsed <= 65535) http_port = static_cast<uint16_t>(parsed);
+  }
+  RunServer(grpc_port, http_port);
   return 0;
 }
 #endif

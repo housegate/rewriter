@@ -23,6 +23,7 @@ clickhouse_add_executable(rewriter_tests
     rewriter_test.cc
     ${PROJECT_SOURCE_DIR}/src/ASTTransformers.cc
     ${PROJECT_SOURCE_DIR}/src/rewriter-server.cc
+    ${PROJECT_SOURCE_DIR}/src/rewriter-http-server.cc
 )
 
 target_include_directories(rewriter_tests PRIVATE

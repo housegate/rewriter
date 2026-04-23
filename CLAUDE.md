@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 C++23 gRPC service that rewrites ClickHouse SQL before it reaches a backend ClickHouse cluster. Links directly against the ClickHouse source tree (vendored as the `clickHouse/` git submodule) so it can parse queries into ClickHouse's own AST, mutate them via transformers, and format them back out.
 
-Entry point: `src/rewriter-server.cc` — gRPC server + `main()` (guarded by `REWRITER_RELEASE_MAIN`). Default port `50051`, override with `clickhouse_sentio_rewriter <port>`.
+Entry point: `src/rewriter-server.cc` — gRPC server + `main()` (guarded by `REWRITER_RELEASE_MAIN`). Invocation: `clickhouse_sentio_rewriter [grpc_port] [http_port]`. Defaults: gRPC `50051`, HTTP `grpc_port + 1`.
 
-The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRewrite` and `doRewriteErrorMessage`. The gRPC `Rewrite` / `RewriteErrorMessage` methods are thin wrappers that delegate and return `Status::OK` — never add logic to the wrappers, always to the `do*` methods, so the brpc POC stays in sync.
+The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRewrite` and `doRewriteErrorMessage`. The gRPC `Rewrite` / `RewriteErrorMessage` methods are thin wrappers that delegate and return `Status::OK` — never add logic to the wrappers, always to the `do*` methods, so the HTTP façade stays in sync.
 
-**brpc POC (additive, opt-in):** [src/rewriter-brpc-server.h](src/rewriter-brpc-server.h) + [src/rewriter-brpc-server.cc](src/rewriter-brpc-server.cc) implement `rewriter::RewriterService` (the plain-protobuf base class from `rewriter.pb.h`, not `RewriterService::Service` from `rewriter.grpc.pb.h`) and delegate to the same `doRewrite` / `doRewriteErrorMessage`. [src/brpc-main.cc](src/brpc-main.cc) is the brpc binary's entrypoint. Build with `ENABLE_BRPC=ON` — the gRPC binary is completely unaffected when the option is off. brpc serves gRPC + HTTP+JSON + HTTP+protobuf + baidu_std on a single port, so existing gRPC clients keep working.
+**HTTP+JSON façade**: [src/rewriter-http-server.h](src/rewriter-http-server.h) + [src/rewriter-http-server.cc](src/rewriter-http-server.cc) wrap the same `RewriterServiceImpl` instance behind a Poco::Net HTTPServer (Poco is already a transitive dep via `clickhouse_common_io`, no new linkage). Routes: `POST /Rewrite`, `POST /RewriteErrorMessage` (also accept gRPC-style `/rewriter.RewriterService/<Method>`), `GET /healthz`. Body is JSON matching the proto messages — converted via `google::protobuf::util::JsonStringToMessage` / `MessageToJsonString`. The HTTP server runs in its own Poco thread pool started from `RunServer`; the gRPC `Wait()` is what blocks main.
 
 `src/main.cc` and `scripttest.sh` are deprecated — not wired into any build target. Don't spend time on them.
 
@@ -33,8 +33,6 @@ All day-to-day commands go through `./script.sh` (Chinese comments inside). It h
 ./script.sh rebuild          # incremental; use this for day-to-day work
 ./script.sh test             # build + ctest
 ./script.sh clean            # rm -rf build/
-./script.sh install-brpc     # [POC] source-build libbrpc + deps → /usr/local, run once on the build box
-./script.sh brpc-build       # [POC] re-configure with ENABLE_BRPC=ON and build clickhouse_sentio_rewriter_brpc
 ./script.sh docker build <v> # stages build/clickhouse_sentio_rewriter → docker/bare/root/ then buildx
 ./script.sh docker push  <v>
 ```
