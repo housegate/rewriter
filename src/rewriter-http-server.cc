@@ -76,7 +76,10 @@ void handleProtoEndpoint(HTTPServerRequest &request, HTTPServerResponse &respons
 
   std::string body_out;
   pb_util::JsonPrintOptions opts;
-  opts.always_print_primitive_fields = true;
+  // protobuf v25 renamed `always_print_primitive_fields` →
+  // `always_print_fields_with_no_presence`; ClickHouse contrib is on the new
+  // version. Keep proto field names (snake_case) so the JSON matches the .proto.
+  opts.always_print_fields_with_no_presence = true;
   opts.preserve_proto_field_names = true;
   if (auto status = pb_util::MessageToJsonString(resp, &body_out, opts); !status.ok()) {
     writeError(response, "failed to serialize response", HTTPResponse::HTTP_INTERNAL_SERVER_ERROR);
