@@ -66,6 +66,7 @@ private:
 
 class RewriterServiceImpl final : public RewriterService::Service {
 public:
+  // gRPC entrypoints — thin wrappers over the protocol-agnostic do* methods.
   Status Rewrite(ServerContext *context,
     const RewriteSQLRequest *request,
     RewriteSQLResponse *response) override;
@@ -73,6 +74,15 @@ public:
   Status RewriteErrorMessage(ServerContext *context,
     const RewriteErrorMessageRequest *request,
     RewriteErrorMessageResponse *response) override;
+
+  // Protocol-agnostic dispatch. brpc service (rewriter-brpc-server.cc)
+  // delegates straight to these; the gRPC wrappers above do the same and just
+  // synthesize a Status::OK. No failure paths — errors are reported inside
+  // `response` via the `RewriteCode` field.
+  void doRewrite(
+    const RewriteSQLRequest *request, RewriteSQLResponse *response);
+  void doRewriteErrorMessage(
+    const RewriteErrorMessageRequest *request, RewriteErrorMessageResponse *response);
 
 private:
   DB::ASTPtr rewriteSQLImpl(

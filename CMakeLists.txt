@@ -167,6 +167,66 @@ if (BUILD_TESTING)
     add_subdirectory(tests)
 endif ()
 
+# ------------------------------------------------------------------
+# brpc POC binary — speaks gRPC + HTTP+JSON + HTTP+protobuf + baidu_std
+# on a single port. Requires libbrpc to be pre-installed on the build
+# machine (run `./script.sh install-brpc` on the remote build box).
+# Keep OFF by default so the main gRPC build path is unaffected.
+# ------------------------------------------------------------------
+option(ENABLE_BRPC "Build the brpc POC binary (requires libbrpc installed)" OFF)
+
+if (ENABLE_BRPC)
+    find_path(BRPC_INCLUDE_DIR brpc/server.h
+        PATHS /usr/local/include /opt/brpc/include
+    )
+    find_library(BRPC_LIBRARY NAMES brpc
+        PATHS /usr/local/lib /opt/brpc/lib
+    )
+    if (NOT BRPC_INCLUDE_DIR OR NOT BRPC_LIBRARY)
+        message(FATAL_ERROR
+            "ENABLE_BRPC=ON but libbrpc not found. "
+            "On the build machine, run: ./script.sh install-brpc")
+    endif ()
+    message(STATUS "Found brpc: ${BRPC_LIBRARY} (include: ${BRPC_INCLUDE_DIR})")
+
+    # gflags / leveldb / ssl are brpc's transitive deps. ClickHouse's contrib
+    # already links ssl/crypto; gflags and leveldb we pick up from the system
+    # install produced by the install-brpc helper.
+    find_library(GFLAGS_LIBRARY NAMES gflags)
+    find_library(LEVELDB_LIBRARY NAMES leveldb)
+
+    set(BRPC_SOURCES
+        src/brpc-main.cc
+        src/rewriter-brpc-server.cc
+        src/rewriter-server.cc
+        src/ASTTransformers.cc
+    )
+    clickhouse_add_executable(clickhouse_sentio_rewriter_brpc ${BRPC_SOURCES})
+    # Suppress the gRPC `int main` inside rewriter-server.cc for this target;
+    # brpc-main.cc provides main().
+    target_compile_definitions(clickhouse_sentio_rewriter_brpc PRIVATE
+        REWRITER_RELEASE_MAIN=0
+        "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\""
+    )
+    target_include_directories(clickhouse_sentio_rewriter_brpc SYSTEM PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_BINARY_DIR}/protos
+        ${BRPC_INCLUDE_DIR}
+    )
+    target_link_libraries(clickhouse_sentio_rewriter_brpc PRIVATE
+        clickhouse_parsers clickhouse_common_io dbms
+        clickhouse_functions rewriter_grpc_protos absl::debugging_internal
+        ${BRPC_LIBRARY}
+    )
+    if (GFLAGS_LIBRARY)
+        target_link_libraries(clickhouse_sentio_rewriter_brpc PRIVATE ${GFLAGS_LIBRARY})
+    endif ()
+    if (LEVELDB_LIBRARY)
+        target_link_libraries(clickhouse_sentio_rewriter_brpc PRIVATE ${LEVELDB_LIBRARY})
+    endif ()
+endif ()
+
 if (OS_DARWIN)
     # 清空 linker flags 中所有 --threads
     string(REPLACE "-Wl,--threads=16" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
