@@ -1052,7 +1052,11 @@ TEST(UseStatement, UseWithBackticks) {
 // SHOW TABLES Tests
 // ============================================================================
 
-// Helper: run SHOW TABLES rewrite
+// Helper: run SHOW TABLES rewrite.
+// `database` maps to physical_database, `processor_id` maps to logical_database.
+// The physical_database == db branch fires, using physical as the queried DB
+// and logical as the name prefix — equivalent to the legacy (database,
+// processor_id) pair.
 static std::pair<std::string, std::string> RunShowTablesRewrite(
   const std::string &sql, const std::string &database, const std::string &processor_id) {
   RewriterServiceImpl service;
@@ -1063,8 +1067,8 @@ static std::pair<std::string, std::string> RunShowTablesRewrite(
     auto *opt = req.add_options();
     opt->set_op(rewriter::RewriteOp::ShowTablesRewrite);
     auto *args = opt->mutable_show_tables_args();
-    args->set_database(database);
-    args->set_processor_id(processor_id);
+    args->set_physical_database(database);
+    args->set_logical_database(processor_id);
   }
 
   rewriter::RewriteSQLResponse resp;
@@ -1167,7 +1171,7 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
   return {
     resp.code(),
     resp.statement_type(),
-    resp.write_target_table(),
+    resp.write_stmt_value().target_table(),
     resp.sql_after_rewrite(),
     resp.message(),
     resp.original_accessed_table_names_size(),

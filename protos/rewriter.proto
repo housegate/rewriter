@@ -1,7 +1,6 @@
 syntax = "proto3";
 
-package rewriter; // Don't change this
-option go_package = "sentioxyz/sentio/service/analytic/clients";
+package rewriter;
 
 enum RewriteOp {
     TableNameRewrite = 0;
@@ -31,8 +30,6 @@ message RewriteTableNameArgs {
 }
 
 message RewriteLimitArgs {
-    int32 limit = 1 [deprecated = true]; // use oneof value instead
-
     message ReplaceLimit {
         int32 threshold = 1;
         int32 replace_to = 2;
@@ -57,7 +54,7 @@ message RewriteCommonTableExprArgs {
 
 // DatabaseNameRewrite rewrites USE <db> statements.
 // Three branches, evaluated in order (matches proxy regex semantics):
-//   1. database_map hit (virtual/processorID → physical):
+//   1. database_map hit (virtual/logical → physical):
 //        → "USE <physical>"
 //   2. known_physical_databases hit (target is already a real DB name):
 //        → leave SQL unchanged, but caller still tracks target as current DB
@@ -71,26 +68,16 @@ message RewriteDatabaseNameArgs {
 
 // ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
 // The C++ side parses the AST's FROM/IN clause itself and resolves the
-// effective target database + processor_id using the full context below.
+// effective physical_database and logical_database(which is table prefix) using the full context below.
 //
 // Resolution order (matches proxy regex semantics):
-//   targetDB := SHOW_TABLES_FROM_clause, else current_db
-//   if targetDB == "":                              → empty-result sentinel SELECT
-//   elif targetDB == current_db AND current_processor_id != "":
-//                                                   → use current_processor_id
-//   elif db_processors[targetDB] exists:            → use that processorID
-//   else:                                           → passthrough (response.show_tables_passthrough=true)
+//   logical := SHOW_TABLES_FROM_clause, else logical_database
+//   physcial := physical_database
+//   if logical not empty:                   -> physical as database, logical as table prefix
+//   else                                    -> passthrough (response.show_tables_passthrough=true)
 message RewriteShowTablesArgs {
-    // Deprecated: pre-resolved database/processor from caller.
-    // New callers should set current_db + db_processors + current_processor_id
-    // and let the server resolve. Kept for backward compat: if set and the
-    // new fields are empty, behaves as before.
-    string database = 1;
-    string processor_id = 2;
-
-    string current_db = 3;
-    string current_processor_id = 4;
-    map<string, string> db_processors = 5;  // physicalDB → processorID
+    string physical_database = 3;
+    string logical_database = 4;
 }
 
 enum SettingType {
@@ -145,24 +132,36 @@ message RewriteSQLResponse {
     repeated string original_accessed_table_names = 4;
     string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
 
-    // USE DatabaseNameRewrite: when the default_database fallback branch fired,
-    // this is the original target name (caller uses it as the connection's
-    // current processor_id so SHOW TABLES still filters correctly).
-    string matched_processor_id = 6;
+    message UseStmtValue {
+        // USE DatabaseNameRewrite: when the default_database fallback branch fired,
+        // this is the original target name (caller uses it as the connection's
+        // current processor_id so SHOW TABLES still filters correctly).
+        string specified_database = 1;
+    }
 
-    // SHOW TABLES: true when the rewriter decided the caller should pass the
-    // original SQL through (targetDB has no processor mapping and no
-    // per-connection processor context). sql_after_rewrite is the original SQL
-    // in this case.
-    bool show_tables_passthrough = 7;
+    message ShowStmtValue {
+        // SHOW TABLES: true when the rewriter decided the caller should pass the
+        // original SQL through (targetDB has no processor mapping and no
+        // per-connection processor context). sql_after_rewrite is the original SQL
+        // in this case.
+        bool show_tables_passthrough = 2;
+    }
 
-    // Set for single-table write operations (CREATE/DROP/ALTER TABLE, INSERT,
-    // UPDATE, DELETE). Format: "db.table" if the DB was specified in the SQL,
-    // otherwise bare "table". Empty for non-write statements. Unsupported
-    // variants (CREATE VIEW/DATABASE, DROP DATABASE, TRUNCATE, RENAME,
-    // multi-table DROP, INSERT INTO FUNCTION, etc.) return code=RewriteError
-    // and leave this field empty.
-    string write_target_table = 8;
+    message WriteStmtValue {
+        // Set for single-table write operations (CREATE/DROP/ALTER TABLE, INSERT,
+        // UPDATE, DELETE). Format: "db.table" if the DB was specified in the SQL,
+        // otherwise bare "table". Empty for non-write statements. Unsupported
+        // variants (CREATE VIEW/DATABASE, DROP DATABASE, TRUNCATE, RENAME,
+        // multi-table DROP, INSERT INTO FUNCTION, etc.) return code=RewriteError
+        // and leave this field empty.
+        string target_table = 1;
+    }
+
+    oneof extra_value {
+        UseStmtValue use_stmt_value = 6;
+        ShowStmtValue show_stmt_value = 7;
+        WriteStmtValue write_stmt_value = 8;
+    }
 }
 
 service RewriterService {

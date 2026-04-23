@@ -144,7 +144,7 @@ target_link_libraries(rewriter_grpc_protos PUBLIC ch_contrib::grpc)
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 # include(${rewriter_grpc_proto_headers})
 # set(SOURCES src/rewriter-server.cc ${rewriter_grpc_proto_headers})
-set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc)
+set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc src/rewriter-http-server.cc)
 
 # Add your executable or library
 # clickhouse_add_executable(clickhouse_sentio_rewriter src/rewriter-server.cc)

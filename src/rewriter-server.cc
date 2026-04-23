@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "ASTTransformers.h"
+#include "rewriter-http-server.h"
 #include "rewriter.grpc.pb.h"
 
 #include <s2/s2testing.h>
@@ -129,8 +130,8 @@ using rewriter::RewriteSQLResponse;
 #define GIT_COMMIT_HASH "?"
 #endif
 
-grpc::Status RewriterServiceImpl::Rewrite(
-  ServerContext *context, const RewriteSQLRequest *request, RewriteSQLResponse *response) {
+void RewriterServiceImpl::doRewrite(
+  const RewriteSQLRequest *request, RewriteSQLResponse *response) {
   String original_query = request->sql();
   std::cerr << "=== [PREPROCESSOR] BEFORE: SQL length=" << original_query.size() << " ===" << std::endl;
   std::cerr.flush();
@@ -158,7 +159,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
       // Three branches, matching the proxy's regex semantics. Priority:
       //   1. database_map hit  → rewrite to mapped physical DB
       //   2. known_physical_databases hit → leave SQL unchanged
-      //   3. default_database non-empty  → rewrite to default, report matched_processor_id
+      //   3. default_database non-empty  → rewrite to default, report use_stmt_value.specified_database
       for (const auto &option : request->options()) {
         if (option.op() != rewriter::RewriteOp::DatabaseNameRewrite) continue;
 
@@ -173,7 +174,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
           response->set_statement_type("USE");
           response->set_message("success");
           response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
+          return;
         }
 
         // Case 2: target is already a known physical database — no rewrite.
@@ -191,20 +192,21 @@ grpc::Status RewriterServiceImpl::Rewrite(
           response->set_statement_type("USE");
           response->set_message("success");
           response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
+          return;
         }
 
-        // Case 3: fall back to default database; report the original target as
-        // the processor_id so the caller can track it on the connection.
+        // Case 3: fall back to default database; report the original target
+        // name in use_stmt_value.specified_database so the caller can track it
+        // on the connection.
         const String &default_db = args.default_database();
         if (!default_db.empty()) {
           String result_sql = "USE " + default_db;
           response->set_sql_after_rewrite(result_sql);
           response->set_statement_type("USE");
-          response->set_matched_processor_id(db_name);
+          response->mutable_use_stmt_value()->set_specified_database(db_name);
           response->set_message("success");
           response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
+          return;
         }
       }
       // No option matched, return original SQL
@@ -214,7 +216,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
       response->set_statement_type("USE");
       response->set_message("success");
       response->set_code(rewriter::RewriteCode::Success);
-      return Status::OK;
+      return;
     }
 
     // ===== SHOW TABLES statement handling =====
@@ -229,14 +231,16 @@ grpc::Status RewriterServiceImpl::Rewrite(
         response->set_statement_type("SHOW_TABLES");
         response->set_message("success");
         response->set_code(rewriter::RewriteCode::Success);
-        return Status::OK;
+        return;
       }
 
-      // Extract "FROM <db>" from the AST (backticks already stripped by parser).
-      String from_db = show_query->getFrom();
-      // getFrom() returns "database.table" or "database". Keep only the DB part.
-      if (auto dot = from_db.find('.'); dot != String::npos) {
-        from_db = from_db.substr(0, dot);
+      // Extract "FROM <db>" from the AST (backticks already stripped by
+      // parser). Under the new semantics this is treated as a *logical* name,
+      // i.e. the table-name prefix — not a physical DB name.
+      String from_logical = show_query->getFrom();
+      // getFrom() returns "database.table" or "database"; keep the leading part.
+      if (auto dot = from_logical.find('.'); dot != String::npos) {
+        from_logical = from_logical.substr(0, dot);
       }
 
       // Look up ShowTablesRewrite option.
@@ -244,13 +248,21 @@ grpc::Status RewriterServiceImpl::Rewrite(
         if (option.op() != rewriter::RewriteOp::ShowTablesRewrite) continue;
 
         const auto &args = option.show_tables_args();
+        const String &physical = args.physical_database();
+        // logical := SHOW TABLES FROM-clause, else args.logical_database.
+        String logical = from_logical.empty() ? args.logical_database() : from_logical;
 
-        // Resolve target database:
-        //   FROM/IN in SQL > caller-provided current_db > legacy args.database()
-        bool target_from_sql = !from_db.empty();
-        String target_db = from_db;
-        if (target_db.empty()) target_db = args.current_db();
-        if (target_db.empty()) target_db = args.database();  // legacy/back-compat
+        // Empty logical → passthrough (let the caller decide).
+        if (logical.empty()) {
+          String result_sql = ast->formatWithPossiblyHidingSensitiveData(
+            0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
+          response->set_sql_after_rewrite(result_sql);
+          response->set_statement_type("SHOW_TABLES");
+          response->mutable_show_stmt_value()->set_show_tables_passthrough(true);
+          response->set_message("success");
+          response->set_code(rewriter::RewriteCode::Success);
+          return;
+        }
 
         auto escapeSql = [](const String &s) {
           String result;
@@ -262,88 +274,25 @@ grpc::Status RewriterServiceImpl::Rewrite(
           return result;
         };
 
-        // Legacy path: if the caller only sent the old (database, processor_id)
-        // pair, honor it directly. This keeps old proxy builds working.
-        const bool legacy_mode = args.current_db().empty()
-                                 && args.current_processor_id().empty()
-                                 && args.db_processors().empty()
-                                 && !args.database().empty()
-                                 && !args.processor_id().empty();
-        if (legacy_mode) {
-          const String &database = args.database();
-          const String &processor_id = args.processor_id();
-          String result_sql =
-            "SELECT multiIf("
-              "startsWith(name, '" + escapeSql(processor_id) + ".'), "
-                "substring(name, length('" + escapeSql(processor_id) + ".') + 1), "
-              "startsWith(name, '" + escapeSql(processor_id) + "'), "
-                "substring(name, length('" + escapeSql(processor_id) + "') + 1), "
-              "name) AS name "
-            "FROM (SELECT name FROM system.tables "
-                  "WHERE database = '" + escapeSql(database) + "' "
-                    "AND startsWith(name, '" + escapeSql(processor_id) + "'))";
-          response->set_sql_after_rewrite(result_sql);
-          response->set_statement_type("SHOW_TABLES");
-          response->set_message("success");
-          response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
-        }
-
-        // No database context anywhere → empty result set (security: don't
-        // leak table names without a known DB).
-        if (target_db.empty()) {
-          response->set_sql_after_rewrite("SELECT name FROM system.tables WHERE 1 = 0");
-          response->set_statement_type("SHOW_TABLES");
-          response->set_message("success");
-          response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
-        }
-
-        // Resolve processor_id. Per-connection processor only applies when the
-        // SQL did NOT override the database via FROM/IN.
-        String processor_id;
-        if (!target_from_sql && !args.current_processor_id().empty()
-            && target_db == args.current_db()) {
-          processor_id = args.current_processor_id();
-        } else {
-          const auto &dbp = args.db_processors();
-          auto pit = dbp.find(target_db);
-          if (pit != dbp.end()) {
-            processor_id = pit->second;
-          }
-        }
-
-        if (processor_id.empty()) {
-          // Passthrough: unknown DB and no processor context. Let caller decide.
-          String result_sql = ast->formatWithPossiblyHidingSensitiveData(
-            0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
-          response->set_sql_after_rewrite(result_sql);
-          response->set_statement_type("SHOW_TABLES");
-          response->set_show_tables_passthrough(true);
-          response->set_message("success");
-          response->set_code(rewriter::RewriteCode::Success);
-          return Status::OK;
-        }
-
-        // Full rewrite: outer multiIf strips prefix, inner subquery filters by
-        // startsWith. Subquery avoids alias shadowing where the outer column
-        // "name" would otherwise be read from the aliased (stripped) value.
+        // Full rewrite: outer multiIf strips the logical prefix, inner subquery
+        // filters system.tables by database = physical AND startsWith(name, logical).
+        // The subquery avoids alias shadowing of the outer "name" column.
         String result_sql =
           "SELECT multiIf("
-            "startsWith(name, '" + escapeSql(processor_id) + ".'), "
-              "substring(name, length('" + escapeSql(processor_id) + ".') + 1), "
-            "startsWith(name, '" + escapeSql(processor_id) + "'), "
-              "substring(name, length('" + escapeSql(processor_id) + "') + 1), "
+            "startsWith(name, '" + escapeSql(logical) + ".'), "
+              "substring(name, length('" + escapeSql(logical) + ".') + 1), "
+            "startsWith(name, '" + escapeSql(logical) + "'), "
+              "substring(name, length('" + escapeSql(logical) + "') + 1), "
             "name) AS name "
           "FROM (SELECT name FROM system.tables "
-                "WHERE database = '" + escapeSql(target_db) + "' "
-                  "AND startsWith(name, '" + escapeSql(processor_id) + "'))";
+                "WHERE database = '" + escapeSql(physical) + "' "
+                  "AND startsWith(name, '" + escapeSql(logical) + "'))";
 
         response->set_sql_after_rewrite(result_sql);
         response->set_statement_type("SHOW_TABLES");
         response->set_message("success");
         response->set_code(rewriter::RewriteCode::Success);
-        return Status::OK;
+        return;
       }
       // No rewrite option, return original SQL
       String result_sql = ast->formatWithPossiblyHidingSensitiveData(
@@ -352,15 +301,16 @@ grpc::Status RewriterServiceImpl::Rewrite(
       response->set_statement_type("SHOW_TABLES");
       response->set_message("success");
       response->set_code(rewriter::RewriteCode::Success);
-      return Status::OK;
+      return;
     }
 
     // ===== Single-table write statement handling =====
     // Supported: CREATE TABLE, DROP TABLE, ALTER TABLE, INSERT, UPDATE, DELETE.
     // Writes are parsed for classification only — no rewrite-option pipeline
     // is applied. sql_after_rewrite is the normalized original SQL.
-    // write_target_table carries the single target; original_accessed_table_names
-    // stays empty for writes. Unsupported variants return RewriteError.
+    // write_stmt_value.target_table carries the single target;
+    // original_accessed_table_names stays empty for writes. Unsupported
+    // variants return RewriteError.
     auto qualifyTable = [](const String &db, const String &table) -> String {
       return db.empty() ? table : db + "." + table;
     };
@@ -369,7 +319,7 @@ grpc::Status RewriterServiceImpl::Rewrite(
         0, true, true, false, identifier_quoting_rule_, identifier_quoting_style_);
       response->set_sql_after_rewrite(result_sql);
       response->set_statement_type(stmt_type);
-      response->set_write_target_table(target);
+      response->mutable_write_stmt_value()->set_target_table(target);
       response->set_message("success");
       response->set_code(rewriter::RewriteCode::Success);
     };
@@ -382,85 +332,85 @@ grpc::Status RewriterServiceImpl::Rewrite(
       if (create_query->is_ordinary_view || create_query->is_materialized_view
           || create_query->is_live_view || create_query->is_window_view) {
         rejectWrite("CREATE VIEW is not supported; only CREATE TABLE is allowed");
-        return Status::OK;
+        return;
       }
       if (create_query->is_dictionary) {
         rejectWrite("CREATE DICTIONARY is not supported");
-        return Status::OK;
+        return;
       }
       if (!create_query->table) {
         rejectWrite("CREATE DATABASE is not supported; only CREATE TABLE is allowed");
-        return Status::OK;
+        return;
       }
       if (create_query->as_table_function) {
         rejectWrite("CREATE TABLE AS table_function(...) is not supported");
-        return Status::OK;
+        return;
       }
       acceptWrite("CREATE_TABLE",
         qualifyTable(create_query->getDatabase(), create_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     if (auto *drop_query = ast->as<DB::ASTDropQuery>()) {
       if (drop_query->kind == DB::ASTDropQuery::Kind::Truncate) {
         rejectWrite("TRUNCATE is not supported");
-        return Status::OK;
+        return;
       }
       if (drop_query->kind == DB::ASTDropQuery::Kind::Detach) {
         rejectWrite("DETACH is not supported");
-        return Status::OK;
+        return;
       }
       if (drop_query->is_view || drop_query->is_dictionary) {
         rejectWrite("DROP VIEW/DICTIONARY is not supported; only DROP TABLE is allowed");
-        return Status::OK;
+        return;
       }
       if (drop_query->database_and_tables) {
         rejectWrite("multi-table DROP is not supported");
-        return Status::OK;
+        return;
       }
       if (!drop_query->table) {
         rejectWrite("DROP DATABASE is not supported; only DROP TABLE is allowed");
-        return Status::OK;
+        return;
       }
       acceptWrite("DROP_TABLE",
         qualifyTable(drop_query->getDatabase(), drop_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     if (auto *alter_query = ast->as<DB::ASTAlterQuery>()) {
       if (alter_query->alter_object != DB::ASTAlterQuery::AlterObjectType::TABLE) {
         rejectWrite("only ALTER TABLE is supported");
-        return Status::OK;
+        return;
       }
       acceptWrite("ALTER_TABLE",
         qualifyTable(alter_query->getDatabase(), alter_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     if (auto *insert_query = ast->as<DB::ASTInsertQuery>()) {
       if (insert_query->table_function) {
         rejectWrite("INSERT INTO FUNCTION(...) is not supported");
-        return Status::OK;
+        return;
       }
       if (!insert_query->table) {
         rejectWrite("INSERT target table is missing");
-        return Status::OK;
+        return;
       }
       acceptWrite("INSERT",
         qualifyTable(insert_query->getDatabase(), insert_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     if (auto *update_query = ast->as<DB::ASTUpdateQuery>()) {
       acceptWrite("UPDATE",
         qualifyTable(update_query->getDatabase(), update_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     if (auto *delete_query = ast->as<DB::ASTDeleteQuery>()) {
       acceptWrite("DELETE",
         qualifyTable(delete_query->getDatabase(), delete_query->getTable()));
-      return Status::OK;
+      return;
     }
 
     // Reject other write-ish statement kinds that would otherwise pass
@@ -468,36 +418,36 @@ grpc::Status RewriterServiceImpl::Rewrite(
     switch (ast->getQueryKind()) {
       case DB::IAST::QueryKind::Rename:
         rejectWrite("RENAME is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Optimize:
         rejectWrite("OPTIMIZE is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Undrop:
         rejectWrite("UNDROP is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Grant:
       case DB::IAST::QueryKind::Revoke:
         rejectWrite("GRANT/REVOKE is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Move:
         rejectWrite("MOVE is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Backup:
       case DB::IAST::QueryKind::Restore:
         rejectWrite("BACKUP/RESTORE is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::KillQuery:
         rejectWrite("KILL is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::ExternalDDL:
         rejectWrite("external DDL is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::AsyncInsertFlush:
         rejectWrite("async insert flush is not supported");
-        return Status::OK;
+        return;
       case DB::IAST::QueryKind::Copy:
         rejectWrite("COPY is not supported");
-        return Status::OK;
+        return;
       default:
         break;  // fall through to SELECT path
     }
@@ -542,13 +492,20 @@ grpc::Status RewriterServiceImpl::Rewrite(
     response->set_statement_type("SELECT");
     response->set_message("success");
     response->set_code(rewriter::RewriteCode::Success);
-    return Status::OK;
+    return;
   } catch (const DB::Exception &e) {
     response->set_sql_after_rewrite("Error parsing query");
     response->set_message(e.displayText());
     response->set_code(rewriter::RewriteCode::SyntaxError);
-    return Status::OK;
+    return;
   }
+}
+
+// gRPC thin wrapper — delegates to the protocol-agnostic doRewrite.
+grpc::Status RewriterServiceImpl::Rewrite(
+  ServerContext * /*context*/, const RewriteSQLRequest *request, RewriteSQLResponse *response) {
+  doRewrite(request, response);
+  return grpc::Status::OK;
 }
 
 DB::ASTPtr RewriterServiceImpl::rewriteSQLImpl(
@@ -689,7 +646,7 @@ DB::ASTPtr RewriterServiceImpl::rewriteSQLImpl(
   return std::move(ast);
 }
 
-grpc::Status RewriterServiceImpl::RewriteErrorMessage(ServerContext *context,
+void RewriterServiceImpl::doRewriteErrorMessage(
   const RewriteErrorMessageRequest *request,
   RewriteErrorMessageResponse *response) {
 
@@ -697,7 +654,7 @@ grpc::Status RewriterServiceImpl::RewriteErrorMessage(ServerContext *context,
   if (error_message.empty()) {
     response->set_message("Error message is empty");
     response->set_code(rewriter::Success);
-    return Status::OK;
+    return;
   }
 
   // Step 1: parse original SQL to AST
@@ -753,13 +710,22 @@ grpc::Status RewriterServiceImpl::RewriteErrorMessage(ServerContext *context,
     response->set_message("success");
     response->set_code(rewriter::Success);
 
-    return Status::OK;
+    return;
   } catch (const DB::Exception &e) {
     response->set_error_after_rewrite("Error when fine tune error message");
     response->set_message(e.displayText());
     response->set_code(rewriter::SyntaxError);
-    return Status::OK;
+    return;
   }
+}
+
+// gRPC thin wrapper — delegates to doRewriteErrorMessage.
+grpc::Status RewriterServiceImpl::RewriteErrorMessage(
+  ServerContext * /*context*/,
+  const RewriteErrorMessageRequest *request,
+  RewriteErrorMessageResponse *response) {
+  doRewriteErrorMessage(request, response);
+  return grpc::Status::OK;
 }
 
 void RewriterServiceImpl::doTableNameRewrite(DB::ASTPtr ast,
@@ -778,19 +744,24 @@ void RewriterServiceImpl::doTableNameRewrite(DB::ASTPtr ast,
 const std::string VERSION = "0.1.18";
 const std::string hash = GIT_COMMIT_HASH;
 
-void RunServer(uint16_t port) {
+void RunServer(uint16_t grpc_port, uint16_t http_port) {
   // Print the version information
   std::cout << "Rewriter Server Version: " << VERSION << " (" << hash << ")" << std::endl;
 
-  std::string server_address = "0.0.0.0:" + std::to_string(port);
+  std::string server_address = "0.0.0.0:" + std::to_string(grpc_port);
   RewriterServiceImpl service;
+
+  // HTTP+JSON façade — same `service` instance, different protocol. Starts a
+  // Poco HTTPServer in its own thread pool and returns immediately so the
+  // gRPC Wait() below remains the process-blocking call.
+  rewriter_http::RunHttpServer(http_port, service);
 
   grpc::EnableDefaultHealthCheckService(true);
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << std::endl;
+  std::cout << "Server listening on " << server_address << " (gRPC)" << std::endl;
 
   server->Wait();
 }
@@ -1039,14 +1010,19 @@ std::vector<std::string> QueryPreprocessor::extractElements(const std::string& c
 
 #if REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
+  // argv[1]: gRPC port (default 50051)
+  // argv[2]: HTTP port (default = grpc_port + 1)
+  uint16_t grpc_port = 50051;
   if (argc > 1) {
-    // Convert the first command line argument to an integer for the port
-    int port = std::atoi(argv[1]);
-    RunServer(port);
-  } else {
-    // Use default port 50051
-    RunServer(50051);
+    int parsed = std::atoi(argv[1]);
+    if (parsed > 0 && parsed <= 65535) grpc_port = static_cast<uint16_t>(parsed);
   }
+  uint16_t http_port = static_cast<uint16_t>(grpc_port + 1);
+  if (argc > 2) {
+    int parsed = std::atoi(argv[2]);
+    if (parsed > 0 && parsed <= 65535) http_port = static_cast<uint16_t>(parsed);
+  }
+  RunServer(grpc_port, http_port);
   return 0;
 }
 #endif
