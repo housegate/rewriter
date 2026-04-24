@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (tag or branch) to build'
+        required: true
+      version:
+        description: 'Docker tag to publish (default: strip leading v from ref)'
+        required: false
+
+concurrency:
+  group: build-box
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (metadata only)
+        uses: actions/checkout@v4
+
+      - name: Resolve ref and version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF='${{ inputs.ref }}'
+            VERSION='${{ inputs.version }}'
+          else
+            REF='${{ github.ref_name }}'
+            VERSION=''
+          fi
+          if [ -z "$VERSION" ]; then
+            # Strip a leading 'v' from the ref to form a default version.
+            VERSION="${REF#v}"
+          fi
+          echo "ref=$REF"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Ref=$REF Version=$VERSION"
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.BUILD_HOST_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BUILD_HOST_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY"     > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Fetch + checkout on build host
+        env:
+          REF: ${{ steps.ver.outputs.ref }}
+        run: |
+          set -euo pipefail
+          ssh -p 30100 -o BatchMode=yes sentio@BUILD_HOST \
+            "REF='$REF' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/ci/rewriter
+          git fetch --tags --prune --force origin
+          git checkout -f "$REF"
+          # Keep build/ and the ClickHouse symlink; clean everything else.
+          git clean -fdx -e build -e clickHouse -e contrib
+          # Defensive: if a previous run removed the symlink, re-add it.
+          if [ ! -L clickHouse ]; then
+            rm -rf clickHouse
+            ln -s /home/sentio/chen/rewriter-grpc/clickHouse clickHouse
+          fi
+          REMOTE
+
+      - name: Build binary on build host
+        run: |
+          set -euo pipefail
+          ssh -p 30100 -o BatchMode=yes sentio@BUILD_HOST \
+            "cd ~/ci/rewriter && ./script.sh rebuild"
+
+      - name: Build + push docker image
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          ssh -p 30100 -o BatchMode=yes sentio@BUILD_HOST \
+            "VERSION='$VERSION' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/ci/rewriter
+          ./script.sh docker build "$VERSION"
+          ./script.sh docker push  "$VERSION"
+          REMOTE
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          REF: ${{ steps.ver.outputs.ref }}
+        run: |
+          {
+            echo "## Release $VERSION"
+            echo ""
+            echo "- Ref: \`$REF\`"
+            echo "- Image: \`us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:$VERSION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

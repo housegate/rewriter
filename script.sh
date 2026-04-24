@@ -252,12 +252,12 @@ docker_build_image() {
     (
       cd docker/bare
       docker buildx build --platform linux/amd64 . \
-          -t us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:"${ver}"
+          -t us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:"${ver}"
     )
 
     echo ">>> [3/3] Docker image built"
     echo "=========================================="
-    echo "Image tag: sql-rewriter:$ver"
+    echo "Image tag: housegate-rewriter:$ver"
     echo "=========================================="
     echo "Next: ./script.sh docker push $ver"
     echo "=========================================="
@@ -268,7 +268,7 @@ docker_push_image() {
     echo ">>> Pushing Docker image with tag: $ver"
     (
       cd docker/bare
-      docker push us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:"${ver}"
+      docker push us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:"${ver}"
     )
     echo ">>> Back to project root ($(pwd))"
 }
