@@ -6,9 +6,13 @@
 #include <Parsers/parseQuery.h>
 #include <grpc++/grpc++.h>
 
+#include <chrono>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <regex>
+#include <sstream>
 #include <string>
 
 #include "handlers/select.h"
@@ -35,6 +39,19 @@ using rewriter::RewriteSQLResponse;
 #ifndef REWRITER_VERSION
 #define REWRITER_VERSION "unknown"
 #endif
+
+namespace {
+
+// Cheap correlation id for access logs. Uses std::hash so we don't pull in
+// a crypto dep — collisions don't matter, this is just for grepping.
+inline std::string shortSqlHash(const std::string &sql) {
+  const auto h = std::hash<std::string>{}(sql);
+  std::ostringstream oss;
+  oss << std::hex << std::setw(16) << std::setfill('0') << h;
+  return oss.str();
+}
+
+} // namespace
 
 // Regex helpers used only by doRewriteErrorMessage. Kept here so handler code
 // doesn't depend on them.
@@ -108,7 +125,28 @@ inline std::regex makeIdentRegex(const std::string &ident) {
 
 void RewriterServiceImpl::doRewrite(
   const RewriteSQLRequest *request, RewriteSQLResponse *response) {
-  String original_query = request->sql();
+  const String original_query = request->sql();
+  const std::string sql_id = shortSqlHash(original_query);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // RAII access log: fires on every exit path (normal return, early return,
+  // thrown-and-caught) so there's no way to forget a log line.
+  struct AccessLog {
+    const std::string &sql_id;
+    const RewriteSQLResponse *response;
+    std::chrono::steady_clock::time_point t0;
+    size_t sql_len;
+    ~AccessLog() {
+      const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      std::cerr << "[access] method=Rewrite sql=" << sql_id
+                << " stmt=" << (response->statement_type().empty() ? "-" : response->statement_type())
+                << " code=" << response->code()
+                << " sql_len=" << sql_len
+                << " took_us=" << us << std::endl;
+    }
+  } _access_log{sql_id, response, t0, original_query.size()};
+
   std::cerr << "=== [PREPROCESSOR] BEFORE: SQL length=" << original_query.size() << " ===" << std::endl;
   std::cerr.flush();
 
@@ -135,6 +173,11 @@ void RewriterServiceImpl::doRewrite(
     }
     rewriter_handlers::handleSelectQuery(ast, request, response);
   } catch (const DB::Exception &e) {
+    // SQL length is useful to distinguish "empty/truncated request" from real
+    // syntax errors; keep the actual SQL out of the log — it may contain PII.
+    std::cerr << "[parse-fail] sql=" << sql_id
+              << " len=" << original_query.size()
+              << " err=\"" << e.displayText() << "\"" << std::endl;
     response->set_sql_after_rewrite("Error parsing query");
     response->set_message(e.displayText());
     response->set_code(rewriter::RewriteCode::SyntaxError);
@@ -151,6 +194,28 @@ grpc::Status RewriterServiceImpl::Rewrite(
 void RewriterServiceImpl::doRewriteErrorMessage(
   const RewriteErrorMessageRequest *request,
   RewriteErrorMessageResponse *response) {
+
+  const std::string sql_id = shortSqlHash(request->sql());
+  const size_t sql_len = request->sql().size();
+  const size_t err_len = request->error_message().size();
+  const auto t0 = std::chrono::steady_clock::now();
+
+  struct AccessLog {
+    const std::string &sql_id;
+    const RewriteErrorMessageResponse *response;
+    std::chrono::steady_clock::time_point t0;
+    size_t sql_len;
+    size_t err_len;
+    ~AccessLog() {
+      const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      std::cerr << "[access] method=RewriteErrorMessage sql=" << sql_id
+                << " code=" << response->code()
+                << " sql_len=" << sql_len
+                << " err_len=" << err_len
+                << " took_us=" << us << std::endl;
+    }
+  } _access_log{sql_id, response, t0, sql_len, err_len};
 
   auto error_message = request->error_message();
   if (error_message.empty()) {
@@ -213,6 +278,9 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     response->set_code(rewriter::Success);
 
   } catch (const DB::Exception &e) {
+    std::cerr << "[parse-fail] method=RewriteErrorMessage sql=" << sql_id
+              << " len=" << sql_len
+              << " err=\"" << e.displayText() << "\"" << std::endl;
     response->set_error_after_rewrite("Error when fine tune error message");
     response->set_message(e.displayText());
     response->set_code(rewriter::SyntaxError);

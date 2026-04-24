@@ -162,6 +162,12 @@ message RewriteSQLResponse {
         ShowStmtValue show_stmt_value = 7;
         WriteStmtValue write_stmt_value = 8;
     }
+
+    // Aliases of CTEs in CommonTableExprRewrite.cte_map whose `sql` failed
+    // to parse. The rewriter silently skips such CTEs so the rest of the
+    // rewrite still proceeds; surfaced here so callers can diagnose "my CTE
+    // wasn't applied" without reading server logs. Empty on the happy path.
+    repeated string failed_cte_aliases = 9;
 }
 
 service RewriterService {

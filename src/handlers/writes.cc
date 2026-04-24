@@ -7,6 +7,8 @@
 #include <Parsers/ASTDropQuery.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTUpdateQuery.h>
+
+#include <iostream>
 #include <string>
 
 #include "handlers/common.h"
@@ -28,6 +30,10 @@ void acceptWrite(const DB::ASTPtr &ast,
 }
 
 void rejectWrite(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  // Stderr so operators can see what kinds of unsupported statements callers
+  // are attempting (CREATE VIEW, DROP DATABASE, multi-table DROP, ...) without
+  // having to correlate every RewriteError response back to a client.
+  std::cerr << "[write-reject] " << msg << std::endl;
   response->set_message(msg);
   response->set_code(rewriter::RewriteCode::RewriteError);
 }

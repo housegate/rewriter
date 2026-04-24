@@ -22,6 +22,7 @@
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>
 
+#include <iostream>
 #include <map>
 #include <stack>
 #include <vector>
@@ -51,7 +52,8 @@ void collectTableNamesFromAST(const DB::ASTPtr &node, std::unordered_set<std::st
 }
 
 std::unordered_map<String, ASTPtr> parseCTEMapToAST(
-  const std::map<String, CommonTableExpr> &cte_map) {
+  const std::map<String, CommonTableExpr> &cte_map,
+  std::vector<String> *failed_aliases) {
   std::unordered_map<String, ASTPtr> out;
   for (const auto &kv : cte_map) {
     const String &alias = kv.first;
@@ -63,9 +65,21 @@ std::unordered_map<String, ASTPtr> parseCTEMapToAST(
       const char *sub_end = sub_pos + sub_sql.size();
       ParserQuery sub_parser(sub_end, false);
       ASTPtr sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
-      if (sub_ast) out.emplace(alias, std::move(sub_ast));
-    } catch (const Exception &) {
-      // Skip invalid CTE entries but continue others
+      if (sub_ast) {
+        out.emplace(alias, std::move(sub_ast));
+      } else {
+        // parseQuery returned nullptr without throwing — treat as failure so
+        // the caller doesn't silently drop this CTE.
+        std::cerr << "[cte] skipped alias=\"" << alias
+                  << "\" reason=\"empty AST from parseQuery\"" << std::endl;
+        if (failed_aliases) failed_aliases->push_back(alias);
+      }
+    } catch (const Exception &e) {
+      // Keep the rest of the rewrite going, but log + surface the failing
+      // alias so debugging doesn't require reading server logs line-by-line.
+      std::cerr << "[cte] skipped alias=\"" << alias
+                << "\" reason=\"" << e.displayText() << "\"" << std::endl;
+      if (failed_aliases) failed_aliases->push_back(alias);
     }
   }
   return out;

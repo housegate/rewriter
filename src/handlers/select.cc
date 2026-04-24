@@ -169,14 +169,19 @@ void handleSelectQuery(DB::ASTPtr ast,
   DB::collectTableNamesFromAST(ast, original_accessed_table_names_set);
 
   // Pre-scan CTE to collect the original table names accessed in the CTE subquery
-  // (without altering the AST).
+  // (without altering the AST). Also captures CTE sub-queries that fail to parse
+  // so we can surface them to the caller via response.failed_cte_aliases — the
+  // second parseCTEMapToAST call inside applyRewriteOptions will hit the same
+  // failures on the same inputs, so collecting them once here is sufficient.
   for (const auto &option : request->options()) {
     if (option.op() != rewriter::RewriteOp::CommonTableExprRewrite) continue;
     std::map<std::string, DB::CommonTableExpr> cte_map;
     for (const auto &kv : option.common_table_expr_args().cte_map()) {
       cte_map[kv.first] = {kv.second.alias(), kv.second.sql()};
     }
-    auto cte_ast_map = DB::parseCTEMapToAST(cte_map);
+    std::vector<std::string> failed_aliases;
+    auto cte_ast_map = DB::parseCTEMapToAST(cte_map, &failed_aliases);
+    for (const auto &a : failed_aliases) response->add_failed_cte_aliases(a);
     for (const auto &kv : cte_ast_map) {
       if (auto it = original_accessed_table_names_set.find(kv.first);
           it != original_accessed_table_names_set.end()) {
