@@ -6,36 +6,30 @@
 #include <regex>
 #include <sstream>
 
-std::string QueryPreprocessor::preprocess(const std::string& sql) {
-  std::cerr << "[QueryPreprocessor] Starting preprocessing, SQL length: " << sql.size() << std::endl;
-  std::cerr.flush();
-
-  // Find all large IN clauses
+std::string QueryPreprocessor::preprocess(const std::string& sql, const std::string& sql_id) {
+  // Happy path is the common case — find + bail silently so we don't spam
+  // stderr on every request. The access log in doRewrite already captures
+  // the fact that a request ran and the outer sql length.
   auto large_in_clauses = findLargeINClauses(sql);
-
   if (large_in_clauses.empty()) {
-    std::cerr << "[QueryPreprocessor] No large IN clauses found, returning original SQL" << std::endl;
-    std::cerr.flush();
     return sql;
   }
 
-  std::cerr << "[QueryPreprocessor] Found " << large_in_clauses.size() << " large IN clause(s)" << std::endl;
-  std::cerr.flush();
-
-  // Replace large IN clauses from back to front to maintain positions
+  // Replace large IN clauses back-to-front so earlier positions stay valid.
   std::string result = sql;
   for (auto it = large_in_clauses.rbegin(); it != large_in_clauses.rend(); ++it) {
     const auto& info = *it;
-    std::cerr << "[QueryPreprocessor] Splitting IN clause at pos " << info.start_pos
-              << " with ~" << info.element_count << " elements" << std::endl;
-    std::cerr.flush();
-
     std::string replacement = splitINClause(info);
     result.replace(info.start_pos, info.end_pos - info.start_pos, replacement);
   }
 
-  std::cerr << "[QueryPreprocessor] Preprocessing complete, new SQL length: " << result.size() << std::endl;
-  std::cerr.flush();
+  // One-liner summary, only when we actually transformed something. The
+  // sql=<hash> prefix matches the [access] line so operators can grep for
+  // all log lines belonging to the same request.
+  std::cerr << "[preprocess] sql=" << (sql_id.empty() ? "-" : sql_id)
+            << " split_in_clauses=" << large_in_clauses.size()
+            << " sql_len_in=" << sql.size()
+            << " sql_len_out=" << result.size() << std::endl;
   return result;
 }
 
@@ -122,9 +116,6 @@ std::string QueryPreprocessor::splitINClause(const INClauseInfo& info) {
     // If we can't parse elements, return original
     return info.full_match;
   }
-
-  std::cerr << "[QueryPreprocessor] Extracted " << elements.size() << " elements from IN clause" << std::endl;
-  std::cerr.flush();
 
   // Split into batches and create OR conditions
   std::ostringstream oss;

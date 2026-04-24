@@ -19,7 +19,10 @@ class QueryPreprocessor {
 public:
   // Preprocess a SQL query to split large IN clauses.
   // Returns the rewritten SQL, or the original SQL if nothing needed splitting.
-  static std::string preprocess(const std::string &sql);
+  // When a split actually happens, emits a single [preprocess] log line
+  // tagged with `sql_id` for correlation with the access log. The no-op
+  // path is silent.
+  static std::string preprocess(const std::string &sql, const std::string &sql_id = "");
 
 private:
   struct INClauseInfo {

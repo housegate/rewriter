@@ -147,13 +147,10 @@ void RewriterServiceImpl::doRewrite(
     }
   } _access_log{sql_id, response, t0, original_query.size()};
 
-  std::cerr << "=== [PREPROCESSOR] BEFORE: SQL length=" << original_query.size() << " ===" << std::endl;
-  std::cerr.flush();
-
-  // Preprocess the query to split large IN clauses.
-  String query = QueryPreprocessor::preprocess(original_query);
-  std::cerr << "=== [PREPROCESSOR] AFTER: SQL length=" << query.size() << " ===" << std::endl;
-  std::cerr.flush();
+  // Preprocess the query to split large IN clauses. The preprocessor logs a
+  // single [preprocess] line only when it actually transformed the SQL; the
+  // no-op path is silent and covered by the [access] line at function exit.
+  String query = QueryPreprocessor::preprocess(original_query, sql_id);
 
   const char *pos = query.data();
   const char *end = pos + query.size();
