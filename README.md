@@ -21,15 +21,15 @@ cd sql-rewriter && git submodule update --init --depth=1
 ## Build
 
 The ClickHouse source tree is huge and only compiles on a decently powerful
-Linux box. The `script.sh` wrapper handles dependency install and the
+Linux box. The `scripts.sh` wrapper handles dependency install and the
 submodule quirks.
 
 ```shell
-./script.sh prepare          # install toolchain (LLVM 19/20, cmake, ninja, mold, ...)
-./script.sh build            # full clean build (first time, ~15-20 min)
-./script.sh rebuild          # incremental (day-to-day, seconds to a few min)
-./script.sh test             # build + ctest
-./script.sh clean            # wipe build/
+./scripts.sh prepare          # install toolchain (LLVM 19/20, cmake, ninja, mold, ...)
+./scripts.sh build            # full clean build (first time, ~15-20 min)
+./scripts.sh rebuild          # incremental (day-to-day, seconds to a few min)
+./scripts.sh test             # build + ctest
+./scripts.sh clean            # wipe build/
 ```
 
 After a successful build:
@@ -117,13 +117,13 @@ docker run --rm -p 50051:50051 -p 50052:50052 \
 
 See `.github/workflows/release.yml` for how releases are produced. The docker
 image is built and pushed by the CI workflow; manual local builds use
-`./script.sh docker build <version>` + `./script.sh docker push <version>`.
+`./scripts.sh docker build <version>` + `./scripts.sh docker push <version>`.
 
 ## Build-box coordination
 
 There's a single dedicated build host. Both the CI workdir
 (`~/ci/sql-rewriter`) and the developer workdir share the same ClickHouse
-submodule via a symlink to save disk. Two concurrent `./script.sh build` runs
+submodule via a symlink to save disk. Two concurrent `./scripts.sh build` runs
 will race on submodule patches. If a release workflow is in flight, hold off
 on local builds on the same host until it's green — the CI job's
 `concurrency: group: build-box` guards CI-vs-CI races, not CI-vs-developer.

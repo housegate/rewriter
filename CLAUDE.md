@@ -16,25 +16,25 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 
 ## Build / test / run
 
-**ClickHouse does not compile on local dev machines** — all builds and tests happen on a dedicated remote build box. Local workflow is: edit here → rsync/scp changes → SSH in → run `./script.sh`.
+**ClickHouse does not compile on local dev machines** — all builds and tests happen on a dedicated remote build box. Local workflow is: edit here → rsync/scp changes → SSH in → run `./scripts.sh`.
 
 ```shell
 ssh sentio@BUILD_HOST -p 30100
 # remote repo: /home/sentio/chen/sql-rewriter
 cd /home/sentio/chen/sql-rewriter
-./script.sh rebuild     # or build / test
+./scripts.sh rebuild     # or build / test
 ```
 
-All day-to-day commands go through `./script.sh` (Chinese comments inside). It handles symlinks and submodule patches that `ninja` otherwise trips on.
+All day-to-day commands go through `./scripts.sh` (Chinese comments inside). It handles symlinks and submodule patches that `ninja` otherwise trips on.
 
 ```shell
-./script.sh prepare          # install toolchain (brew on macOS, apt+LLVM on Linux)
-./script.sh build            # full clean build (~15–20 min first time)
-./script.sh rebuild          # incremental; use this for day-to-day work
-./script.sh test             # build + ctest
-./script.sh clean            # rm -rf build/
-./script.sh docker build <v> # stages build/clickhouse_housegate_rewriter → docker/bare/root/ then buildx
-./script.sh docker push  <v>
+./scripts.sh prepare          # install toolchain (brew on macOS, apt+LLVM on Linux)
+./scripts.sh build            # full clean build (~15–20 min first time)
+./scripts.sh rebuild          # incremental; use this for day-to-day work
+./scripts.sh test             # build + ctest
+./scripts.sh clean            # rm -rf build/
+./scripts.sh docker build <v> # stages build/clickhouse_housegate_rewriter → docker/bare/root/ then buildx
+./scripts.sh docker push  <v>
 ```
 
 Prerequisite submodule init on a fresh checkout (from `README.md`): `cd clickHouse && git submodule update --init --depth=1`.
@@ -48,13 +48,13 @@ Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_T
 
 ### Submodule brittleness (important)
 
-`script.sh`'s `build` runs `git submodule foreach --recursive 'git reset --hard && git clean -fdx'` at the end, which also wipes the `clickHouse/src/clickHouse` self-symlink needed for `#include "clickHouse/..."` to resolve, and reverts in-tree patches. Both `build` and `rebuild` call `ensure_symlinks` + `ensure_patches` on entry to re-establish them:
+`scripts.sh`'s `build` runs `git submodule foreach --recursive 'git reset --hard && git clean -fdx'` at the end, which also wipes the `clickHouse/src/clickHouse` self-symlink needed for `#include "clickHouse/..."` to resolve, and reverts in-tree patches. Both `build` and `rebuild` call `ensure_symlinks` + `ensure_patches` on entry to re-establish them:
 
 - `clickHouse/src/clickHouse -> .` and `./contrib -> clickHouse/contrib`
 - `flatbuffers/include/flatbuffers/stl_emulation.h`: drop `const` from `size_type count_`
 - `numactl-cmake/CMakeLists.txt`: append `distance.c / affinity.c / sysfs.c / rtnetlink.c` so the static lib exports `resolve_affinity` etc.
 
-If you touch the build by hand (not via `script.sh`), apply the same symlinks/patches or ninja will fail with "file not found" on `Dictionaries/DictionaryFactory.h` or `undefined symbol: resolve_affinity`.
+If you touch the build by hand (not via `scripts.sh`), apply the same symlinks/patches or ninja will fail with "file not found" on `Dictionaries/DictionaryFactory.h` or `undefined symbol: resolve_affinity`.
 
 ## Architecture
 

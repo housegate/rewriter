@@ -17,9 +17,9 @@ Commands:
   docker push  <version>    Push the image for <version> to the remote registry.
 
 Tips:
-  - First-time build:           ./script.sh build
-  - For later iterations:       ./script.sh rebuild  (10x faster)
-  - Run tests:                  ./script.sh test
+  - First-time build:           ./scripts.sh build
+  - For later iterations:       ./scripts.sh rebuild  (10x faster)
+  - Run tests:                  ./scripts.sh test
 EOF
 }
 
@@ -175,7 +175,7 @@ rebuild() {
     START_TIME=$(date +%s)
 
     if [ ! -d "build" ]; then
-        echo "build/ does not exist; run ./script.sh build first."
+        echo "build/ does not exist; run ./scripts.sh build first."
         exit 1
     fi
 
@@ -235,10 +235,14 @@ docker_build_image() {
     echo "Build Docker image: $ver"
     echo "=========================================="
 
+    if [ ! -f "docker/bare/root" ]; then
+        ./docker/bare/prepare
+    fi
+
     # Check local binary exists.
     if [ ! -f "build/clickhouse_housegate_rewriter" ]; then
         echo "build/clickhouse_housegate_rewriter is missing."
-        echo "Run ./script.sh build or ./script.sh rebuild first."
+        echo "Run ./scripts.sh build or ./scripts.sh rebuild first."
         exit 1
     fi
 
@@ -259,7 +263,7 @@ docker_build_image() {
     echo "=========================================="
     echo "Image tag: housegate-rewriter:$ver"
     echo "=========================================="
-    echo "Next: ./script.sh docker push $ver"
+    echo "Next: ./scripts.sh docker push $ver"
     echo "=========================================="
 }
 
