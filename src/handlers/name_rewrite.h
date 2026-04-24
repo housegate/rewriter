@@ -1,57 +1,97 @@
 // src/handlers/name_rewrite.h
 //
-// Shared helper for applying TableNameRewrite to statements that touch a
-// single named table slot (INSERT/CREATE/DROP/ALTER/UPDATE/DELETE target,
-// EXISTS TABLE, SHOW CREATE TABLE, each leg of RENAME).
+// Shared helpers for applying TableNameRewrite options.
 //
-// SELECT uses ASTReplaceTransformer directly to walk the AST tree; these
-// single-target paths don't need traversal, just a lookup on one (db, table).
+// SELECT path continues to use the three-map policy (`select_stmt_args`)
+// through ASTReplaceTransformer + planTableRewrite() — see ASTTransformers.h.
+//
+// Non-SELECT path (writes, USE, SHOW TABLES, EXISTS TABLE, SHOW CREATE
+// TABLE, RENAME TABLE) uses the dynamic construction driven by
+// `general_args`:
+//
+//     physical := database_map[logical]  (or logical itself if it's in
+//                                         known_physical_databases)
+//     new_table := logical + delim + (extra_args joined by delim + delim
+//                                     iff extra_args is non-empty)
+//                          + original_table
+//
+// `logical` is the SQL's qualified db if present, else
+// `upstream_logical_database_in_context`.
 #pragma once
 
 #include <google/protobuf/repeated_ptr_field.h>
+#include <optional>
 #include <string>
 
 #include "rewriter.grpc.pb.h"
 
 namespace rewriter_handlers {
 
-enum class SingleTableRewriteStatus {
-  NoChange,      // No TableNameRewrite option matched. (*cur_db, *cur_table) untouched.
-  Rewritten,     // Matched table_name_map or table_with_database_map. (*cur_db, *cur_table)
-                 // updated to post-rewrite form.
-  RejectRemote,  // Matched remote_table_map. Caller must reject the whole statement —
-                 // `reject_reason` carries a human-readable explanation.
+enum class DynamicRewriteStatus {
+  OK,                 // Rewrite applied; physical_db + new_table are populated.
+  InvalidRequest,     // Logical DB can't be resolved (not in database_map,
+                      // not in known_physical_databases, and no upstream
+                      // context). Caller should return InvalidRewriteRequest.
+  NoRewriteRequested, // Request carries no TableNameRewrite option with
+                      // `general_args` set — handler should passthrough
+                      // (echo the original SQL).
 };
 
-struct SingleTableRewriteOutcome {
-  SingleTableRewriteStatus status = SingleTableRewriteStatus::NoChange;
-  std::string reject_reason;  // populated when status == RejectRemote
+struct DynamicRewriteOutcome {
+  DynamicRewriteStatus status = DynamicRewriteStatus::NoRewriteRequested;
+  std::string physical_db;   // OK: target physical database.
+  std::string new_table;     // OK: constructed table name (empty for USE —
+                             // which is DB-only — and for SHOW TABLES,
+                             // whose handler builds its own output SQL).
+  std::string logical_db;    // OK: the resolved logical db name (for
+                             // table_rewrites bookkeeping).
+  std::string reject_reason; // InvalidRequest: human-readable explanation.
 };
 
-// Walks every TableNameRewrite option in `options` and applies its maps to
-// (*cur_db, *cur_table). The lookup key is qualifyTable(origin_db, origin_table)
-// for the first pass, and qualifyTable(*cur_db, *cur_table) for subsequent
-// passes (so chained rewrites like `foo -> bar -> baz` work).
+// Pick the last TableNameRewrite option in `options` whose `general_args`
+// sub-message is present, or return nullptr. Multiple options last-wins.
+const rewriter::RewriteTableForDynamicArgs* findGeneralArgs(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options);
+
+// Apply the dynamic construction to one (db, table) target. Intended for
+// single-table handlers (INSERT/CREATE/DROP/ALTER/UPDATE/DELETE/EXISTS/
+// SHOW CREATE/RENAME side). USE passes `origin_table = ""` and discards
+// `new_table` from the result.
 //
-// On match:
-//   - Rename: short-table-name changes, db preserved.
-//   - WithDatabase: both (or short-only if the map's db field is empty) change.
-//   - Remote: returns RejectRemote immediately; `stmt_kind` is embedded in the
-//     reject_reason (e.g. "INSERT target cannot be rewritten to remote()").
-//
-// Statements that reach a Remote match MUST NOT be accepted; they are not
-// expressible as remote() (INSERT/ALTER/etc. can't target a remote function
-// meaningfully, and we never reshape the target AST for writes).
-SingleTableRewriteOutcome applySingleTableRewrite(
+// `stmt_kind` is for error messages (e.g. "INSERT", "EXISTS TABLE").
+DynamicRewriteOutcome applyDynamicRewrite(
   const std::string &origin_db,
   const std::string &origin_table,
-  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
-  std::string *cur_db,
-  std::string *cur_table,
+  const rewriter::RewriteTableForDynamicArgs &args,
   std::string_view stmt_kind);
 
-// Append an {origin -> rewritten} entry to response.table_rewrites. No-op when
-// origin == rewritten (the contract is: only actual rewrites appear in the map).
+// Resolve a logical DB to a physical one via database_map ∪
+// known_physical_databases. Returns std::nullopt when the user does not
+// have that logical DB (caller should emit InvalidRewriteRequest).
+std::optional<std::string> resolvePhysicalDatabase(
+  const std::string &logical_db,
+  const rewriter::RewriteTableForDynamicArgs &args);
+
+// Build the dynamic table name:
+//   logical + delim + (extra_args joined by delim + delim if non-empty)
+//                   + original_table
+// With empty extra_args: logical + delim + original_table (no double delim).
+// `delim` defaults to "_" when `args.delim()` is empty.
+std::string buildDynamicTableName(
+  const std::string &logical_db,
+  const std::string &original_table,
+  const rewriter::RewriteTableForDynamicArgs &args);
+
+// Build the prefix that gets prepended to every table name in the logical
+// database, i.e. buildDynamicTableName(logical, "", args). Used by SHOW
+// TABLES to filter system.tables and to strip the prefix from the output
+// column.
+std::string buildDynamicTablePrefix(
+  const std::string &logical_db,
+  const rewriter::RewriteTableForDynamicArgs &args);
+
+// Append an {origin -> rewritten} entry to response.table_rewrites. No-op
+// when origin == rewritten. Either side may be bare "table" (no db part).
 void recordTableRewrite(
   rewriter::RewriteSQLResponse *response,
   const std::string &origin_db,

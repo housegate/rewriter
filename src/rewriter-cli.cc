@@ -34,8 +34,7 @@ USAGE:
                    [--force-limit N]
                    [--replace-limit N --replace-threshold M]
                    [--offset N]
-                   [--rename-table OLD=NEW] (repeatable)
-                   [--default-database NAME]
+                   [--rename-table OLD=NEW] (repeatable; SELECT path only)
                    [--setting KEY=VALUE:TYPE]  (TYPE in string|int|uint64|bool, repeatable)
                    [--json]
                    [--help]
@@ -76,7 +75,6 @@ struct Args {
   std::optional<int32_t> replace_threshold;
   std::optional<int32_t> offset;
   std::vector<std::pair<std::string, std::string>> rename_tables;  // OLD=NEW
-  std::optional<std::string> default_database;
   std::vector<SettingSpec> settings;
 
   bool json = false;
@@ -114,7 +112,6 @@ Args parseArgs(int argc, char **argv) {
     else if (a == "--replace-limit")     args.replace_limit = std::atoi(need(argc, argv, i, "--replace-limit").c_str());
     else if (a == "--replace-threshold") args.replace_threshold = std::atoi(need(argc, argv, i, "--replace-threshold").c_str());
     else if (a == "--offset")            args.offset = std::atoi(need(argc, argv, i, "--offset").c_str());
-    else if (a == "--default-database")  args.default_database = need(argc, argv, i, "--default-database");
     else if (a == "--rename-table") {
       auto [l, r] = splitOnce(need(argc, argv, i, "--rename-table"), '=');
       args.rename_tables.emplace_back(l, r);
@@ -197,13 +194,8 @@ void applyShortcutFlags(const Args &args, rewriter::RewriteSQLRequest &req) {
   if (!args.rename_tables.empty()) {
     auto *opt = req.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *m = opt->mutable_table_name_args()->mutable_table_map();
+    auto *m = opt->mutable_table_name_args()->mutable_select_stmt_args()->mutable_table_map();
     for (const auto &[k, v] : args.rename_tables) (*m)[k] = v;
-  }
-  if (args.default_database) {
-    auto *opt = req.add_options();
-    opt->set_op(rewriter::RewriteOp::DatabaseNameRewrite);
-    opt->mutable_database_name_args()->set_default_database(*args.default_database);
   }
   if (!args.settings.empty()) {
     auto *opt = req.add_options();

@@ -1,10 +1,14 @@
 // src/handlers/use.h
 //
-// USE <db> rewrite. Three branches, matching the proxy's regex semantics
-// (see RewriteDatabaseNameArgs in rewriter.proto):
-//   1. database_map hit        -> "USE <physical>"
-//   2. known_physical_databases -> leave SQL unchanged
-//   3. default_database        -> "USE <default>" + use_stmt_value.specified_database
+// USE <db> rewrite. Consumes `general_args.database_map` +
+// `general_args.known_physical_databases` from the TableNameRewrite option:
+//   * `database_map` hit         -> "USE <physical>" + table_rewrites entry
+//                                   for the origin logical DB
+//   * known physical DB          -> leave SQL unchanged (logical == physical)
+//   * otherwise                  -> InvalidRewriteRequest ("user does not
+//                                   have this database")
+//
+// No TableNameRewrite option present -> passthrough.
 #pragma once
 #include <Parsers/IAST.h>
 #include "rewriter.grpc.pb.h"

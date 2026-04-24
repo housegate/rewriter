@@ -2,96 +2,122 @@
 #include "handlers/name_rewrite.h"
 
 #include <sstream>
-#include <unordered_map>
-
-#include "ASTTransformers.h"
 
 namespace rewriter_handlers {
 
 namespace {
 
-// Must match the "db.table" (or bare "table") format used throughout the
-// rewrite pipeline — see planTableRewrite()'s contract and the
-// RewriteSQLResponse.table_rewrites documentation.
+// "db.table" (or bare "table" / "db" when the other side is empty).
 inline std::string qualify(const std::string &db, const std::string &table) {
-  return db.empty() ? table : db + "." + table;
+  if (db.empty()) return table;
+  if (table.empty()) return db;
+  return db + "." + table;
+}
+
+inline std::string resolvedDelim(const rewriter::RewriteTableForDynamicArgs &args) {
+  return args.delim().empty() ? "_" : args.delim();
 }
 
 } // namespace
 
-SingleTableRewriteOutcome applySingleTableRewrite(
-  const std::string &origin_db,
-  const std::string &origin_table,
-  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
-  std::string *cur_db,
-  std::string *cur_table,
-  std::string_view stmt_kind) {
-  SingleTableRewriteOutcome outcome;
-  *cur_db = origin_db;
-  *cur_table = origin_table;
-
-  bool matched_any = false;
+const rewriter::RewriteTableForDynamicArgs* findGeneralArgs(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
+  const rewriter::RewriteTableForDynamicArgs *out = nullptr;
   for (const auto &option : options) {
     if (option.op() != rewriter::RewriteOp::TableNameRewrite) continue;
-    const auto &args = option.table_name_args();
+    if (!option.has_table_name_args()) continue;
+    if (!option.table_name_args().has_general_args()) continue;
+    // Last-wins: keep scanning so later options override earlier ones,
+    // matching the chained semantics the SELECT path already has.
+    out = &option.table_name_args().general_args();
+  }
+  return out;
+}
 
-    // Build per-option maps (matches SELECT's semantics: each option brings
-    // its own fresh maps; it does not merge with earlier options).
-    std::unordered_map<std::string, std::string> table_name_map;
-    table_name_map.reserve(args.table_map_size());
-    for (const auto &kv : args.table_map()) { table_name_map[kv.first] = kv.second; }
+std::optional<std::string> resolvePhysicalDatabase(
+  const std::string &logical_db,
+  const rewriter::RewriteTableForDynamicArgs &args) {
+  if (logical_db.empty()) return std::nullopt;
+  // 1) database_map: virtual/logical -> physical.
+  if (auto it = args.database_map().find(logical_db); it != args.database_map().end()) {
+    return it->second;
+  }
+  // 2) Already a physical DB the user knows about -> passthrough.
+  for (const auto &p : args.known_physical_databases()) {
+    if (p == logical_db) return logical_db;
+  }
+  return std::nullopt;
+}
 
-    std::unordered_map<std::string, DB::RemoteTable> remote_table_map;
-    remote_table_map.reserve(args.remote_table_map_size());
-    for (const auto &kv : args.remote_table_map()) {
-      DB::RemoteTable r;
-      r.addr = kv.second.addr();
-      r.database_name = kv.second.database();
-      r.table_name = kv.second.table();
-      r.user_name = kv.second.user();
-      r.password = kv.second.password();
-      remote_table_map[kv.first] = r;
+std::string buildDynamicTableName(
+  const std::string &logical_db,
+  const std::string &original_table,
+  const rewriter::RewriteTableForDynamicArgs &args) {
+  const std::string delim = resolvedDelim(args);
+  std::string out = logical_db;
+  out += delim;
+  // Insert the extra_arguments block + its trailing delim ONLY when the
+  // block is non-empty — otherwise we'd emit a double delim between
+  // `logical_db` and `original_table`.
+  if (args.extra_arguments_size() > 0) {
+    bool first = true;
+    for (const auto &a : args.extra_arguments()) {
+      if (!first) out += delim;
+      out += a;
+      first = false;
     }
+    out += delim;
+  }
+  out += original_table;
+  return out;
+}
 
-    std::unordered_map<std::string, DB::TableWithDatabase> table_with_database_map;
-    table_with_database_map.reserve(args.table_with_database_map_size());
-    for (const auto &kv : args.table_with_database_map()) {
-      DB::TableWithDatabase t;
-      t.database_name = kv.second.database();
-      t.table_name = kv.second.table();
-      table_with_database_map[kv.first] = t;
-    }
+std::string buildDynamicTablePrefix(
+  const std::string &logical_db,
+  const rewriter::RewriteTableForDynamicArgs &args) {
+  // Prefix is everything buildDynamicTableName produces up to (but not
+  // including) `original_table`. Equivalent to calling the builder with
+  // an empty `original_table`.
+  return buildDynamicTableName(logical_db, /*original_table=*/"", args);
+}
 
-    const std::string lookup_key = qualify(*cur_db, *cur_table);
-    const auto plan = DB::planTableRewrite(
-      lookup_key, table_name_map, remote_table_map, table_with_database_map);
+DynamicRewriteOutcome applyDynamicRewrite(
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const rewriter::RewriteTableForDynamicArgs &args,
+  std::string_view stmt_kind) {
+  DynamicRewriteOutcome outcome;
 
-    switch (plan.kind) {
-    case DB::TableRewriteKind::None:
-      break;
-    case DB::TableRewriteKind::Rename:
-      *cur_table = plan.table;
-      matched_any = true;
-      break;
-    case DB::TableRewriteKind::WithDatabase:
-      if (!plan.db.empty()) *cur_db = plan.db;
-      *cur_table = plan.table;
-      matched_any = true;
-      break;
-    case DB::TableRewriteKind::Remote: {
-      std::ostringstream oss;
-      oss << stmt_kind << " target '" << lookup_key
-          << "' matches remote_table_map; remote_table_map only applies to SELECT";
-      outcome.status = SingleTableRewriteStatus::RejectRemote;
-      outcome.reject_reason = oss.str();
-      return outcome;
-    }
-    }
+  // Resolve logical: SQL qualifier wins, else upstream context. Empty →
+  // reject (caller has no routing info).
+  std::string logical = origin_db.empty() ? args.upstream_logical_database_in_context() : origin_db;
+  if (logical.empty()) {
+    std::ostringstream oss;
+    oss << stmt_kind << " target '" << origin_table
+        << "' is unqualified and no upstream_logical_database_in_context is set; "
+           "caller must send `USE <db>` or qualify the target";
+    outcome.status = DynamicRewriteStatus::InvalidRequest;
+    outcome.reject_reason = oss.str();
+    return outcome;
   }
 
-  outcome.status = matched_any
-    ? SingleTableRewriteStatus::Rewritten
-    : SingleTableRewriteStatus::NoChange;
+  auto physical = resolvePhysicalDatabase(logical, args);
+  if (!physical) {
+    std::ostringstream oss;
+    oss << stmt_kind << " target references logical database '" << logical
+        << "' which is not in database_map and not a known physical database; "
+           "user does not have this database";
+    outcome.status = DynamicRewriteStatus::InvalidRequest;
+    outcome.reject_reason = oss.str();
+    return outcome;
+  }
+
+  outcome.status = DynamicRewriteStatus::OK;
+  outcome.logical_db = logical;
+  outcome.physical_db = *physical;
+  outcome.new_table = origin_table.empty()
+    ? ""  // USE: no table, only the DB swap matters.
+    : buildDynamicTableName(logical, origin_table, args);
   return outcome;
 }
 
@@ -103,7 +129,7 @@ void recordTableRewrite(
   const std::string &new_table) {
   const std::string key = qualify(origin_db, origin_table);
   const std::string val = qualify(new_db, new_table);
-  if (key == val) return;
+  if (key.empty() || key == val) return;
   (*response->mutable_table_rewrites())[key] = val;
 }
 

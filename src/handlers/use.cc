@@ -2,11 +2,24 @@
 #include "handlers/use.h"
 
 #include <Parsers/ASTUseQuery.h>
+
+#include <iostream>
 #include <string>
 
 #include "handlers/common.h"
+#include "handlers/name_rewrite.h"
 
 namespace rewriter_handlers {
+
+namespace {
+
+void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  std::cerr << "[use-reject] " << msg << std::endl;
+  response->set_message(msg);
+  response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+} // namespace
 
 bool handleUseQuery(DB::ASTPtr ast,
                     const rewriter::RewriteSQLRequest *request,
@@ -14,45 +27,34 @@ bool handleUseQuery(DB::ASTPtr ast,
   auto *use_query = ast->as<DB::ASTUseQuery>();
   if (!use_query) return false;
 
-  const std::string db_name = use_query->getDatabase();
+  const std::string origin_db = use_query->getDatabase();
 
-  for (const auto &option : request->options()) {
-    if (option.op() != rewriter::RewriteOp::DatabaseNameRewrite) continue;
-    const auto &args = option.database_name_args();
-    const auto &db_map = args.database_map();
-
-    // 1. database_map hit -> rewrite to the mapped physical DB.
-    auto it = db_map.find(db_name);
-    if (it != db_map.end()) {
-      setSuccessResponse(response, "USE " + it->second, rewriter::STATEMENT_TYPE_USE);
-      return true;
-    }
-
-    // 2. Target already names a known physical DB -> leave SQL unchanged.
-    bool is_known_physical = false;
-    for (const auto &known : args.known_physical_databases()) {
-      if (known == db_name) {
-        is_known_physical = true;
-        break;
-      }
-    }
-    if (is_known_physical) {
-      setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
-      return true;
-    }
-
-    // 3. default_database fallback -> rewrite to default, report the original
-    //    target so the caller can track it on the connection.
-    const std::string &default_db = args.default_database();
-    if (!default_db.empty()) {
-      setSuccessResponse(response, "USE " + default_db, rewriter::STATEMENT_TYPE_USE);
-      response->mutable_use_stmt_value()->set_specified_database(db_name);
-      return true;
-    }
+  const auto *general = findGeneralArgs(request->options());
+  if (!general) {
+    // No TableNameRewrite / general_args in the request → passthrough.
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
+    return true;
   }
 
-  // No matching option - echo back the original SQL.
-  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
+  auto physical = resolvePhysicalDatabase(origin_db, *general);
+  if (!physical) {
+    rejectInvalid(response,
+      "USE target '" + origin_db
+        + "' is not in database_map and not a known physical database; "
+          "user does not have this database");
+    return true;
+  }
+
+  // ASTUseQuery has no public setDatabase(); build the SQL by hand.
+  // Matches the old handler's approach — USE basically only has a db name,
+  // so re-formatting the AST wouldn't add anything.
+  if (*physical != origin_db) {
+    setSuccessResponse(response, "USE " + *physical, rewriter::STATEMENT_TYPE_USE);
+    recordTableRewrite(response, origin_db, /*origin_table=*/"",
+                       *physical, /*new_table=*/"");
+  } else {
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
+  }
   return true;
 }
 

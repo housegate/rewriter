@@ -46,21 +46,25 @@ ExistsDispatchResult handleExistsQuery(DB::ASTPtr ast,
 
   const std::string origin_db = q->getDatabase();
   const std::string origin_table = q->getTable();
-  std::string new_db;
-  std::string new_table;
-  const auto outcome = applySingleTableRewrite(
-    origin_db, origin_table, request->options(), &new_db, &new_table, "EXISTS TABLE");
 
-  if (outcome.status == SingleTableRewriteStatus::RejectRemote) {
+  const auto *general = findGeneralArgs(request->options());
+  if (!general) {
+    // No rewrite config → passthrough.
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_EXISTS_TABLE);
+    return ExistsDispatchResult::Handled;
+  }
+
+  const auto outcome = applyDynamicRewrite(origin_db, origin_table, *general, "EXISTS TABLE");
+  if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
     rejectExists(response, rewriter::RewriteCode::InvalidRewriteRequest, outcome.reject_reason);
     return ExistsDispatchResult::Handled;
   }
 
-  if (outcome.status == SingleTableRewriteStatus::Rewritten) {
-    if (!new_db.empty()) q->setDatabase(new_db);
-    q->setTable(new_table);
-    recordTableRewrite(response, origin_db, origin_table, new_db, new_table);
-  }
+  // OK: rewrite the AST's db + table slots.
+  q->setDatabase(outcome.physical_db);
+  q->setTable(outcome.new_table);
+  recordTableRewrite(response, origin_db, origin_table,
+                     outcome.physical_db, outcome.new_table);
 
   setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_EXISTS_TABLE);
   return ExistsDispatchResult::Handled;

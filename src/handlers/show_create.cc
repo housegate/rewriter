@@ -46,22 +46,25 @@ ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
 
   const std::string origin_db = q->getDatabase();
   const std::string origin_table = q->getTable();
-  std::string new_db;
-  std::string new_table;
-  const auto outcome = applySingleTableRewrite(
-    origin_db, origin_table, request->options(), &new_db, &new_table, "SHOW CREATE TABLE");
 
-  if (outcome.status == SingleTableRewriteStatus::RejectRemote) {
+  const auto *general = findGeneralArgs(request->options());
+  if (!general) {
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
+    return ShowCreateDispatchResult::Handled;
+  }
+
+  const auto outcome = applyDynamicRewrite(
+    origin_db, origin_table, *general, "SHOW CREATE TABLE");
+  if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
     rejectShowCreate(response, rewriter::RewriteCode::InvalidRewriteRequest,
                      outcome.reject_reason);
     return ShowCreateDispatchResult::Handled;
   }
 
-  if (outcome.status == SingleTableRewriteStatus::Rewritten) {
-    if (!new_db.empty()) q->setDatabase(new_db);
-    q->setTable(new_table);
-    recordTableRewrite(response, origin_db, origin_table, new_db, new_table);
-  }
+  q->setDatabase(outcome.physical_db);
+  q->setTable(outcome.new_table);
+  recordTableRewrite(response, origin_db, origin_table,
+                     outcome.physical_db, outcome.new_table);
 
   setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
   return ShowCreateDispatchResult::Handled;

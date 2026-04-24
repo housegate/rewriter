@@ -267,10 +267,16 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     }
 
     // 4.2 Replace rewritten table names back to original names (boundary-aware).
-    // Invert table_map from options (original -> rewritten) to (rewritten -> original).
+    // Only the SELECT-path table_map produces deterministic rewritten->original
+    // pairs suitable for inverse substitution; the dynamic construction in
+    // general_args doesn't give us a stable inverse (the rewritten name can
+    // collide with other tables in the physical DB), so we don't invert it
+    // here — the caller already has the table_rewrites map on the rewrite
+    // response and can do a smarter substitution if it wants.
     for (const auto &opt : request->options()) {
       if (opt.op() != rewriter::RewriteOp::TableNameRewrite) continue;
-      const auto &m = opt.table_name_args().table_map();
+      if (!opt.table_name_args().has_select_stmt_args()) continue;
+      const auto &m = opt.table_name_args().select_stmt_args().table_map();
       for (const auto &kv : m) {
         const std::string &original = kv.first;
         const std::string &rewritten = kv.second;

@@ -2,13 +2,17 @@
 #include "handlers/show_tables.h"
 
 #include <Parsers/ASTShowTablesQuery.h>
+
+#include <iostream>
 #include <string>
 
 #include "handlers/common.h"
+#include "handlers/name_rewrite.h"
 
 namespace rewriter_handlers {
 
 namespace {
+
 std::string escapeSqlLiteral(const std::string &s) {
   std::string out;
   out.reserve(s.size());
@@ -18,6 +22,13 @@ std::string escapeSqlLiteral(const std::string &s) {
   }
   return out;
 }
+
+void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  std::cerr << "[show-tables-reject] " << msg << std::endl;
+  response->set_message(msg);
+  response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
 } // namespace
 
 bool handleShowTablesQuery(DB::ASTPtr ast,
@@ -26,7 +37,8 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   auto *show_query = ast->as<DB::ASTShowTablesQuery>();
   if (!show_query) return false;
 
-  // SHOW DATABASES / SHOW CLUSTERS / ... - not our problem, pass through.
+  // SHOW DATABASES / SHOW CLUSTERS / SHOW DICTIONARIES / ... — the rewrite
+  // policy only covers SHOW TABLES proper; anything else echoes back.
   if (show_query->databases || show_query->clusters || show_query->cluster
       || show_query->dictionaries || show_query->m_settings
       || show_query->merges || show_query->caches) {
@@ -34,51 +46,66 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
     return true;
   }
 
-  // "FROM <db>" is treated as a logical name (table-name prefix), not a
-  // physical DB. getFrom() returns "database.table" or "database"; keep the
-  // leading part only.
+  const auto *general = findGeneralArgs(request->options());
+  if (!general) {
+    // No rewrite config → passthrough.
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    return true;
+  }
+
+  // "FROM <db>" / "IN <db>" in the original SQL. `getFrom()` returns
+  // "database.table" or "database"; keep the leading db part only — the
+  // SHOW TABLES semantics treat the FROM clause as the logical db.
   std::string from_logical = show_query->getFrom();
   if (auto dot = from_logical.find('.'); dot != std::string::npos) {
     from_logical = from_logical.substr(0, dot);
   }
 
-  for (const auto &option : request->options()) {
-    if (option.op() != rewriter::RewriteOp::ShowTablesRewrite) continue;
+  // SQL qualifier wins over upstream context, same as applyDynamicRewrite.
+  const std::string logical = from_logical.empty()
+    ? general->upstream_logical_database_in_context()
+    : from_logical;
 
-    const auto &args = option.show_tables_args();
-    const std::string &physical = args.physical_database();
-    const std::string logical =
-      from_logical.empty() ? args.logical_database() : from_logical;
-
-    // Empty logical -> passthrough (caller decides).
-    if (logical.empty()) {
-      setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
-      response->mutable_show_stmt_value()->set_show_tables_passthrough(true);
-      return true;
-    }
-
-    // Full rewrite: outer multiIf strips the logical prefix; inner subquery
-    // filters system.tables by database = physical AND startsWith(name, logical).
-    // Subquery avoids alias shadowing of the outer "name" column.
-    const std::string esc_logical  = escapeSqlLiteral(logical);
-    const std::string esc_physical = escapeSqlLiteral(physical);
-    std::string result_sql =
-      "SELECT multiIf("
-        "startsWith(name, '" + esc_logical + ".'), "
-          "substring(name, length('" + esc_logical + ".') + 1), "
-        "startsWith(name, '" + esc_logical + "'), "
-          "substring(name, length('" + esc_logical + "') + 1), "
-        "name) AS name "
-      "FROM (SELECT name FROM system.tables "
-            "WHERE database = '" + esc_physical + "' "
-              "AND startsWith(name, '" + esc_logical + "'))";
-
-    setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
+  if (logical.empty()) {
+    rejectInvalid(response,
+      "SHOW TABLES has no FROM clause and no "
+      "upstream_logical_database_in_context is set; caller must send "
+      "`USE <db>` or use `SHOW TABLES FROM <db>`");
     return true;
   }
 
-  // No rewrite option - echo back the original SQL.
-  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+  auto physical = resolvePhysicalDatabase(logical, *general);
+  if (!physical) {
+    rejectInvalid(response,
+      "SHOW TABLES target logical database '" + logical
+        + "' is not in database_map and not a known physical database; "
+          "user does not have this database");
+    return true;
+  }
+
+  const std::string prefix = buildDynamicTablePrefix(logical, *general);
+  const std::string esc_prefix   = escapeSqlLiteral(prefix);
+  const std::string esc_physical = escapeSqlLiteral(*physical);
+
+  // Outer multiIf strips the prefix from each row; inner subquery filters
+  // system.tables by (database = physical AND startsWith(name, prefix)).
+  // Subquery avoids alias-shadowing the outer `name` column.
+  std::string result_sql =
+    "SELECT multiIf("
+      "startsWith(name, '" + esc_prefix + "'), "
+        "substring(name, length('" + esc_prefix + "') + 1), "
+      "name) AS name "
+    "FROM (SELECT name FROM system.tables "
+          "WHERE database = '" + esc_physical + "' "
+            "AND startsWith(name, '" + esc_prefix + "'))";
+
+  setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
+  // Record the DB rewrite for observability (prefix is encoded into the
+  // output SQL, not into table_rewrites).
+  if (*physical != logical) {
+    recordTableRewrite(response, logical, /*origin_table=*/"",
+                       *physical, /*new_table=*/"");
+  }
   return true;
 }
 

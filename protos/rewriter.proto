@@ -8,25 +8,6 @@ enum RewriteOp {
     OffsetRewrite = 2;
     SettingsRewrite = 3;
     CommonTableExprRewrite = 4;
-    DatabaseNameRewrite = 5;
-    ShowTablesRewrite = 6;
-}
-
-message RewriteTableNameArgs {
-    message RemoteTable {
-        string addr = 1;
-        string database = 2;
-        string table = 3;
-        string user = 4;
-        string password = 5;
-    }
-    message TableWithDatabase {
-        string database = 1;
-        string table = 2;
-    }
-    map<string, string> table_map = 1;
-    map<string, RemoteTable> remote_table_map = 2;
-    map<string, TableWithDatabase> table_with_database_map = 3;
 }
 
 message RewriteLimitArgs {
@@ -52,32 +33,37 @@ message RewriteCommonTableExprArgs {
     map<string, CommonTableExpr> cte_map = 1;
 }
 
-// DatabaseNameRewrite rewrites USE <db> statements.
-// Three branches, evaluated in order (matches proxy regex semantics):
-//   1. database_map hit (virtual/logical → physical):
-//        → "USE <physical>"
-//   2. known_physical_databases hit (target is already a real DB name):
-//        → leave SQL unchanged, but caller still tracks target as current DB
-//   3. default_database non-empty (fallback for unmapped names):
-//        → "USE <default_database>", response.matched_processor_id = <target>
-message RewriteDatabaseNameArgs {
-    map<string, string> database_map = 1;
-    repeated string known_physical_databases = 2;
-    string default_database = 3;
+message RewriteTableForSelectStmtArgs {
+    message RemoteTable {
+        string addr = 1;
+        string database = 2;
+        string table = 3;
+        string user = 4;
+        string password = 5;
+    }
+    message TableWithDatabase {
+        string database = 1;
+        string table = 2;
+    }
+
+    map<string, string> table_map = 1;
+    map<string, RemoteTable> remote_table_map = 2;
+    map<string, TableWithDatabase> table_with_database_map = 3;
 }
 
-// ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
-// The C++ side parses the AST's FROM/IN clause itself and resolves the
-// effective physical_database and logical_database(which is table prefix) using the full context below.
-//
-// Resolution order (matches proxy regex semantics):
-//   logical := SHOW_TABLES_FROM_clause, else logical_database
-//   physcial := physical_database
-//   if logical not empty:                   -> physical as database, logical as table prefix
-//   else                                    -> passthrough (response.show_tables_passthrough=true)
-message RewriteShowTablesArgs {
-    string physical_database = 3;
-    string logical_database = 4;
+// RewriteTableForDynamicArgs
+// The final table name will be: `${physical_database}`.`${logical_database}${delim}${extra_arguments join by delim}${delim}${original_table}`
+message RewriteTableForDynamicArgs {
+    map<string, string> database_map = 1; // virtual/logical database -> physical database, e.g. : tenant1_database -> testnet, tenant2_database -> testnet
+    repeated string known_physical_databases = 2;
+    string upstream_logical_database_in_context = 3; // e.g. tenant1_database, user will use `USE xxx` to switch database
+    string delim = 4; // "_" by default
+    repeated string extra_arguments = 5; // e.g. replica_index, shard_index, will be added by sequence
+}
+
+message RewriteTableNameArgs {
+    RewriteTableForSelectStmtArgs select_stmt_args = 1; // used in STATEMENT_TYPE_SELECT
+    RewriteTableForDynamicArgs general_args = 2; // used in other STATEMENT_TYPE
 }
 
 enum SettingType {
@@ -109,8 +95,6 @@ message RewriteOption {
         RewriteOffsetArgs offset_args = 4;
         RewriteSettingsArgs settings_args = 5;
         RewriteCommonTableExprArgs common_table_expr_args = 6;
-        RewriteDatabaseNameArgs database_name_args = 7;
-        RewriteShowTablesArgs show_tables_args = 8;
     }
 }
 
@@ -138,8 +122,14 @@ enum RewriteCode {
     // The caller's RewriteOption cannot be applied to this statement —
     // their rewrite config is semantically incorrect for the SQL they sent.
     // Callers should treat this as a configuration bug; do NOT pass the SQL
-    // through. Current case: a write / EXISTS / SHOW CREATE target hits
-    // remote_table_map (remote() is only meaningful as a SELECT source).
+    // through. Current cases:
+    //   * Non-SELECT target names a logical database that is neither in
+    //     `general_args.database_map` nor in
+    //     `general_args.known_physical_databases` — i.e. the user does not
+    //     have that database.
+    //   * Non-SELECT target has no qualifier in the SQL and
+    //     `general_args.upstream_logical_database_in_context` is empty —
+    //     the rewriter has no way to pick a physical database.
     InvalidRewriteRequest = 4;
 }
 
@@ -178,37 +168,6 @@ message RewriteSQLResponse {
     // classification didn't run (parse errors, etc.).
     StatementType statement_type = 5;
 
-    message UseStmtValue {
-        // USE DatabaseNameRewrite: when the default_database fallback branch fired,
-        // this is the original target name (caller uses it as the connection's
-        // current processor_id so SHOW TABLES still filters correctly).
-        string specified_database = 1;
-    }
-
-    message ShowStmtValue {
-        // SHOW TABLES: true when the rewriter decided the caller should pass the
-        // original SQL through (targetDB has no processor mapping and no
-        // per-connection processor context). sql_after_rewrite is the original SQL
-        // in this case.
-        bool show_tables_passthrough = 2;
-    }
-
-    message WriteStmtValue {
-        // DEPRECATED: prefer `table_rewrites` on the top-level response.
-        // Kept for backward compatibility. Holds the post-rewrite primary
-        // target of single-table write operations (CREATE/DROP/ALTER TABLE,
-        // INSERT, UPDATE, DELETE). Format: "db.table" if the DB was specified
-        // in the SQL, otherwise bare "table". Empty for non-write statements
-        // and for RENAME (which has no single target; use `table_rewrites`).
-        string target_table = 1 [deprecated = true];
-    }
-
-    oneof extra_value {
-        UseStmtValue use_stmt_value = 6;
-        ShowStmtValue show_stmt_value = 7;
-        WriteStmtValue write_stmt_value = 8;
-    }
-
     // Aliases of CTEs in CommonTableExprRewrite.cte_map whose `sql` failed
     // to parse. The rewriter silently skips such CTEs so the rest of the
     // rewrite still proceeds; surfaced here so callers can diagnose "my CTE
@@ -221,10 +180,14 @@ message RewriteSQLResponse {
     // the rewritten form appear here; untouched tables are in
     // `original_accessed_table_names` only.
     //
-    // For remote_table_map hits (SELECT only), the value is the remote-side
-    // "db.table" pulled from RemoteTable.database/table; the full remote()
-    // call with addr/user/password is reflected in `sql_after_rewrite`.
+    // SELECT path: populated from `select_stmt_args` map hits. For
+    // remote_table_map hits, the value is the remote-side "db.table"
+    // (addr/user/password live in `sql_after_rewrite`).
     //
+    // Non-SELECT path (writes / USE / SHOW TABLES / EXISTS / SHOW CREATE):
+    // populated from the dynamic construction driven by `general_args`. Each
+    // rewritten target appears as its own entry. For USE, the entry's table
+    // side is empty (DB-only rewrite); key and value are just DB names.
     // For RENAME TABLE, every participating logical table (each `from` and
     // each `to`) appears as its own entry with its rewritten form.
     map<string, string> table_rewrites = 10;

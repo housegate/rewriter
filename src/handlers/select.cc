@@ -202,16 +202,22 @@ DB::ASTPtr applyRewriteOptions(
       break;
     }
     case rewriter::RewriteOp::TableNameRewrite: {
+      // SELECT-path rewrites live under `select_stmt_args`; `general_args`
+      // is only consumed by the non-SELECT handlers. If this option
+      // carries no select_stmt_args we skip it silently — the caller may
+      // have set only general_args for a write in the same request.
+      if (!option.table_name_args().has_select_stmt_args()) break;
+      const auto &select_args = option.table_name_args().select_stmt_args();
       // table_name
       {
-        const auto &table_name_map = option.table_name_args().table_map();
+        const auto &table_name_map = select_args.table_map();
         table_name_map_.clear();
         table_name_map_.reserve(table_name_map.size());
         for (auto &kv : table_name_map) { table_name_map_[kv.first] = kv.second; }
       }
       // remote_table
       {
-        const auto &remote_table_map = option.table_name_args().remote_table_map();
+        const auto &remote_table_map = select_args.remote_table_map();
         remote_table_map_.clear();
         remote_table_map_.reserve(remote_table_map.size());
         for (auto &kv : remote_table_map) {
@@ -226,7 +232,7 @@ DB::ASTPtr applyRewriteOptions(
       }
       // table_with_database
       {
-        const auto &table_with_database_map = option.table_name_args().table_with_database_map();
+        const auto &table_with_database_map = select_args.table_with_database_map();
         table_with_database_map_.clear();
         table_with_database_map_.reserve(table_with_database_map.size());
         for (auto &kv : table_with_database_map) {

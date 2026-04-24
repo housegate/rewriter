@@ -277,7 +277,7 @@ static std::pair<std::string, std::vector<std::string>> RunCTEAndTableRewriteWit
   if (!table_map.empty()) {
     auto *tbl_option = req.add_options();
     tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *tbl_args = tbl_option->mutable_table_name_args();
+    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_select_stmt_args();
     for (const auto &kv : table_map) { (*tbl_args->mutable_table_map())[kv.first] = kv.second; }
   }
 
@@ -322,7 +322,7 @@ static std::string RunCTEAndTableRewrite(const std::string &origin_sql,
   if (!table_map.empty()) {
     auto *tbl_option = req.add_options();
     tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *tbl_args = tbl_option->mutable_table_name_args();
+    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_select_stmt_args();
     for (const auto &kv : table_map) { (*tbl_args->mutable_table_map())[kv.first] = kv.second; }
   }
 
@@ -736,7 +736,7 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
     // prod_subgraph.`8CsFI8hZ_latestView_PoolSnapshot`
     auto *opt = request.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *args = opt->mutable_table_name_args();
+    auto *args = opt->mutable_table_name_args()->mutable_select_stmt_args();
     // "prod_subgraph.`8CsFI8hZ_latestView_PoolSnapshot`";;
 
     auto &item = (*args->mutable_table_with_database_map())["latestView_PoolSnapshot"];
@@ -794,7 +794,7 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_UnknownFunctionArgMin) {
     // ORIGINAL logical table -> remote() physical source
     auto *opt = request.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *args = opt->mutable_table_name_args();
+    auto *args = opt->mutable_table_name_args()->mutable_select_stmt_args();
     // Use remote_table_map to specify a structured remote source.
     auto &remote_map = *args->mutable_remote_table_map();
     auto *remote = &remote_map["sui.events"]; // key: original logical table (db.table)
@@ -989,148 +989,199 @@ TEST(QueryPreprocessorTest, StringWithCommas) {
 }
 
 // ============================================================================
-// USE Statement Tests
+// Shared helper for non-SELECT tests driven by general_args.
 // ============================================================================
 
-// Helper: run USE rewrite through the full gRPC Rewrite path
-static std::pair<std::string, rewriter::StatementType> RunUseRewrite(
-  const std::string &sql, const std::map<std::string, std::string> &db_map) {
+struct GeneralArgs {
+  std::map<std::string, std::string> database_map;
+  std::vector<std::string> known_physical_databases;
+  std::string upstream_logical_database_in_context;
+  std::string delim;  // "" → server defaults to "_"
+  std::vector<std::string> extra_arguments;
+};
+
+static void applyGeneralArgs(rewriter::RewriteTableForDynamicArgs *args,
+                             const GeneralArgs &g) {
+  for (const auto &kv : g.database_map) {
+    (*args->mutable_database_map())[kv.first] = kv.second;
+  }
+  for (const auto &p : g.known_physical_databases) {
+    args->add_known_physical_databases(p);
+  }
+  if (!g.upstream_logical_database_in_context.empty()) {
+    args->set_upstream_logical_database_in_context(g.upstream_logical_database_in_context);
+  }
+  if (!g.delim.empty()) args->set_delim(g.delim);
+  for (const auto &e : g.extra_arguments) args->add_extra_arguments(e);
+}
+
+struct GeneralProbe {
+  rewriter::RewriteCode code;
+  rewriter::StatementType statement_type;
+  std::string sql_after_rewrite;
+  std::string message;
+  std::map<std::string, std::string> table_rewrites;
+};
+
+static GeneralProbe RunGeneral(const std::string &sql, const GeneralArgs &g) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql(sql);
 
-  if (!db_map.empty()) {
-    auto *opt = req.add_options();
-    opt->set_op(rewriter::RewriteOp::DatabaseNameRewrite);
-    auto *args = opt->mutable_database_name_args();
-    for (const auto &kv : db_map) {
-      (*args->mutable_database_map())[kv.first] = kv.second;
-    }
-  }
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  applyGeneralArgs(opt->mutable_table_name_args()->mutable_general_args(), g);
 
   rewriter::RewriteSQLResponse resp;
   grpc::ServerContext ctx;
   auto status = service.Rewrite(&ctx, &req, &resp);
-  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
-    return {"", rewriter::STATEMENT_TYPE_UNSPECIFIED};
-  }
-  return {resp.sql_after_rewrite(), resp.statement_type()};
+  EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
+
+  GeneralProbe p;
+  p.code = resp.code();
+  p.statement_type = resp.statement_type();
+  p.sql_after_rewrite = resp.sql_after_rewrite();
+  p.message = resp.message();
+  for (const auto &kv : resp.table_rewrites()) p.table_rewrites[kv.first] = kv.second;
+  return p;
 }
 
-TEST(UseStatement, SimpleUse_NoRewrite) {
-  auto [sql, stmt_type] = RunUseRewrite("USE mydb", {});
-  EXPECT_FALSE(sql.empty());
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_USE);
-  // Should contain the database name
-  EXPECT_NE(sql.find("mydb"), std::string::npos);
+// ============================================================================
+// USE Statement Tests
+// ============================================================================
+
+TEST(UseStatement, Passthrough_NoOptions) {
+  // No TableNameRewrite option at all -> echo the original SQL.
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("USE mydb");
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_USE);
+  EXPECT_NE(resp.sql_after_rewrite().find("mydb"), std::string::npos);
 }
 
-TEST(UseStatement, UseWithMapping) {
-  std::map<std::string, std::string> db_map{{"coinbase", "sentio_coinbase"}};
-  auto [sql, stmt_type] = RunUseRewrite("USE coinbase", db_map);
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_USE);
-  EXPECT_NE(sql.find("sentio_coinbase"), std::string::npos);
-  // Original name should not appear
-  EXPECT_EQ(sql.find("coinbase"), sql.find("sentio_coinbase") + std::string("sentio_").size());
+TEST(UseStatement, DatabaseMap_Hit) {
+  auto r = RunGeneral("USE coinbase",
+                      {.database_map = {{"coinbase", "sentio_coinbase"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
+  EXPECT_NE(r.sql_after_rewrite.find("sentio_coinbase"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["coinbase"], "sentio_coinbase");
 }
 
-TEST(UseStatement, UseNoMatch) {
-  // database not in map → original SQL returned
-  std::map<std::string, std::string> db_map{{"other", "sentio_other"}};
-  auto [sql, stmt_type] = RunUseRewrite("USE mydb", db_map);
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_USE);
-  EXPECT_NE(sql.find("mydb"), std::string::npos);
+TEST(UseStatement, KnownPhysical_Passthrough) {
+  // Target is already a known physical DB -> leave SQL unchanged, no
+  // rewrite entry.
+  auto r = RunGeneral("USE sentio_coinbase",
+                      {.known_physical_databases = {"sentio_coinbase"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
+  EXPECT_NE(r.sql_after_rewrite.find("sentio_coinbase"), std::string::npos);
+  EXPECT_TRUE(r.table_rewrites.empty());
+}
+
+TEST(UseStatement, UnknownDatabase_Rejected) {
+  auto r = RunGeneral("USE mydb",
+                      {.database_map = {{"other", "sentio_other"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
 TEST(UseStatement, UseWithBackticks) {
-  std::map<std::string, std::string> db_map{{"my-db", "sentio_mydb"}};
-  auto [sql, stmt_type] = RunUseRewrite("USE `my-db`", db_map);
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_USE);
-  EXPECT_NE(sql.find("sentio_mydb"), std::string::npos);
+  auto r = RunGeneral("USE `my-db`",
+                      {.database_map = {{"my-db", "sentio_mydb"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("sentio_mydb"), std::string::npos);
 }
 
 // ============================================================================
 // SHOW TABLES Tests
 // ============================================================================
 
-// Helper: run SHOW TABLES rewrite.
-// `database` maps to physical_database, `processor_id` maps to logical_database.
-// The physical_database == db branch fires, using physical as the queried DB
-// and logical as the name prefix — equivalent to the legacy (database,
-// processor_id) pair.
-static std::pair<std::string, rewriter::StatementType> RunShowTablesRewrite(
-  const std::string &sql, const std::string &database, const std::string &processor_id) {
+TEST(ShowTables, Passthrough_NoOptions) {
+  // No TableNameRewrite option -> echo back.
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
-  req.set_sql(sql);
-
-  if (!database.empty() && !processor_id.empty()) {
-    auto *opt = req.add_options();
-    opt->set_op(rewriter::RewriteOp::ShowTablesRewrite);
-    auto *args = opt->mutable_show_tables_args();
-    args->set_physical_database(database);
-    args->set_logical_database(processor_id);
-  }
-
+  req.set_sql("SHOW TABLES");
   rewriter::RewriteSQLResponse resp;
   grpc::ServerContext ctx;
-  auto status = service.Rewrite(&ctx, &req, &resp);
-  if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
-    return {"", rewriter::STATEMENT_TYPE_UNSPECIFIED};
-  }
-  return {resp.sql_after_rewrite(), resp.statement_type()};
+  service.Rewrite(&ctx, &req, &resp);
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
 }
 
-TEST(ShowTables, SimpleShowTables_NoRewrite) {
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "", "");
-  EXPECT_FALSE(sql.empty());
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
+TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
+  // No FROM clause; logical comes from upstream context. prefix = "coinbase_".
+  auto r = RunGeneral("SHOW TABLES",
+                      {.database_map = {{"coinbase", "sentio_coinbase"}},
+                       .upstream_logical_database_in_context = "coinbase"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
+  // Filter targets the physical DB.
+  EXPECT_NE(r.sql_after_rewrite.find("database = 'sentio_coinbase'"), std::string::npos);
+  // Prefix = logical + default delim "_" (no extra_args).
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'coinbase_')"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("multiIf"), std::string::npos);
 }
 
-TEST(ShowTables, ShowTablesWithProcessor) {
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_coinbase", "coinbase");
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  // Rewritten to a SELECT over system.tables with startsWith-based prefix filter.
-  EXPECT_NE(sql.find("system.tables"), std::string::npos);
-  EXPECT_NE(sql.find("sentio_coinbase"), std::string::npos);
-  EXPECT_NE(sql.find("startsWith(name, 'coinbase')"), std::string::npos);
-  // Outer multiIf strips the prefix; inner subquery does the filtering so the
-  // WHERE clause isn't shadowed by the aliased name column.
-  EXPECT_NE(sql.find("multiIf"), std::string::npos);
-  EXPECT_NE(sql.find("FROM (SELECT name FROM system.tables"), std::string::npos);
-  std::cout << "\n=== ShowTablesWithProcessor Result ===\n" << sql << "\n";
+TEST(ShowTables, FromClauseOverridesUpstream) {
+  // `SHOW TABLES FROM mydb` -> logical = "mydb", not the upstream context.
+  auto r = RunGeneral("SHOW TABLES FROM mydb",
+                      {.database_map = {{"mydb", "physdb"}, {"coinbase", "sentio_coinbase"}},
+                       .upstream_logical_database_in_context = "coinbase"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("database = 'physdb'"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'mydb_')"), std::string::npos);
 }
 
-TEST(ShowTables, ShowTablesWithSpecialCharProcessor) {
-  // Processor ID with special characters — only single-quote escaping applies
-  // now (LIKE escaping was removed when we switched to startsWith).
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES", "sentio_special", "proc_test%\\");
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  // startsWith uses exact-string match, so the processor_id appears verbatim
-  // inside a single-quoted literal (no LIKE-metachar escaping).
-  EXPECT_NE(sql.find("startsWith(name, 'proc_test%\\')"), std::string::npos);
-  std::cout << "\n=== ShowTablesWithSpecialCharProcessor Result ===\n" << sql << "\n";
+TEST(ShowTables, WithExtraArgs_PrefixIncludesThem) {
+  // prefix = logical + delim + extras.join(delim) + delim
+  auto r = RunGeneral("SHOW TABLES",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1",
+                       .extra_arguments = {"v2", "shard0"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1_v2_shard0_')"),
+            std::string::npos);
 }
 
-TEST(ShowTables, ShowTablesFromDB_NoRewrite) {
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES FROM mydb", "", "");
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  // Without rewrite option, original SQL is returned
-  EXPECT_NE(sql.find("mydb"), std::string::npos);
+TEST(ShowTables, CustomDelim) {
+  auto r = RunGeneral("SHOW TABLES",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1",
+                       .delim = "-",
+                       .extra_arguments = {"v2"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1-v2-')"),
+            std::string::npos);
 }
 
-TEST(ShowTables, ShowDatabases) {
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW DATABASES", "", "");
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  EXPECT_NE(sql.find("DATABASES"), std::string::npos);
+TEST(ShowTables, NoContext_Rejected) {
+  // No FROM clause and no upstream context -> can't pick a logical db.
+  auto r = RunGeneral("SHOW TABLES",
+                      {.database_map = {{"coinbase", "sentio_coinbase"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
-TEST(ShowTables, ShowTablesLike) {
-  auto [sql, stmt_type] = RunShowTablesRewrite("SHOW TABLES LIKE 'transfer%'", "sentio_coinbase", "coinbase");
-  EXPECT_EQ(stmt_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  // Input LIKE is intentionally ignored — we always filter by processor prefix.
-  EXPECT_NE(sql.find("system.tables"), std::string::npos);
-  EXPECT_NE(sql.find("startsWith(name, 'coinbase')"), std::string::npos);
+TEST(ShowTables, UnknownLogical_Rejected) {
+  auto r = RunGeneral("SHOW TABLES FROM mydb",
+                      {.database_map = {{"other", "sentio_other"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+TEST(ShowTables, ShowDatabases_Echoed) {
+  // SHOW DATABASES is a distinct ASTShowTablesQuery subtype — handler
+  // echoes it back unchanged regardless of rewrite config.
+  auto r = RunGeneral("SHOW DATABASES",
+                      {.database_map = {{"coinbase", "sentio_coinbase"}},
+                       .upstream_logical_database_in_context = "coinbase"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("DATABASES"), std::string::npos);
+  // It's a SHOW DATABASES; the multiIf/startsWith filter should NOT have
+  // been synthesized.
+  EXPECT_EQ(r.sql_after_rewrite.find("startsWith"), std::string::npos);
 }
 
 // Verify SELECT statements still get statement_type = "SELECT"
@@ -1153,12 +1204,14 @@ TEST(StatementType, SelectHasCorrectType) {
 struct WriteOpResult {
   rewriter::RewriteCode code;
   rewriter::StatementType statement_type;
-  std::string write_target_table;
   std::string sql_after_rewrite;
   std::string message;
   int original_accessed_count;
 };
 
+// Run a write statement with NO rewrite options — verifies the classification
+// / rejection path. When the caller wants to exercise the dynamic-rewrite
+// path, use RunGeneral() instead.
 static WriteOpResult RunWriteOp(const std::string &sql) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
@@ -1172,7 +1225,6 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
   return {
     resp.code(),
     resp.statement_type(),
-    resp.write_stmt_value().target_table(),
     resp.sql_after_rewrite(),
     resp.message(),
     resp.original_accessed_table_names_size(),
@@ -1185,7 +1237,6 @@ TEST(WriteOp, CreateTable_Simple) {
   auto r = RunWriteOp("CREATE TABLE t (a Int32) ENGINE=Memory");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
   EXPECT_EQ(r.original_accessed_count, 0);
 }
 
@@ -1193,21 +1244,18 @@ TEST(WriteOp, CreateTable_WithDatabase) {
   auto r = RunWriteOp("CREATE TABLE db.t (a Int32) ENGINE=Memory");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_EQ(r.write_target_table, "db.t");
 }
 
 TEST(WriteOp, CreateTable_AsSelect_ReturnsTargetOnly) {
   auto r = RunWriteOp("CREATE TABLE t ENGINE=Memory AS SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
   EXPECT_EQ(r.original_accessed_count, 0);
 }
 
 TEST(WriteOp, CreateView_Rejected) {
   auto r = RunWriteOp("CREATE VIEW v AS SELECT 1");
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
-  EXPECT_TRUE(r.write_target_table.empty());
 }
 
 TEST(WriteOp, CreateMaterializedView_Rejected) {
@@ -1226,7 +1274,6 @@ TEST(WriteOp, DropTable_Simple) {
   auto r = RunWriteOp("DROP TABLE t");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
   EXPECT_EQ(r.original_accessed_count, 0);
 }
 
@@ -1234,14 +1281,12 @@ TEST(WriteOp, DropTable_WithDatabase) {
   auto r = RunWriteOp("DROP TABLE db.t");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
-  EXPECT_EQ(r.write_target_table, "db.t");
 }
 
 TEST(WriteOp, DropTable_IfExists) {
   auto r = RunWriteOp("DROP TABLE IF EXISTS t");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
 }
 
 TEST(WriteOp, DropTable_MultiTable_Rejected) {
@@ -1275,7 +1320,6 @@ TEST(WriteOp, AlterTable_AddColumn) {
   auto r = RunWriteOp("ALTER TABLE t ADD COLUMN c Int32");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_ALTER_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
 }
 
 TEST(WriteOp, AlterTable_Update) {
@@ -1283,7 +1327,6 @@ TEST(WriteOp, AlterTable_Update) {
   auto r = RunWriteOp("ALTER TABLE t UPDATE a = 1 WHERE id = 0");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_ALTER_TABLE);
-  EXPECT_EQ(r.write_target_table, "t");
 }
 
 TEST(WriteOp, AlterTable_ReplacePartitionFromOtherTable_Rejected) {
@@ -1307,7 +1350,6 @@ TEST(WriteOp, Insert_Values) {
   auto r = RunWriteOp("INSERT INTO t VALUES (1)");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_EQ(r.write_target_table, "t");
   EXPECT_EQ(r.original_accessed_count, 0);
 }
 
@@ -1315,7 +1357,6 @@ TEST(WriteOp, Insert_Select_ReturnsTargetOnly) {
   auto r = RunWriteOp("INSERT INTO db.t SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_EQ(r.write_target_table, "db.t");
   // The SELECT source (src) is NOT reported.
   EXPECT_EQ(r.original_accessed_count, 0);
 }
@@ -1331,28 +1372,24 @@ TEST(WriteOp, Update_Simple) {
   auto r = RunWriteOp("UPDATE t SET a = 1 WHERE id = 0");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_UPDATE);
-  EXPECT_EQ(r.write_target_table, "t");
 }
 
 TEST(WriteOp, Update_WithDatabase) {
   auto r = RunWriteOp("UPDATE db.t SET a = 1 WHERE id = 0");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_UPDATE);
-  EXPECT_EQ(r.write_target_table, "db.t");
 }
 
 TEST(WriteOp, Delete_Simple) {
   auto r = RunWriteOp("DELETE FROM t WHERE id = 0");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DELETE);
-  EXPECT_EQ(r.write_target_table, "t");
 }
 
 TEST(WriteOp, Delete_WithDatabase) {
   auto r = RunWriteOp("DELETE FROM db.t WHERE id = 0");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DELETE);
-  EXPECT_EQ(r.write_target_table, "db.t");
 }
 
 // --- Other write-ish statements rejected by getQueryKind() catch-all ---
@@ -1362,7 +1399,6 @@ TEST(WriteOp, Rename_Accepted) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_RENAME_TABLE);
   // No single target_table for RENAME — callers consult table_rewrites.
-  EXPECT_TRUE(r.write_target_table.empty());
 }
 
 TEST(WriteOp, RenameDatabase_Rejected) {
@@ -1376,57 +1412,273 @@ TEST(WriteOp, Optimize_Rejected) {
 }
 
 // ============================================================================
-// TableNameRewrite coverage for non-SELECT statements
+// TableNameRewrite — dynamic construction (non-SELECT) coverage
+// ============================================================================
+//
+// The GeneralArgs / GeneralProbe / RunGeneral helpers live above with the
+// USE / SHOW TABLES tests.
+
+// --- INSERT ---
+
+TEST(TableRewrite, Insert_QualifiedDB_DynamicConstruction) {
+  // `INSERT INTO tenant1.t` — SQL qualifier gives logical, database_map
+  // provides physical. No extra_args -> final name = tenant1_t.
+  auto r = RunGeneral("INSERT INTO tenant1.t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["tenant1.t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, Insert_UnqualifiedDB_FromUpstreamContext) {
+  // `INSERT INTO t` — no SQL qualifier, upstream context fills in.
+  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, Insert_WithExtraArgs) {
+  // extra_args = ["v2", "shard1"] -> name = tenant1_v2_shard1_t.
+  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1",
+                       .extra_arguments = {"v2", "shard1"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1_v2_shard1_t"), std::string::npos);
+}
+
+TEST(TableRewrite, Insert_CustomDelim) {
+  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1",
+                       .delim = "-",
+                       .extra_arguments = {"v2"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1-v2-t"), std::string::npos);
+}
+
+TEST(TableRewrite, Insert_EmptyExtraArgs_NoDoubleDelim) {
+  // Empty extra_args must NOT produce "tenant1__t".
+  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.sql_after_rewrite.find("tenant1__t"), std::string::npos)
+    << r.sql_after_rewrite;
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+}
+
+TEST(TableRewrite, Insert_KnownPhysical_Passthrough) {
+  // Logical db is already a known physical -> logical == physical; table
+  // name is still prefixed.
+  auto r = RunGeneral("INSERT INTO testnet.t VALUES (1)",
+                      {.known_physical_databases = {"testnet"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.testnet_t"), std::string::npos)
+    << r.sql_after_rewrite;
+  EXPECT_EQ(r.table_rewrites["testnet.t"], "testnet.testnet_t");
+}
+
+TEST(TableRewrite, Insert_UnknownLogical_Rejected) {
+  auto r = RunGeneral("INSERT INTO mystery.t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("mystery"), std::string::npos);
+}
+
+TEST(TableRewrite, Insert_NoContext_Rejected) {
+  // Unqualified target and no upstream context -> rejected.
+  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+TEST(TableRewrite, Insert_Passthrough_WhenNoOption) {
+  // No TableNameRewrite option at all -> writes echo back unchanged.
+  auto r = RunWriteOp("INSERT INTO t VALUES (1)");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
+  EXPECT_NE(r.sql_after_rewrite.find("INSERT INTO t"), std::string::npos);
+}
+
+// --- CREATE TABLE ---
+
+TEST(TableRewrite, CreateTable_Basic) {
+  auto r = RunGeneral("CREATE TABLE t (a Int32) ENGINE=Memory",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
+  // CREATE TABLE dst AS src — both sides rewrite using the same context.
+  auto r = RunGeneral("CREATE TABLE dst ENGINE=Memory AS src",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.table_rewrites["dst"], "testnet.tenant1_dst");
+  EXPECT_EQ(r.table_rewrites["src"], "testnet.tenant1_src");
+}
+
+// --- DROP / ALTER / UPDATE / DELETE ---
+
+TEST(TableRewrite, DropTable_Basic) {
+  auto r = RunGeneral("DROP TABLE t",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, AlterTable_Basic) {
+  auto r = RunGeneral("ALTER TABLE t ADD COLUMN c Int32",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_ALTER_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+}
+
+TEST(TableRewrite, Update_Basic) {
+  auto r = RunGeneral("UPDATE t SET a = 1 WHERE id = 0",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_UPDATE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+}
+
+TEST(TableRewrite, Delete_Basic) {
+  auto r = RunGeneral("DELETE FROM t WHERE id = 0",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DELETE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+}
+
+// --- RENAME ---
+
+TEST(TableRewrite, Rename_BothSidesRewritten) {
+  auto r = RunGeneral("RENAME TABLE a TO b",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_RENAME_TABLE);
+  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1_a");
+  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1_b");
+}
+
+TEST(TableRewrite, Rename_MultiplePairs) {
+  auto r = RunGeneral("RENAME TABLE a TO b, c TO d",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.table_rewrites.size(), 4u);
+  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1_a");
+  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1_b");
+  EXPECT_EQ(r.table_rewrites["c"], "testnet.tenant1_c");
+  EXPECT_EQ(r.table_rewrites["d"], "testnet.tenant1_d");
+}
+
+TEST(TableRewrite, Rename_QualifiedSidesUseTheirOwnLogical) {
+  // Each side can carry its own qualified logical DB.
+  auto r = RunGeneral("RENAME TABLE t1.a TO t2.b",
+                      {.database_map = {{"t1", "phys1"}, {"t2", "phys2"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.table_rewrites["t1.a"], "phys1.t1_a");
+  EXPECT_EQ(r.table_rewrites["t2.b"], "phys2.t2_b");
+}
+
+// --- EXISTS TABLE ---
+
+TEST(TableRewrite, ExistsTable_Basic) {
+  auto r = RunGeneral("EXISTS TABLE t",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_EXISTS_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, ExistsTable_UnknownLogical_Rejected) {
+  auto r = RunGeneral("EXISTS TABLE mystery.t",
+                      {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+TEST(TableRewrite, ExistsDatabase_Unsupported) {
+  auto r = RunGeneral("EXISTS DATABASE d", {});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+}
+
+// --- SHOW CREATE TABLE ---
+
+TEST(TableRewrite, ShowCreateTable_Basic) {
+  auto r = RunGeneral("SHOW CREATE TABLE t",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+}
+
+TEST(TableRewrite, ShowCreateDatabase_Unsupported) {
+  auto r = RunGeneral("SHOW CREATE DATABASE d", {});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+}
+
+// ============================================================================
+// SELECT path still uses select_stmt_args maps (table_map / remote_table_map
+// / table_with_database_map). Cover the basics to prove the split works.
 // ============================================================================
 
 namespace {
 
-// What a caller typically wants to assert about a single-statement response
-// after a TableNameRewrite option was applied.
-struct RewriteProbe {
-  rewriter::RewriteCode code;
-  rewriter::StatementType statement_type;
-  std::string sql_after_rewrite;
-  std::string message;
-  std::string write_target_table;
-  std::map<std::string, std::string> table_rewrites;
-};
-
-struct NameMaps {
+struct SelectMaps {
   std::map<std::string, std::string> table_map;
-  std::map<std::string, std::pair<std::string, std::string>> remote_map; // key -> {addr, db.table}
-  std::map<std::string, std::pair<std::string, std::string>> with_db_map; // key -> {db, table}
+  std::map<std::string, std::pair<std::string, std::string>> remote_map;   // key -> {addr, db.table}
+  std::map<std::string, std::pair<std::string, std::string>> with_db_map;  // key -> {db, table}
 };
 
-RewriteProbe RunWithMaps(const std::string &sql, const NameMaps &maps) {
+GeneralProbe RunSelect(const std::string &sql, const SelectMaps &maps) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql(sql);
 
-  if (!maps.table_map.empty() || !maps.remote_map.empty() || !maps.with_db_map.empty()) {
-    auto *opt = req.add_options();
-    opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *args = opt->mutable_table_name_args();
-    for (const auto &kv : maps.table_map) {
-      (*args->mutable_table_map())[kv.first] = kv.second;
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *sel = opt->mutable_table_name_args()->mutable_select_stmt_args();
+  for (const auto &kv : maps.table_map) {
+    (*sel->mutable_table_map())[kv.first] = kv.second;
+  }
+  for (const auto &kv : maps.remote_map) {
+    auto &r = (*sel->mutable_remote_table_map())[kv.first];
+    r.set_addr(kv.second.first);
+    const auto dot = kv.second.second.find('.');
+    if (dot == std::string::npos) {
+      r.set_table(kv.second.second);
+    } else {
+      r.set_database(kv.second.second.substr(0, dot));
+      r.set_table(kv.second.second.substr(dot + 1));
     }
-    for (const auto &kv : maps.remote_map) {
-      auto &r = (*args->mutable_remote_table_map())[kv.first];
-      r.set_addr(kv.second.first);
-      // Split "db.table" once; if no dot, all goes to table.
-      const auto dot = kv.second.second.find('.');
-      if (dot == std::string::npos) {
-        r.set_table(kv.second.second);
-      } else {
-        r.set_database(kv.second.second.substr(0, dot));
-        r.set_table(kv.second.second.substr(dot + 1));
-      }
-    }
-    for (const auto &kv : maps.with_db_map) {
-      auto &t = (*args->mutable_table_with_database_map())[kv.first];
-      t.set_database(kv.second.first);
-      t.set_table(kv.second.second);
-    }
+  }
+  for (const auto &kv : maps.with_db_map) {
+    auto &t = (*sel->mutable_table_with_database_map())[kv.first];
+    t.set_database(kv.second.first);
+    t.set_table(kv.second.second);
   }
 
   rewriter::RewriteSQLResponse resp;
@@ -1434,209 +1686,51 @@ RewriteProbe RunWithMaps(const std::string &sql, const NameMaps &maps) {
   auto status = service.Rewrite(&ctx, &req, &resp);
   EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
 
-  RewriteProbe out;
-  out.code = resp.code();
-  out.statement_type = resp.statement_type();
-  out.sql_after_rewrite = resp.sql_after_rewrite();
-  out.message = resp.message();
-  out.write_target_table = resp.write_stmt_value().target_table();
-  for (const auto &kv : resp.table_rewrites()) {
-    out.table_rewrites[kv.first] = kv.second;
-  }
-  return out;
+  GeneralProbe p;
+  p.code = resp.code();
+  p.statement_type = resp.statement_type();
+  p.sql_after_rewrite = resp.sql_after_rewrite();
+  p.message = resp.message();
+  for (const auto &kv : resp.table_rewrites()) p.table_rewrites[kv.first] = kv.second;
+  return p;
 }
 
 } // namespace
 
-// --- INSERT ---
-
-TEST(TableRewrite, Insert_TableMap_Hit) {
-  auto r = RunWithMaps("INSERT INTO t VALUES (1)",
-                       {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  ASSERT_EQ(r.table_rewrites.size(), 1u);
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, Insert_TableMap_HitQualified) {
-  auto r = RunWithMaps("INSERT INTO mydb.t VALUES (1)",
-                       {.table_map = {{"mydb.t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  // DB preserved, short name swapped. Full target is mydb.t_v2.
-  EXPECT_EQ(r.write_target_table, "mydb.t_v2");
-  EXPECT_EQ(r.table_rewrites["mydb.t"], "mydb.t_v2");
-}
-
-TEST(TableRewrite, Insert_TableMap_Miss) {
-  auto r = RunWithMaps("INSERT INTO t VALUES (1)",
-                       {.table_map = {{"other", "other_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t");
-  EXPECT_TRUE(r.table_rewrites.empty());
-}
-
-TEST(TableRewrite, Insert_WithDatabaseMap_Hit) {
-  auto r = RunWithMaps("INSERT INTO t VALUES (1)",
-                       {.with_db_map = {{"t", {"physdb", "t_v2"}}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "physdb.t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "physdb.t_v2");
-}
-
-TEST(TableRewrite, Insert_RemoteMap_Rejected) {
-  auto r = RunWithMaps(
-    "INSERT INTO t VALUES (1)",
-    {.remote_map = {{"t", {"host:9000", "db.t_v2"}}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
-  EXPECT_NE(r.message.find("remote_table_map"), std::string::npos);
-}
-
-// --- CREATE TABLE ---
-
-TEST(TableRewrite, CreateTable_TableMap_Hit) {
-  auto r = RunWithMaps("CREATE TABLE t (a Int32) ENGINE=Memory",
-                       {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, CreateTable_AsSource_Rewritten) {
-  auto r = RunWithMaps("CREATE TABLE dst ENGINE=Memory AS src",
-                       {.table_map = {{"dst", "dst_v2"}, {"src", "src_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "dst_v2");
-  EXPECT_EQ(r.table_rewrites["dst"], "dst_v2");
-  EXPECT_EQ(r.table_rewrites["src"], "src_v2");
-}
-
-TEST(TableRewrite, CreateTable_RemoteMap_Rejected) {
-  auto r = RunWithMaps(
-    "CREATE TABLE t (a Int32) ENGINE=Memory",
-    {.remote_map = {{"t", {"host:9000", "db.t_v2"}}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
-}
-
-// --- DROP / ALTER / UPDATE / DELETE ---
-
-TEST(TableRewrite, DropTable_TableMap_Hit) {
-  auto r = RunWithMaps("DROP TABLE t", {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, AlterTable_TableMap_Hit) {
-  auto r = RunWithMaps("ALTER TABLE t ADD COLUMN c Int32",
-                       {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, Update_TableMap_Hit) {
-  auto r = RunWithMaps("UPDATE t SET a = 1 WHERE id = 0",
-                       {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, Delete_TableMap_Hit) {
-  auto r = RunWithMaps("DELETE FROM t WHERE id = 0",
-                       {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.write_target_table, "t_v2");
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-// --- RENAME ---
-
-TEST(TableRewrite, Rename_BothSidesRewritten) {
-  auto r = RunWithMaps("RENAME TABLE a TO b",
-                       {.table_map = {{"a", "a_v2"}, {"b", "b_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_RENAME_TABLE);
-  EXPECT_TRUE(r.write_target_table.empty());
-  ASSERT_EQ(r.table_rewrites.size(), 2u);
-  EXPECT_EQ(r.table_rewrites["a"], "a_v2");
-  EXPECT_EQ(r.table_rewrites["b"], "b_v2");
-}
-
-TEST(TableRewrite, Rename_MultiplePairs) {
-  auto r = RunWithMaps("RENAME TABLE a TO b, c TO d",
-                       {.table_map = {{"a", "a_v2"}, {"c", "c_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_RENAME_TABLE);
-  EXPECT_EQ(r.table_rewrites["a"], "a_v2");
-  EXPECT_EQ(r.table_rewrites["c"], "c_v2");
-  // b, d unmapped — not in table_rewrites.
-  EXPECT_EQ(r.table_rewrites.count("b"), 0u);
-  EXPECT_EQ(r.table_rewrites.count("d"), 0u);
-}
-
-TEST(TableRewrite, Rename_RemoteMap_Rejected) {
-  auto r = RunWithMaps(
-    "RENAME TABLE a TO b",
-    {.remote_map = {{"a", {"host:9000", "db.a_v2"}}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
-}
-
-// --- EXISTS TABLE ---
-
-TEST(TableRewrite, ExistsTable_Accepted) {
-  auto r = RunWithMaps("EXISTS TABLE t", {});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_EXISTS_TABLE);
-}
-
-TEST(TableRewrite, ExistsTable_TableMap_Hit) {
-  auto r = RunWithMaps("EXISTS TABLE t", {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_EXISTS_TABLE);
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, ExistsTable_RemoteMap_Rejected) {
-  auto r = RunWithMaps(
-    "EXISTS TABLE t", {.remote_map = {{"t", {"host:9000", "db.t_v2"}}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
-}
-
-TEST(TableRewrite, ExistsDatabase_Rejected) {
-  auto r = RunWithMaps("EXISTS DATABASE d", {});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
-}
-
-// --- SHOW CREATE TABLE ---
-
-TEST(TableRewrite, ShowCreateTable_Accepted) {
-  auto r = RunWithMaps("SHOW CREATE TABLE t", {});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
-}
-
-TEST(TableRewrite, ShowCreateTable_TableMap_Hit) {
-  auto r = RunWithMaps("SHOW CREATE TABLE t", {.table_map = {{"t", "t_v2"}}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
-  EXPECT_EQ(r.table_rewrites["t"], "t_v2");
-}
-
-TEST(TableRewrite, ShowCreateDatabase_Rejected) {
-  auto r = RunWithMaps("SHOW CREATE DATABASE d", {});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
-}
-
-// --- SELECT still populates table_rewrites ---
-
-TEST(TableRewrite, Select_PopulatesTableRewrites) {
-  auto r = RunWithMaps("SELECT * FROM t", {.table_map = {{"t", "t_v2"}}});
+TEST(TableRewrite, Select_TableMap_Hit) {
+  auto r = RunSelect("SELECT * FROM t", {.table_map = {{"t", "t_v2"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SELECT);
   EXPECT_EQ(r.table_rewrites["t"], "t_v2");
+}
+
+TEST(TableRewrite, Select_WithDatabaseMap_Hit) {
+  auto r = RunSelect("SELECT * FROM t",
+                     {.with_db_map = {{"t", {"physdb", "t_v2"}}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.table_rewrites["t"], "physdb.t_v2");
+}
+
+TEST(TableRewrite, Select_RemoteMap_Hit) {
+  auto r = RunSelect("SELECT * FROM t",
+                     {.remote_map = {{"t", {"host:9000", "db.t_v2"}}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  // Output SQL uses remote(...) function.
+  EXPECT_NE(r.sql_after_rewrite.find("remote"), std::string::npos);
+  // table_rewrites records the db.table form.
+  EXPECT_EQ(r.table_rewrites["t"], "db.t_v2");
+}
+
+TEST(TableRewrite, Select_Passthrough_WhenNoOption) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SELECT * FROM t");
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SELECT);
+  EXPECT_EQ(resp.table_rewrites_size(), 0);
 }
 
 #if !REWRITER_RELEASE_MAIN

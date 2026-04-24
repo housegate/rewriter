@@ -7,17 +7,29 @@ and ships with a standalone CLI for one-off rewrites.
 Covers `SELECT` (with CTE injection, LIMIT/OFFSET/SETTINGS tweaks, table-name
 rewrites — including `remote()` substitution), `USE`, `SHOW TABLES`,
 `SHOW CREATE TABLE`, `EXISTS TABLE`, `CREATE/DROP/ALTER TABLE`, `INSERT`,
-`UPDATE`, `DELETE`, and `RENAME TABLE`. Every statement that carries a named
-table target honors `TableNameRewrite`; the rewrites that actually fired are
+`UPDATE`, `DELETE`, and `RENAME TABLE`. The rewrites that actually fired are
 reported on `response.table_rewrites` (a `map<original, rewritten>`, each side
 formatted as `"db.table"` or bare `"table"`).
+
+`TableNameRewrite` carries two modes:
+- **SELECT** uses `select_stmt_args` — three maps (`table_map`,
+  `remote_table_map`, `table_with_database_map`) the caller populates directly.
+- **Non-SELECT** uses `general_args` — dynamic construction from
+  `database_map` (logical → physical), `known_physical_databases`,
+  `upstream_logical_database_in_context` (last `USE`), `delim` (default `_`),
+  and `extra_arguments`. Final target =
+  `` `<physical_db>`.`<logical_db><delim>[extras joined by delim<delim>]<origin_table>` ``.
+  Empty `extra_arguments` collapses the middle block so you don't get a double
+  delim.
 
 Responses carry two enums for programmatic dispatch: `statement_type`
 (`StatementType` — `STATEMENT_TYPE_SELECT`, `_INSERT`, `_ALTER_TABLE`, …) for
 routing / auth control, and `code` (`RewriteCode`) with a four-way rejection
 taxonomy: `Success`, `SyntaxError`, `UnsupportedStatement` (statement kind out
 of scope — caller may pass through), and `InvalidRewriteRequest` (caller's
-options don't match the SQL — caller must NOT pass through). Full details in
+options don't match the SQL, e.g. a non-SELECT target named a logical DB
+that's neither in `database_map` nor in `known_physical_databases` — caller
+must NOT pass through). Full details in
 [protos/rewriter.proto](protos/rewriter.proto).
 
 ## What's in the box
@@ -68,31 +80,34 @@ After a successful build:
 # Health check.
 curl -s http://localhost:50052/healthz
 
-# Rewrite a SELECT by renaming a table and forcing a LIMIT.
+# Rewrite a SELECT — three-map policy under `select_stmt_args`.
 curl -s -XPOST http://localhost:50052/rewrite \
   -H 'Content-Type: application/json' \
   -d '{
     "sql": "SELECT * FROM events",
     "options": [
-      {"op": "TableNameRewrite", "table_name_args": {"table_map": {"events": "events_v2"}}},
-      {"op": "LimitRewrite",     "limit_args":      {"force_limit": 100}}
+      {"op": "TableNameRewrite",
+       "table_name_args": {"select_stmt_args": {"table_map": {"events": "events_v2"}}}},
+      {"op": "LimitRewrite", "limit_args": {"force_limit": 100}}
     ]
   }'
 
-# Write statements honor TableNameRewrite too.
-# The response's `table_rewrites` field reports the {original -> rewritten}
-# mapping the rewriter actually applied.
+# Rewrite a write — dynamic construction under `general_args`.
+# Final target = `<physical>`.`<logical>_<original>` (delim defaults to "_").
 curl -s -XPOST http://localhost:50052/rewrite \
   -H 'Content-Type: application/json' \
   -d '{
     "sql": "INSERT INTO events VALUES (1)",
     "options": [
-      {"op": "TableNameRewrite", "table_name_args": {"table_map": {"events": "events_v2"}}}
+      {"op": "TableNameRewrite",
+       "table_name_args": {"general_args": {
+         "database_map": {"tenant1": "testnet"},
+         "upstream_logical_database_in_context": "tenant1"}}}
     ]
   }'
-# => { "code": "Success", "statement_type": "INSERT",
-#      "sql_after_rewrite": "INSERT INTO events_v2 VALUES (1)",
-#      "table_rewrites": {"events": "events_v2"}, ... }
+# => { "code": "Success", "statement_type": "STATEMENT_TYPE_INSERT",
+#      "sql_after_rewrite": "INSERT INTO testnet.tenant1_events VALUES (1)",
+#      "table_rewrites": {"events": "testnet.tenant1_events"}, ... }
 ```
 
 ### Talk to it over gRPC
