@@ -146,6 +146,7 @@ message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 # Shared object library — everything except entry points.
 add_library(rewriter_core OBJECT
     src/rewriter-server.cc
+    src/query_preprocessor.cc
     src/ASTTransformers.cc
     src/rewriter-http-server.cc)
 target_include_directories(rewriter_core SYSTEM PUBLIC
