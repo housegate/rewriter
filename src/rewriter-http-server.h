@@ -5,8 +5,8 @@
 // `clickhouse_common_io`), so no new dependency.
 //
 // Routes (POST, JSON body matching the proto message):
-//   /Rewrite                                       → RewriterService.Rewrite
-//   /RewriteErrorMessage                           → RewriterService.RewriteErrorMessage
+//   /rewrite                                       → RewriterService.Rewrite
+//   /rewriteerrormessage                           → RewriterService.RewriteErrorMessage
 //   /rewriter.RewriterService/Rewrite              ↑ gRPC-style alias
 //   /rewriter.RewriterService/RewriteErrorMessage  ↑
 //   GET /healthz                                   → 200 "ok"

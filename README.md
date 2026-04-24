@@ -53,7 +53,7 @@ After a successful build:
 curl -s http://localhost:50052/healthz
 
 # Rewrite a SELECT by renaming a table and forcing a LIMIT.
-curl -s -XPOST http://localhost:50052/Rewrite \
+curl -s -XPOST http://localhost:50052/rewrite \
   -H 'Content-Type: application/json' \
   -d '{
     "sql": "SELECT * FROM events",

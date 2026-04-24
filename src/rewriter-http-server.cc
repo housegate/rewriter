@@ -143,10 +143,10 @@ public:
   HTTPRequestHandler *createRequestHandler(const HTTPServerRequest &request) override {
     Poco::URI uri(request.getURI());
     const std::string &path = uri.getPath();
-    if (path == "/Rewrite" || path == "/rewriter.RewriterService/Rewrite") {
+    if (path == "/rewrite" || path == "/rewriter.RewriterService/Rewrite") {
       return new RewriteHandler(core_);
     }
-    if (path == "/RewriteErrorMessage"
+    if (path == "/rewriteerrormessage"
         || path == "/rewriter.RewriterService/RewriteErrorMessage") {
       return new RewriteErrorMessageHandler(core_);
     }
@@ -178,7 +178,7 @@ void RunHttpServer(uint16_t port, RewriterServiceImpl &core) {
   server->start();
 
   std::cout << "[http] RewriterService listening on 0.0.0.0:" << port
-            << " (POST /Rewrite, /RewriteErrorMessage; GET /healthz)" << std::endl;
+            << " (POST /rewrite, /rewriteerrormessage; GET /healthz)" << std::endl;
 }
 
 } // namespace rewriter_http
