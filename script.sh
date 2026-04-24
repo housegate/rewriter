@@ -142,7 +142,7 @@ build() {
         echo 4
     )
     echo ">>> [5/5] Build the main target (-j$JOBS)"
-    ninja -C build -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
+    ninja -C build -j"$JOBS" clickhouse_housegate_rewriter clickhouse_housegate_rewriter_cli
 
     # If testing is enabled, build tests too.
     if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
@@ -162,7 +162,7 @@ build() {
     DURATION=$((END_TIME - START_TIME))
     echo "=========================================="
     echo "Build done in ${DURATION}s ($((DURATION / 60))m $((DURATION % 60))s)"
-    echo "Binary: build/clickhouse_sentio_rewriter"
+    echo "Binary: build/clickhouse_housegate_rewriter"
     echo "=========================================="
 }
 
@@ -193,7 +193,7 @@ rebuild() {
 
     echo ">>> [1/2] Recompile changed sources"
     cd build
-    ninja -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
+    ninja -j"$JOBS" clickhouse_housegate_rewriter clickhouse_housegate_rewriter_cli
     cd ..
 
     # If testing is enabled, build tests too.
@@ -208,7 +208,7 @@ rebuild() {
     DURATION=$((END_TIME - START_TIME))
     echo "=========================================="
     echo "Incremental build done in ${DURATION}s."
-    echo "Binary: build/clickhouse_sentio_rewriter"
+    echo "Binary: build/clickhouse_housegate_rewriter"
     echo "=========================================="
 }
 
@@ -236,16 +236,16 @@ docker_build_image() {
     echo "=========================================="
 
     # Check local binary exists.
-    if [ ! -f "build/clickhouse_sentio_rewriter" ]; then
-        echo "build/clickhouse_sentio_rewriter is missing."
+    if [ ! -f "build/clickhouse_housegate_rewriter" ]; then
+        echo "build/clickhouse_housegate_rewriter is missing."
         echo "Run ./script.sh build or ./script.sh rebuild first."
         exit 1
     fi
 
     echo ">>> [1/3] Copy binary into the Docker context"
-    cp -v build/clickhouse_sentio_rewriter docker/bare/root/clickhouse_sentio_rewriter
+    cp -v build/clickhouse_housegate_rewriter docker/bare/root/clickhouse_housegate_rewriter
 
-    local old_size=$(du -h docker/bare/root/clickhouse_sentio_rewriter | awk '{print $1}')
+    local old_size=$(du -h docker/bare/root/clickhouse_housegate_rewriter | awk '{print $1}')
     echo "Binary size: $old_size"
 
     echo ">>> [2/3] Build Docker image"

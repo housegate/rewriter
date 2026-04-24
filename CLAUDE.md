@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 C++23 gRPC service that rewrites ClickHouse SQL before it reaches a backend ClickHouse cluster. Links directly against the ClickHouse source tree (vendored as the `clickHouse/` git submodule) so it can parse queries into ClickHouse's own AST, mutate them via transformers, and format them back out.
 
-Entry point: `src/rewriter-server.cc` — gRPC server + `main()` (guarded by `REWRITER_RELEASE_MAIN`). Invocation: `clickhouse_sentio_rewriter [grpc_port] [http_port]`. Defaults: gRPC `50051`, HTTP `grpc_port + 1`.
+Entry point: `src/rewriter-server.cc` — gRPC server + `main()` (guarded by `REWRITER_RELEASE_MAIN`). Invocation: `clickhouse_housegate_rewriter [grpc_port] [http_port]`. Defaults: gRPC `50051`, HTTP `grpc_port + 1`.
 
 The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRewrite` and `doRewriteErrorMessage`. The gRPC `Rewrite` / `RewriteErrorMessage` methods are thin wrappers that delegate and return `Status::OK` — never add logic to the wrappers, always to the `do*` methods, so the HTTP façade stays in sync.
 
@@ -33,7 +33,7 @@ All day-to-day commands go through `./script.sh` (Chinese comments inside). It h
 ./script.sh rebuild          # incremental; use this for day-to-day work
 ./script.sh test             # build + ctest
 ./script.sh clean            # rm -rf build/
-./script.sh docker build <v> # stages build/clickhouse_sentio_rewriter → docker/bare/root/ then buildx
+./script.sh docker build <v> # stages build/clickhouse_housegate_rewriter → docker/bare/root/ then buildx
 ./script.sh docker push  <v>
 ```
 
@@ -44,7 +44,7 @@ Single-test runs (gtest binary):
 ./build/rewriter_tests --gtest_filter='CTEOnly.RunByName_Simple'
 ```
 
-Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_TESTS=OFF -DBUILD_TESTING=ON -DENABLE_THINLTO=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold` then `ninja -C build clickhouse_sentio_rewriter rewriter_tests`. The main target name is `clickhouse_sentio_rewriter`; tests are `rewriter_tests`.
+Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_TESTS=OFF -DBUILD_TESTING=ON -DENABLE_THINLTO=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold` then `ninja -C build clickhouse_housegate_rewriter rewriter_tests`. The main target name is `clickhouse_housegate_rewriter`; tests are `rewriter_tests`.
 
 ### Submodule brittleness (important)
 
