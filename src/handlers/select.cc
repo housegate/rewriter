@@ -102,7 +102,11 @@ void applyPendingToSelect(DB::ASTSelectQuery *select, const PendingSelectTransfo
     if (limit_expr) {
       auto *limit_literal = limit_expr->as<DB::ASTLiteral>();
       if (limit_literal) {
-        size_t original_limit = limit_literal->value.safeGet<DB::UInt64>();
+        // UInt64 is a global typedef (clickHouse/base/base/types.h), not a
+        // DB-namespace alias. `safeGet<DB::UInt64>()` fails to resolve from
+        // namespace rewriter_handlers — the old call site in ASTTransformers.cc
+        // worked only because it's inside `namespace DB`.
+        size_t original_limit = limit_literal->value.safeGet<UInt64>();
         if (original_limit == 0 || original_limit > action.threshold) {
           select->setExpression(
             DB::ASTSelectQuery::Expression::LIMIT_LENGTH,
