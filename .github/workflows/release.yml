@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh -p 30100 -o BatchMode=yes sentio@BUILD_HOST \
-            "cd ~/ci/rewriter && ./scripts.sh rebuild"
+            "cd ~/ci/rewriter && ./scripts.sh build"
 
       - name: Build + push docker image
         env:
