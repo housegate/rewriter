@@ -142,24 +142,27 @@ target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BI
 target_link_libraries(rewriter_grpc_protos PUBLIC ch_contrib::grpc)
 
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
-# include(${rewriter_grpc_proto_headers})
-# set(SOURCES src/rewriter-server.cc ${rewriter_grpc_proto_headers})
-set(SOURCES src/rewriter-server.cc src/ASTTransformers.cc src/rewriter-http-server.cc)
 
-# Add your executable or library
-# clickhouse_add_executable(clickhouse_sentio_rewriter src/rewriter-server.cc)
-clickhouse_add_executable(clickhouse_sentio_rewriter ${SOURCES})
-target_compile_definitions(clickhouse_sentio_rewriter PRIVATE REWRITER_RELEASE_MAIN=1)
-target_include_directories(clickhouse_sentio_rewriter
-        SYSTEM PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_BINARY_DIR}/protos
-)
-target_compile_definitions(clickhouse_sentio_rewriter PRIVATE
-        "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
-# Link ClickHouse libraries
-target_link_libraries(clickhouse_sentio_rewriter PRIVATE clickhouse_parsers clickhouse_common_io dbms clickhouse_functions rewriter_grpc_protos absl::debugging_internal)
+# Shared object library — everything except entry points.
+add_library(rewriter_core OBJECT
+    src/rewriter-server.cc
+    src/ASTTransformers.cc
+    src/rewriter-http-server.cc)
+target_include_directories(rewriter_core SYSTEM PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/protos)
+target_link_libraries(rewriter_core PUBLIC
+    clickhouse_parsers clickhouse_common_io dbms clickhouse_functions
+    rewriter_grpc_protos absl::debugging_internal)
+target_compile_definitions(rewriter_core PUBLIC
+    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
+
+# Server executable.
+clickhouse_add_executable(clickhouse_sentio_rewriter
+    src/rewriter-server-main.cc
+    $<TARGET_OBJECTS:rewriter_core>)
+target_link_libraries(clickhouse_sentio_rewriter PRIVATE rewriter_core)
 
 option(BUILD_TESTING "Build unit tests" OFF)
 if (BUILD_TESTING)

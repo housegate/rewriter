@@ -21,9 +21,7 @@ find_package(Threads REQUIRED)
 
 clickhouse_add_executable(rewriter_tests
     rewriter_test.cc
-    ${PROJECT_SOURCE_DIR}/src/ASTTransformers.cc
-    ${PROJECT_SOURCE_DIR}/src/rewriter-server.cc
-    ${PROJECT_SOURCE_DIR}/src/rewriter-http-server.cc
+    $<TARGET_OBJECTS:rewriter_core>
 )
 
 target_include_directories(rewriter_tests PRIVATE
@@ -33,7 +31,6 @@ target_include_directories(rewriter_tests PRIVATE
     ${PROJECT_BINARY_DIR}/src
 )
 
-target_compile_definitions(rewriter_tests PRIVATE REWRITER_RELEASE_MAIN=0)
 
 if (OS_DARWIN)
     target_compile_options(rewriter_tests PRIVATE -stdlib=libc++)
