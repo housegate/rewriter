@@ -17,7 +17,7 @@ mkdir -p root/{lib,lib64,etc,tmp,root}
 pushd root >/dev/null
 
 # Copy the compiled binary.
-cp "${BUILD_DIR}/clickhouse_housegate_rewriter" .
+cp "${BUILD_DIR}/clickhousegate_rewriter" .
 
 if [ "$OS" = "Linux" ]; then
   echo "-> Copying Linux .so libraries..."
@@ -26,7 +26,7 @@ if [ "$OS" = "Linux" ]; then
   # elif [ "$OS" = "Darwin" ]; then
   # echo "-> Copying macOS .dylib dependencies..."
   # # 1) Auto-scan transitive deps.
-  # for dylib in $(otool -L clickhouse_housegate_rewriter |
+  # for dylib in $(otool -L clickhousegate_rewriter |
   #   tail -n +2 | awk '{print $1}'); do
   #   if [ -f "$dylib" ]; then
   #     echo "   copying $dylib"
@@ -36,7 +36,7 @@ if [ "$OS" = "Linux" ]; then
   #   fi
   # done
   # # 2) Copy the dyld loader.
-  # DYLD_PATH=$(otool -l clickhouse_housegate_rewriter |
+  # DYLD_PATH=$(otool -l clickhousegate_rewriter |
   #   awk '/LC_LOAD_DYLINKER/{getline; print $2}')
   # if [ -f "$DYLD_PATH" ]; then
   #   echo "   copying dyld loader: $DYLD_PATH"
@@ -65,7 +65,7 @@ else
 fi
 
 # strip (may fail on macOS; swallow the error and continue).
-strip clickhouse_housegate_rewriter 2>/dev/null || echo "-> strip failed or skipped"
+strip clickhousegate_rewriter 2>/dev/null || echo "-> strip failed or skipped"
 
 popd >/dev/null
 

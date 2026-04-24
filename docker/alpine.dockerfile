@@ -32,5 +32,5 @@ RUN mkdir build && cmake -S . -B build \
 EXPOSE $PORT
 
 # Set entrypoint
-ENTRYPOINT ["./build/clickhouse_housegate_rewriter", $PORT]
+ENTRYPOINT ["./build/clickhousegate_rewriter", $PORT]
 

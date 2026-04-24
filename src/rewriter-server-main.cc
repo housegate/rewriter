@@ -1,6 +1,6 @@
 // src/rewriter-server-main.cc
 //
-// Thin entry point for the `clickhouse_housegate_rewriter` executable.
+// Thin entry point for the `clickhousegate_rewriter` executable.
 // All real logic lives in rewriter-server.cc's RunServer(); this file just
 // parses argv. Split out of rewriter-server.cc so the shared code can live
 // in an OBJECT library linked by both the server and the CLI.

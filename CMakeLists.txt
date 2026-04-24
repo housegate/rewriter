@@ -179,16 +179,16 @@ target_compile_definitions(rewriter_core PUBLIC
     "-DREWRITER_VERSION=\"${REWRITER_VERSION}\"")
 
 # Server executable.
-clickhouse_add_executable(clickhouse_housegate_rewriter
+clickhouse_add_executable(clickhousegate_rewriter
     src/rewriter-server-main.cc
     $<TARGET_OBJECTS:rewriter_core>)
-target_link_libraries(clickhouse_housegate_rewriter PRIVATE rewriter_core)
+target_link_libraries(clickhousegate_rewriter PRIVATE rewriter_core)
 
 # CLI executable — one-shot rewriter for scripting.
-clickhouse_add_executable(clickhouse_housegate_rewriter_cli
+clickhouse_add_executable(clickhousegate_rewriter_cli
     src/rewriter-cli.cc
     $<TARGET_OBJECTS:rewriter_core>)
-target_link_libraries(clickhouse_housegate_rewriter_cli PRIVATE rewriter_core)
+target_link_libraries(clickhousegate_rewriter_cli PRIVATE rewriter_core)
 
 option(BUILD_TESTING "Build unit tests" OFF)
 if (BUILD_TESTING)

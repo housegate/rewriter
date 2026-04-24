@@ -8,14 +8,14 @@ and ships with a standalone CLI for one-off rewrites.
 
 | Binary | Role |
 |--------|------|
-| `clickhouse_housegate_rewriter`     | Long-running server. Listens on gRPC (default `:50051`) and HTTP/JSON (`:50052`). |
-| `clickhouse_housegate_rewriter_cli` | One-shot CLI — takes a SQL string + rewrite options, prints rewritten SQL. |
+| `clickhousegate_rewriter`     | Long-running server. Listens on gRPC (default `:50051`) and HTTP/JSON (`:50052`). |
+| `clickhousegate_rewriter_cli` | One-shot CLI — takes a SQL string + rewrite options, prints rewritten SQL. |
 
 ## Clone
 
 ```shell
-git clone --recurse-submodules --shallow-submodules https://github.com/sentioxyz/sql-rewriter.git
-cd sql-rewriter && git submodule update --init --depth=1
+git clone --recurse-submodules --shallow-submodules https://github.com/housegate/rewriter.git
+cd rewriter && git submodule update --init --depth=1
 ```
 
 ## Build
@@ -34,16 +34,16 @@ submodule quirks.
 
 After a successful build:
 
-- `build/clickhouse_housegate_rewriter`
-- `build/clickhouse_housegate_rewriter_cli`
+- `build/clickhousegate_rewriter`
+- `build/clickhousegate_rewriter_cli`
 - `build/tests/rewriter_tests` (if `BUILD_TESTING=ON`, the default)
 
 ## Run the server
 
 ```shell
-./build/clickhouse_housegate_rewriter              # gRPC :50051, HTTP :50052
-./build/clickhouse_housegate_rewriter 60000        # gRPC :60000, HTTP :60001
-./build/clickhouse_housegate_rewriter 60000 7000   # gRPC :60000, HTTP :7000
+./build/clickhousegate_rewriter              # gRPC :50051, HTTP :50052
+./build/clickhousegate_rewriter 60000        # gRPC :60000, HTTP :60001
+./build/clickhousegate_rewriter 60000 7000   # gRPC :60000, HTTP :7000
 ```
 
 ### Talk to it over HTTP
@@ -78,41 +78,41 @@ grpcurl -plaintext -proto protos/rewriter.proto \
 
 ```shell
 # Simple: inline SQL.
-./build/clickhouse_housegate_rewriter_cli --sql 'SELECT * FROM events'
+./build/clickhousegate_rewriter_cli --sql 'SELECT * FROM events'
 
 # Rename a table.
-./build/clickhouse_housegate_rewriter_cli \
+./build/clickhousegate_rewriter_cli \
   --sql 'SELECT * FROM events' --rename-table events=events_v2
 
 # Force a LIMIT.
-./build/clickhouse_housegate_rewriter_cli --sql 'SELECT 1' --force-limit 10
+./build/clickhousegate_rewriter_cli --sql 'SELECT 1' --force-limit 10
 
 # Full proto options from a JSON file (matches the RewriteSQLRequest message).
-./build/clickhouse_housegate_rewriter_cli --sql-file query.sql --options options.json
+./build/clickhousegate_rewriter_cli --sql-file query.sql --options options.json
 
 # Read SQL from stdin.
-cat query.sql | ./build/clickhouse_housegate_rewriter_cli --force-limit 100
+cat query.sql | ./build/clickhousegate_rewriter_cli --force-limit 100
 
 # Rewrite an error message (uses the rewritten -> original inverse transform).
-./build/clickhouse_housegate_rewriter_cli \
+./build/clickhousegate_rewriter_cli \
   --sql 'SELECT * FROM events_v2' \
   --rename-table events=events_v2 \
   --error-message 'Table events_v2 does not exist'
 
 # Emit the full RewriteSQLResponse as JSON.
-./build/clickhouse_housegate_rewriter_cli --sql 'SELECT 1' --json
+./build/clickhousegate_rewriter_cli --sql 'SELECT 1' --json
 ```
 
-Run `clickhouse_housegate_rewriter_cli --help` for the full flag list.
+Run `clickhousegate_rewriter_cli --help` for the full flag list.
 
 ## Docker
 
 Pre-built images are published to Google Artifact Registry:
 
 ```shell
-docker pull us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:<version>
+docker pull us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
 docker run --rm -p 50051:50051 -p 50052:50052 \
-  us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:<version>
+  us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
 ```
 
 See `.github/workflows/release.yml` for how releases are produced. The docker
