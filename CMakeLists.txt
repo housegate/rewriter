@@ -177,9 +177,17 @@ target_include_directories(rewriter_core SYSTEM PUBLIC
 target_link_libraries(rewriter_core PUBLIC
     clickhouse_parsers clickhouse_common_io dbms clickhouse_functions
     rewriter_grpc_protos absl::debugging_internal)
-target_compile_definitions(rewriter_core PUBLIC
-    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\""
-    "-DREWRITER_VERSION=\"${REWRITER_VERSION}\"")
+# Stamp the version / commit hash into rewriter-server.cc ONLY (that's the
+# sole consumer). Previously this was a rewriter_core PUBLIC define, which
+# meant any change to REWRITER_VERSION — including `git describe --dirty`
+# flipping on/off during dev — invalidated every TU in rewriter_core (~12
+# files) plus both executables. Narrowing to the one source file keeps
+# incremental rebuilds at ~1 TU + 1 link when only the version string
+# changed, which is the common case on each release cut.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rewriter-server.cc
+    PROPERTIES COMPILE_DEFINITIONS
+      "GIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\";REWRITER_VERSION=\"${REWRITER_VERSION}\"")
 
 # Server executable.
 clickhouse_add_executable(clickhousegate_rewriter

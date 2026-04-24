@@ -182,10 +182,25 @@ rebuild() {
     echo "=========================================="
     START_TIME=$(date +%s)
 
-    # Restore symlinks and patches before ninja so incremental configure/build
-    # doesn't trip on missing files or missing symbols.
+    # Restore symlinks and patches before configure/ninja so incremental
+    # builds don't trip on missing files or missing symbols.
     ensure_symlinks
     ensure_patches
+
+    # Re-run cmake configure so `git describe`-derived REWRITER_VERSION /
+    # GIT_COMMIT_HASH are refreshed and any CMakeLists.txt edits get picked
+    # up. cmake is a fast no-op (~1-3s) when nothing actually changed.
+    # Without this, `rebuild` on a freshly-checked-out tag would ship the
+    # previous tag's version string (CMakeCache is sticky across ninja-only
+    # runs) — that's how v0.0.7 used to get stamped as v0.0.6.
+    echo ">>> [1/3] Refresh cmake configure"
+    cmake -B build -S . -GNinja \
+      -DENABLE_RUST=OFF \
+      -DENABLE_TESTS=OFF \
+      -DBUILD_TESTING=ON \
+      -DENABLE_THINLTO=OFF \
+      -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 
     JOBS=$(
         command -v nproc   >/dev/null && nproc ||
@@ -194,14 +209,14 @@ rebuild() {
         echo 4
     )
 
-    echo ">>> [1/2] Recompile changed sources"
+    echo ">>> [2/3] Recompile changed sources"
     cd build
     ninja -j"$JOBS" clickhousegate_rewriter clickhousegate_rewriter_cli
     cd ..
 
     # If testing is enabled, build tests too.
     if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
-        echo ">>> [2/2] Recompile tests"
+        echo ">>> [3/3] Recompile tests"
         cd build
         ninja -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
         cd ..

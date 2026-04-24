@@ -44,7 +44,7 @@ ssh -p 30100 sentio@BUILD_HOST \
   "cd /home/sentio/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
 ```
 
-Use `./scripts.sh build` (not `rebuild`) only when `build/` is missing or `CMakeLists.txt` changed — full build is ~15-20min.
+Use `./scripts.sh build` (not `rebuild`) only when `build/` is missing or the build state looks corrupt — full build is ~15-20min. `rebuild` re-runs `cmake` configure on every invocation (~1-3s no-op when nothing changed), so `CMakeLists.txt` edits and `git describe`-derived version stamps are picked up automatically; you don't need to remember to switch commands.
 
 ### `./scripts.sh` commands
 

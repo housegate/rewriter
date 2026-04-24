@@ -77,10 +77,18 @@ jobs:
           REMOTE
 
       - name: Build binary on build host
+        # rebuild (not build) — CI's workdir `~/ci/rewriter` persists its
+        # `build/` across runs (the fetch step preserves it with
+        # `git clean -fdx -e build`), so ninja incremental takes a release
+        # build from ~15-20min down to the few minutes' worth of TUs that
+        # actually changed. `rebuild` re-runs cmake configure at the top,
+        # so REWRITER_VERSION (from `git describe`) always reflects the
+        # freshly-checked-out tag — if you flip this back to `build`, the
+        # release time goes up 10x without any correctness gain.
         run: |
           set -euo pipefail
           ssh -p 30100 -o BatchMode=yes sentio@BUILD_HOST \
-            "cd ~/ci/rewriter && ./scripts.sh build"
+            "cd ~/ci/rewriter && ./scripts.sh rebuild"
 
       - name: Build + push docker image
         env:
