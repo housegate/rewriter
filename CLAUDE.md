@@ -16,28 +16,51 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 
 ## Build / test / run
 
-**ClickHouse does not compile on local dev machines** — all builds and tests happen on a dedicated remote build box. Local workflow is: edit here → rsync/scp changes → SSH in → run `./scripts.sh`.
+**ClickHouse does not compile on local dev machines** — all builds and tests happen on a dedicated remote build box. The local checkout is for editing; every build crosses the network.
+
+### Remote build box
+
+- **SSH:** `ssh -p 30100 sentio@BUILD_HOST`
+- **Dev workdir (has build cache):** `/home/sentio/chen/rewriter-grpc/`
+- **CI workdir (used by `.github/workflows/release.yml`):** `~/ci/rewriter/`
+- Other directories like `~/chen/sql-rewriter/` or `~/limengyu/sql-rewriter/` are stale — ignore them.
+
+### Typical dev loop
 
 ```shell
-ssh sentio@BUILD_HOST -p 30100
-# remote repo: /home/sentio/chen/sql-rewriter
-cd /home/sentio/chen/sql-rewriter
-./scripts.sh rebuild     # or build / test
+# 1. Push local edits to the dev workdir. Exclude heavy dirs so rsync is fast.
+rsync -az --delete \
+  --exclude='.git' --exclude='build/' --exclude='clickHouse/' \
+  --exclude='contrib' --exclude='docs/' \
+  -e "ssh -p 30100" \
+  ./ sentio@BUILD_HOST:/home/sentio/chen/rewriter-grpc/
+
+# 2. Incremental build (30s-3min).
+ssh -p 30100 sentio@BUILD_HOST \
+  "cd /home/sentio/chen/rewriter-grpc && ./scripts.sh rebuild"
+
+# 3. Run tests.
+ssh -p 30100 sentio@BUILD_HOST \
+  "cd /home/sentio/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
 ```
 
-All day-to-day commands go through `./scripts.sh` (Chinese comments inside). It handles symlinks and submodule patches that `ninja` otherwise trips on.
+Use `./scripts.sh build` (not `rebuild`) only when `build/` is missing or `CMakeLists.txt` changed — full build is ~15-20min.
+
+### `./scripts.sh` commands
+
+The wrapper handles symlinks and submodule patches that `ninja` otherwise trips on. Chinese comments inside.
 
 ```shell
-./scripts.sh prepare          # install toolchain (brew on macOS, apt+LLVM on Linux)
-./scripts.sh build            # full clean build (~15–20 min first time)
-./scripts.sh rebuild          # incremental; use this for day-to-day work
+./scripts.sh prepare          # install toolchain (apt+LLVM on Linux, brew on macOS)
+./scripts.sh build            # full clean build (wipes build/, ~15-20 min)
+./scripts.sh rebuild          # incremental; use this day-to-day. Falls through to build if build/ is missing.
 ./scripts.sh test             # build + ctest
 ./scripts.sh clean            # rm -rf build/
 ./scripts.sh docker build <v> # stages build/clickhousegate_rewriter → docker/bare/root/ then buildx
 ./scripts.sh docker push  <v>
 ```
 
-Prerequisite submodule init on a fresh checkout (from `README.md`): `cd clickHouse && git submodule update --init --depth=1`.
+Prerequisite submodule init on a fresh clone: `cd clickHouse && git submodule update --init --depth=1`.
 
 Single-test runs (gtest binary):
 ```shell
@@ -45,6 +68,10 @@ Single-test runs (gtest binary):
 ```
 
 Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_TESTS=OFF -DBUILD_TESTING=ON -DENABLE_THINLTO=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold` then `ninja -C build clickhousegate_rewriter rewriter_tests`. The main target name is `clickhousegate_rewriter`; tests are `rewriter_tests`.
+
+### Cutting a release
+
+Don't bump versions by hand. Use the `cut-release` workflow (`Actions → cut-release → Run workflow`). It tags `main` as `vX.Y.Z` in UTC — first cut of a new UTC day bumps Y (minor), subsequent cuts same day bump Z (patch) — then dispatches `release.yml` which builds + pushes the docker image on the build host.
 
 ### Submodule brittleness (important)
 
