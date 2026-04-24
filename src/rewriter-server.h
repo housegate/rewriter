@@ -47,16 +47,6 @@ public:
   void doRewriteErrorMessage(
     const RewriteErrorMessageRequest *request, RewriteErrorMessageResponse *response);
 
-private:
-  DB::ASTPtr rewriteSQLImpl(
-    const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options, DB::ASTPtr ast);
-
-  void doTableNameRewrite(DB::ASTPtr ast,
-    const std::map<std::string, std::string> &table_name_map_,
-    const std::map<std::string, DB::RemoteTable> &remote_table_map_,
-    const std::map<std::string, DB::TableWithDatabase> &table_with_database_map_);
-
-public:
   Status RewriteForTest(
     ServerContext *context, const RewriteSQLRequest *request, RewriteSQLResponse *response) {
     return Rewrite(context, request, response);

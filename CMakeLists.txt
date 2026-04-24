@@ -148,7 +148,11 @@ add_library(rewriter_core OBJECT
     src/rewriter-server.cc
     src/query_preprocessor.cc
     src/ASTTransformers.cc
-    src/rewriter-http-server.cc)
+    src/rewriter-http-server.cc
+    src/handlers/use.cc
+    src/handlers/show_tables.cc
+    src/handlers/writes.cc
+    src/handlers/select.cc)
 target_include_directories(rewriter_core SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
