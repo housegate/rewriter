@@ -232,6 +232,37 @@ docker_list() {
     docker images
 }
 
+# Make sure `docker-credential-gcloud` is on PATH so that the `gcloud` cred
+# helper configured in ~/.docker/config.json can mint access tokens for
+# *.pkg.dev / gcr.io pushes. Interactive SSH sessions usually have gcloud SDK
+# sourced via ~/.bash_profile, but non-interactive shells (e.g. CI over SSH)
+# do not — that's why `docker push` fails with `Unauthenticated request` in
+# the release workflow while it works when you SSH in by hand.
+ensure_gcloud_on_path() {
+    # Already reachable? Nothing to do.
+    if command -v docker-credential-gcloud >/dev/null 2>&1; then
+        return 0
+    fi
+    # Prefer the official path.bash.inc shipped with the SDK (also sets up
+    # completion etc. as a side-effect). Fall back to a few common install
+    # locations if it's missing.
+    local inc
+    for inc in \
+        "$HOME/google-cloud-sdk/path.bash.inc" \
+        /usr/lib/google-cloud-sdk/path.bash.inc \
+        /snap/google-cloud-sdk/current/path.bash.inc; do
+        if [ -f "$inc" ]; then
+            # shellcheck disable=SC1090
+            source "$inc"
+            break
+        fi
+    done
+    if ! command -v docker-credential-gcloud >/dev/null 2>&1; then
+        echo "WARN: docker-credential-gcloud still not on PATH;" \
+             "pushes to *.pkg.dev / gcr.io will likely fail auth." >&2
+    fi
+}
+
 docker_build_image() {
     local ver=$1
     echo "=========================================="
@@ -272,6 +303,7 @@ docker_build_image() {
 
 docker_push_image() {
     local ver=$1
+    ensure_gcloud_on_path
     echo ">>> Pushing Docker image with tag: $ver"
     (
       cd docker/bare
