@@ -167,17 +167,20 @@ build() {
 }
 
 # Incremental build (fast; for day-to-day work).
+# If build/ doesn't exist yet, fall through to a full build — saves the caller
+# one step and keeps `./scripts.sh rebuild` as the "just make it work" verb.
 rebuild() {
+    if [ ! -d "build" ]; then
+        echo "build/ does not exist; falling through to full build."
+        build
+        return $?
+    fi
+
     echo "=========================================="
     echo "Incremental build (only recompiles changed files)"
     echo "Expected time: 30s-3min."
     echo "=========================================="
     START_TIME=$(date +%s)
-
-    if [ ! -d "build" ]; then
-        echo "build/ does not exist; run ./scripts.sh build first."
-        exit 1
-    fi
 
     # Restore symlinks and patches before ninja so incremental configure/build
     # doesn't trip on missing files or missing symbols.
