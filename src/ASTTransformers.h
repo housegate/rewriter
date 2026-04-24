@@ -84,15 +84,16 @@ public:
 
   void transform(ASTPtr &ast) const override;
 
-  void setTableNameMap(const std::map<String, String> &table_name_map);
+  void setTableNameMap(const std::unordered_map<String, String> &table_name_map);
 
-  void setRemoteTableMap(const std::map<String, RemoteTable> &remote_table_map);
+  void setRemoteTableMap(const std::unordered_map<String, RemoteTable> &remote_table_map);
 
-  void setTableWithDatabaseMap(const std::map<String, TableWithDatabase> &table_with_database_map);
+  void setTableWithDatabaseMap(
+    const std::unordered_map<String, TableWithDatabase> &table_with_database_map);
 
-  std::map<String, String> table_name_map;
-  std::map<String, RemoteTable> remote_table_map;
-  std::map<String, TableWithDatabase> table_with_database_map;
+  std::unordered_map<String, String> table_name_map;
+  std::unordered_map<String, RemoteTable> remote_table_map;
+  std::unordered_map<String, TableWithDatabase> table_with_database_map;
 
 protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
@@ -125,6 +126,7 @@ private:
   void mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &new_list) const;
 
   std::unordered_map<String, ASTPtr> cte_ast_map;
+  bool cte_ast_map_set = false;
   std::map<String, DB::CommonTableExpr> cte_map;
 
 protected:

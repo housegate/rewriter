@@ -103,17 +103,17 @@ void IASTTransformer::transform(const ASTPtr &transformer, ASTPtr &ast) {
 }
 
 void ASTReplaceTransformer::setTableNameMap(
-  const std::map<std::string, std::string> &table_name_map_) {
+  const std::unordered_map<std::string, std::string> &table_name_map_) {
   table_name_map = table_name_map_;
 }
 
 void ASTReplaceTransformer::setRemoteTableMap(
-  const std::map<std::string, DB::RemoteTable> &remote_table_map_) {
+  const std::unordered_map<std::string, DB::RemoteTable> &remote_table_map_) {
   remote_table_map = remote_table_map_;
 }
 
 void ASTReplaceTransformer::setTableWithDatabaseMap(
-  const std::map<std::string, DB::TableWithDatabase> &table_with_database_map_) {
+  const std::unordered_map<std::string, DB::TableWithDatabase> &table_with_database_map_) {
   table_with_database_map = table_with_database_map_;
 }
 
@@ -132,18 +132,16 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
       auto *identifier = table_expression->database_and_table_name->as<ASTTableIdentifier>();
       auto origin_table_name = identifier->name();
       auto origin_alias = identifier->tryGetAlias();
-      if (table_name_map.find(origin_table_name) != table_name_map.end()) {
-        identifier->setShortName(table_name_map.at(identifier->name()));
+      if (const auto it = table_name_map.find(origin_table_name); it != table_name_map.end()) {
+        identifier->setShortName(it->second);
         if (origin_alias != "") {
           identifier->setAlias(origin_alias);
         } else {
           identifier->setAlias(origin_table_name);
         }
-      } else if (remote_table_map.find(origin_table_name) != remote_table_map.end()) {
+      } else if (const auto it = remote_table_map.find(origin_table_name); it != remote_table_map.end()) {
         // use remote() function to replace table identifier
-        auto remote_table = remote_table_map.at(origin_table_name);
-        auto remote_function = std::make_shared<ASTFunction>();
-        auto arguments = std::make_shared<ASTExpressionList>();
+        const auto &remote_table = it->second;
         auto addr = std::make_shared<ASTLiteral>(remote_table.addr);
         auto database_name = std::make_shared<ASTLiteral>(remote_table.database_name);
         auto table_name = std::make_shared<ASTLiteral>(remote_table.table_name);
@@ -159,8 +157,9 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
         } else {
           table_expression->table_function->setAlias(origin_table_name);
         }
-      } else if (table_with_database_map.find(origin_table_name) != table_with_database_map.end()) {
-        auto table_with_database = table_with_database_map.at(origin_table_name);
+      } else if (const auto it = table_with_database_map.find(origin_table_name);
+                 it != table_with_database_map.end()) {
+        const auto &table_with_database = it->second;
         if (table_with_database.database_name.empty()) {
           identifier->setShortName(table_with_database.table_name);
         } else {
@@ -184,6 +183,7 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
 
 void ASTRewriteCTETransformer::setCTEASTMap(const std::unordered_map<String, ASTPtr> &cte_ast_map) {
   this->cte_ast_map = cte_ast_map;
+  this->cte_ast_map_set = true;
 }
 
 void ASTRewriteCTETransformer::format(WriteBuffer &ostr, const FormatSettings &settings) const {
@@ -248,15 +248,11 @@ std::unordered_set<String> ASTRewriteCTETransformer::collectCTEKeysForSelect(
 // Build a `WITH ... AS ...` clause for each SELECT that references the CTE.
 ASTPtr ASTRewriteCTETransformer::buildWithList(
   const DB::ASTSelectQuery *select_ast, const std::unordered_set<String> &used_key) const {
-  std::cout << "========cout used_key========" << std::endl;
-  for (auto key : used_key) { std::cout << key << ", "; }
-  std::cout << "========cout used_key========" << std::endl;
-
   if (!select_ast || used_key.empty()) return nullptr;
   auto list = std::make_shared<ASTExpressionList>();
   const std::unordered_map<String, ASTPtr> *cte_ast_map_ptr = &cte_ast_map;
   std::unordered_map<String, ASTPtr> local_cte_ast_map;
-  if (cte_ast_map_ptr->empty()) {
+  if (!cte_ast_map_set && cte_ast_map_ptr->empty()) {
     local_cte_ast_map = parseCTEMapToAST(cte_map);
     cte_ast_map_ptr = &local_cte_ast_map;
   }

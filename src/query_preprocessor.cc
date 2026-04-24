@@ -2,11 +2,37 @@
 #include "query_preprocessor.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <regex>
 #include <sstream>
 
+namespace {
+
+bool maybeContainsInKeyword(const std::string &sql) {
+  for (size_t i = 0; i + 1 < sql.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(sql[i])) != 'i'
+        || std::tolower(static_cast<unsigned char>(sql[i + 1])) != 'n') {
+      continue;
+    }
+
+    const bool left_boundary =
+      i == 0 || (!std::isalnum(static_cast<unsigned char>(sql[i - 1])) && sql[i - 1] != '_');
+    const bool right_boundary =
+      i + 2 >= sql.size()
+      || (!std::isalnum(static_cast<unsigned char>(sql[i + 2])) && sql[i + 2] != '_');
+    if (left_boundary && right_boundary) return true;
+  }
+  return false;
+}
+
+} // namespace
+
 std::string QueryPreprocessor::preprocess(const std::string& sql, const std::string& sql_id) {
+  if (!maybeContainsInKeyword(sql)) {
+    return sql;
+  }
+
   // Happy path is the common case — find + bail silently so we don't spam
   // stderr on every request. The access log in doRewrite already captures
   // the fact that a request ran and the outer sql length.
@@ -39,7 +65,7 @@ std::vector<QueryPreprocessor::INClauseInfo> QueryPreprocessor::findLargeINClaus
   // Regex matches an IN clause.
   // Supports: column IN [...], (col1, col2) IN [...], column IN (...), (col1, col2) IN (...)
   // Match either a bare identifier or a parenthesized identifier list.
-  std::regex in_pattern(
+  static const std::regex in_pattern(
     R"((\([^)]+\)|[\w.]+)\s+IN\s*([\[\(]))",
     std::regex::icase
   );

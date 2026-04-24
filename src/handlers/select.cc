@@ -1,6 +1,11 @@
 // src/handlers/select.cc
 #include "handlers/select.h"
 
+#include <Core/Field.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTSetQuery.h>
+
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -30,9 +35,9 @@ bool shouldDumpAst() {
 
 void doTableNameRewrite(
   DB::ASTPtr ast,
-  const std::map<std::string, std::string> &table_name_map,
-  const std::map<std::string, DB::RemoteTable> &remote_table_map,
-  const std::map<std::string, DB::TableWithDatabase> &table_with_database_map) {
+  const std::unordered_map<std::string, std::string> &table_name_map,
+  const std::unordered_map<std::string, DB::RemoteTable> &remote_table_map,
+  const std::unordered_map<std::string, DB::TableWithDatabase> &table_with_database_map) {
   DB::ASTReplaceTransformer transformer;
   transformer.setTableNameMap(table_name_map);
   transformer.setRemoteTableMap(remote_table_map);
@@ -43,17 +48,132 @@ void doTableNameRewrite(
   }
 }
 
+struct LimitAction {
+  size_t limit = 0;
+  bool force = false;
+  size_t threshold = 0;
+};
+
+struct PendingSelectTransforms {
+  std::vector<LimitAction> limits;
+  std::vector<size_t> offsets;
+  std::vector<DB::Setting> settings;
+
+  bool empty() const {
+    return limits.empty() && offsets.empty() && settings.empty();
+  }
+
+  void clear() {
+    limits.clear();
+    offsets.clear();
+    settings.clear();
+  }
+};
+
+void setSetting(DB::ASTSetQuery *settings, const DB::Setting &setting) {
+  switch (setting.value_type) {
+  case rewriter::SettingType::String:
+    settings->changes.setSetting(std::string_view(setting.name), DB::Field(setting.string_value));
+    break;
+  case rewriter::SettingType::Int:
+    settings->changes.setSetting(std::string_view(setting.name), DB::Field(setting.int_value));
+    break;
+  case rewriter::SettingType::Bool:
+    settings->changes.setSetting(std::string_view(setting.name), DB::Field(setting.bool_value));
+    break;
+  case rewriter::SettingType::Uint64:
+    settings->changes.setSetting(std::string_view(setting.name), DB::Field(setting.uint64_value));
+    break;
+  default:
+    break;
+  }
+}
+
+void applyPendingToSelect(DB::ASTSelectQuery *select, const PendingSelectTransforms &pending) {
+  for (const auto &action : pending.limits) {
+    if (action.limit == 0) continue;
+    if (action.force) {
+      select->setExpression(
+        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<DB::ASTLiteral>(action.limit));
+      continue;
+    }
+
+    auto limit_expr = select->limitLength();
+    if (limit_expr) {
+      auto *limit_literal = limit_expr->as<DB::ASTLiteral>();
+      if (limit_literal) {
+        size_t original_limit = limit_literal->value.safeGet<DB::UInt64>();
+        if (original_limit == 0 || original_limit > action.threshold) {
+          select->setExpression(
+            DB::ASTSelectQuery::Expression::LIMIT_LENGTH,
+            std::make_shared<DB::ASTLiteral>(action.limit));
+        }
+      }
+    } else {
+      select->setExpression(
+        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<DB::ASTLiteral>(action.limit));
+    }
+  }
+
+  for (size_t offset : pending.offsets) {
+    if (offset > 0) {
+      select->setExpression(
+        DB::ASTSelectQuery::Expression::LIMIT_OFFSET, std::make_shared<DB::ASTLiteral>(offset));
+    }
+  }
+
+  if (!pending.settings.empty()) {
+    auto settings_expr = select->settings();
+    DB::ASTSetQuery *settings = nullptr;
+    if (settings_expr) {
+      settings = settings_expr->as<DB::ASTSetQuery>();
+    } else {
+      auto new_settings = std::make_shared<DB::ASTSetQuery>();
+      new_settings->is_standalone = false;
+      settings = new_settings.get();
+      select->setExpression(DB::ASTSelectQuery::Expression::SETTINGS, new_settings);
+    }
+    if (settings) {
+      for (const auto &setting : pending.settings) {
+        setSetting(settings, setting);
+      }
+    }
+  }
+}
+
+void applyPendingSelectTransforms(DB::ASTPtr ast, PendingSelectTransforms &pending) {
+  if (pending.empty() || !ast) return;
+  if (auto *select = ast->as<DB::ASTSelectQuery>()) {
+    applyPendingToSelect(select, pending);
+    return;
+  }
+  for (auto &child : ast->children) {
+    applyPendingSelectTransforms(child, pending);
+  }
+}
+
 } // namespace
 
 DB::ASTPtr applyRewriteOptions(
   const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
-  DB::ASTPtr ast) {
+  DB::ASTPtr ast,
+  const std::vector<ParsedCTEASTMap> *preparsed_cte_ast_maps) {
 
   std::map<std::string, DB::CommonTableExpr> cte_map_;
-  std::map<std::string, std::string> table_name_map_;
-  std::map<std::string, DB::RemoteTable> remote_table_map_;
-  std::map<std::string, DB::TableWithDatabase> table_with_database_map_;
+  std::unordered_map<std::string, std::string> table_name_map_;
+  std::unordered_map<std::string, DB::RemoteTable> remote_table_map_;
+  std::unordered_map<std::string, DB::TableWithDatabase> table_with_database_map_;
   bool has_table_name_written = false;
+  size_t cte_option_index = 0;
+  PendingSelectTransforms pending_select;
+  auto flushPendingSelect = [&]() {
+    if (pending_select.empty()) return;
+    applyPendingSelectTransforms(ast, pending_select);
+    if (shouldDumpAst()) {
+      std::cout << "after select clause transformations " << ast->dumpTree() << std::endl;
+    }
+    pending_select.clear();
+  };
 
   for (const auto &option : options) {
     switch (option.op()) {
@@ -61,30 +181,28 @@ DB::ASTPtr applyRewriteOptions(
       auto limit = option.limit_args().replace_limit().replace_to();
       auto force_limit = option.limit_args().force_limit();
       auto threshold = option.limit_args().replace_limit().threshold();
-      DB::ASTRewriteLimitTransformer limit_transformer = DB::ASTRewriteLimitTransformer();
       if (force_limit) {
-        limit_transformer.setLimit(force_limit, true);
+        pending_select.limits.push_back(
+          LimitAction{static_cast<size_t>(force_limit), true, 0});
       } else {
-        limit_transformer.setLimit(limit);
-        limit_transformer.setThreshold(threshold);
-      }
-      limit_transformer.transform(ast);
-      if (shouldDumpAst()) {
-        std::cout << "after limit transformation " << ast->dumpTree() << std::endl;
+        pending_select.limits.push_back(
+          LimitAction{static_cast<size_t>(limit), false, static_cast<size_t>(threshold)});
       }
       break;
     }
     case rewriter::RewriteOp::TableNameRewrite: {
       // table_name
       {
-        auto table_name_map = option.table_name_args().table_map();
+        const auto &table_name_map = option.table_name_args().table_map();
         table_name_map_.clear();
+        table_name_map_.reserve(table_name_map.size());
         for (auto &kv : table_name_map) { table_name_map_[kv.first] = kv.second; }
       }
       // remote_table
       {
-        auto remote_table_map = option.table_name_args().remote_table_map();
+        const auto &remote_table_map = option.table_name_args().remote_table_map();
         remote_table_map_.clear();
+        remote_table_map_.reserve(remote_table_map.size());
         for (auto &kv : remote_table_map) {
           DB::RemoteTable remote_table;
           remote_table.addr = kv.second.addr();
@@ -97,8 +215,9 @@ DB::ASTPtr applyRewriteOptions(
       }
       // table_with_database
       {
-        auto table_with_database_map = option.table_name_args().table_with_database_map();
+        const auto &table_with_database_map = option.table_name_args().table_with_database_map();
         table_with_database_map_.clear();
+        table_with_database_map_.reserve(table_with_database_map.size());
         for (auto &kv : table_with_database_map) {
           DB::TableWithDatabase table_with_database;
           table_with_database.database_name = kv.second.database();
@@ -112,18 +231,11 @@ DB::ASTPtr applyRewriteOptions(
     }
     case rewriter::RewriteOp::OffsetRewrite: {
       auto offset = option.offset_args().offset();
-      DB::ASTRewriteOffsetTransformer offset_transformer = DB::ASTRewriteOffsetTransformer();
-      offset_transformer.setOffset(offset);
-      offset_transformer.transform(ast);
-      if (shouldDumpAst()) {
-        std::cout << "after offset transformation " << ast->dumpTree() << std::endl;
-      }
+      pending_select.offsets.push_back(static_cast<size_t>(offset));
       break;
     }
     case rewriter::RewriteOp::SettingsRewrite: {
-      auto settings = option.settings_args().settings();
-      DB::ASTSettingsTransformer settings_transformer = DB::ASTSettingsTransformer();
-      std::vector<DB::Setting> settings_;
+      const auto &settings = option.settings_args().settings();
       for (const auto &setting : settings) {
         DB::Setting s;
         s.name = setting.key();
@@ -147,23 +259,24 @@ DB::ASTPtr applyRewriteOptions(
         }
         default: break;
         }
-        settings_.push_back(s);
-      }
-      settings_transformer.setSettings(settings_);
-      settings_transformer.transform(ast);
-      if (shouldDumpAst()) {
-        std::cout << "after settings transformation " << ast->dumpTree() << std::endl;
+        pending_select.settings.push_back(s);
       }
       break;
     }
     case rewriter::RewriteOp::CommonTableExprRewrite: {
+      flushPendingSelect();
       DB::ASTRewriteCTETransformer cte_transformer = DB::ASTRewriteCTETransformer();
-      auto ctes = option.common_table_expr_args().cte_map();
+      const auto &ctes = option.common_table_expr_args().cte_map();
       cte_map_.clear();
       for (auto &kv : ctes) {
         cte_map_[kv.first] = {kv.second.alias(), kv.second.sql()};
       }
-      auto cte_ast_map = DB::parseCTEMapToAST(cte_map_);
+      const bool has_preparsed =
+        preparsed_cte_ast_maps && cte_option_index < preparsed_cte_ast_maps->size();
+      auto cte_ast_map = has_preparsed
+        ? (*preparsed_cte_ast_maps)[cte_option_index]
+        : DB::parseCTEMapToAST(cte_map_);
+      ++cte_option_index;
 
       cte_transformer.setCTEASTMap(cte_ast_map);
       cte_transformer.setCTEMap(cte_map_);
@@ -179,6 +292,8 @@ DB::ASTPtr applyRewriteOptions(
     }
   }
 
+  flushPendingSelect();
+
   return std::move(ast);
 }
 
@@ -191,12 +306,11 @@ void handleSelectQuery(DB::ASTPtr ast,
 
   std::unordered_set<std::string> original_accessed_table_names_set;
   DB::collectTableNamesFromAST(ast, original_accessed_table_names_set);
+  std::vector<ParsedCTEASTMap> preparsed_cte_ast_maps;
 
   // Pre-scan CTE to collect the original table names accessed in the CTE subquery
   // (without altering the AST). Also captures CTE sub-queries that fail to parse
-  // so we can surface them to the caller via response.failed_cte_aliases — the
-  // second parseCTEMapToAST call inside applyRewriteOptions will hit the same
-  // failures on the same inputs, so collecting them once here is sufficient.
+  // so we can surface them to the caller via response.failed_cte_aliases.
   for (const auto &option : request->options()) {
     if (option.op() != rewriter::RewriteOp::CommonTableExprRewrite) continue;
     std::map<std::string, DB::CommonTableExpr> cte_map;
@@ -213,9 +327,10 @@ void handleSelectQuery(DB::ASTPtr ast,
       }
       DB::collectTableNamesFromAST(kv.second, original_accessed_table_names_set);
     }
+    preparsed_cte_ast_maps.push_back(std::move(cte_ast_map));
   }
 
-  ast = applyRewriteOptions(request->options(), ast);
+  ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps);
 
   for (const auto &name : original_accessed_table_names_set) {
     response->add_original_accessed_table_names(name);
