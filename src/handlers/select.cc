@@ -1,9 +1,11 @@
 // src/handlers/select.cc
 #include "handlers/select.h"
 
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -13,6 +15,18 @@
 namespace rewriter_handlers {
 
 namespace {
+
+// Per-transformer AST dumps are only useful when debugging the rewrite
+// pipeline; in production they blow up log volume (every SELECT prints the
+// full tree 5x). Gate them behind REWRITER_DUMP_AST=1. Read once at
+// first use so we don't pay a getenv per request.
+bool shouldDumpAst() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("REWRITER_DUMP_AST");
+    return v != nullptr && *v != '\0' && std::string_view(v) != "0";
+  }();
+  return enabled;
+}
 
 void doTableNameRewrite(
   DB::ASTPtr ast,
@@ -24,7 +38,9 @@ void doTableNameRewrite(
   transformer.setRemoteTableMap(remote_table_map);
   transformer.setTableWithDatabaseMap(table_with_database_map);
   transformer.transform(ast);
-  std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
+  if (shouldDumpAst()) {
+    std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
+  }
 }
 
 } // namespace
@@ -53,7 +69,9 @@ DB::ASTPtr applyRewriteOptions(
         limit_transformer.setThreshold(threshold);
       }
       limit_transformer.transform(ast);
-      std::cout << "after limit transformation " << ast->dumpTree() << std::endl;
+      if (shouldDumpAst()) {
+        std::cout << "after limit transformation " << ast->dumpTree() << std::endl;
+      }
       break;
     }
     case rewriter::RewriteOp::TableNameRewrite: {
@@ -97,7 +115,9 @@ DB::ASTPtr applyRewriteOptions(
       DB::ASTRewriteOffsetTransformer offset_transformer = DB::ASTRewriteOffsetTransformer();
       offset_transformer.setOffset(offset);
       offset_transformer.transform(ast);
-      std::cout << "after offset transformation " << ast->dumpTree() << std::endl;
+      if (shouldDumpAst()) {
+        std::cout << "after offset transformation " << ast->dumpTree() << std::endl;
+      }
       break;
     }
     case rewriter::RewriteOp::SettingsRewrite: {
@@ -131,7 +151,9 @@ DB::ASTPtr applyRewriteOptions(
       }
       settings_transformer.setSettings(settings_);
       settings_transformer.transform(ast);
-      std::cout << "after settings transformation " << ast->dumpTree() << std::endl;
+      if (shouldDumpAst()) {
+        std::cout << "after settings transformation " << ast->dumpTree() << std::endl;
+      }
       break;
     }
     case rewriter::RewriteOp::CommonTableExprRewrite: {
@@ -163,7 +185,9 @@ DB::ASTPtr applyRewriteOptions(
 void handleSelectQuery(DB::ASTPtr ast,
                        const rewriter::RewriteSQLRequest *request,
                        rewriter::RewriteSQLResponse *response) {
-  std::cout << "before transformation " << ast->dumpTree() << std::endl;
+  if (shouldDumpAst()) {
+    std::cout << "before transformation " << ast->dumpTree() << std::endl;
+  }
 
   std::unordered_set<std::string> original_accessed_table_names_set;
   DB::collectTableNamesFromAST(ast, original_accessed_table_names_set);
