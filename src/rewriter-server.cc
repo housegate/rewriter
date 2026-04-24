@@ -32,6 +32,10 @@ using rewriter::RewriteSQLResponse;
 #define GIT_COMMIT_HASH "?"
 #endif
 
+#ifndef REWRITER_VERSION
+#define REWRITER_VERSION "unknown"
+#endif
+
 // Regex helpers used only by doRewriteErrorMessage. Kept here so handler code
 // doesn't depend on them.
 namespace {
@@ -224,8 +228,10 @@ grpc::Status RewriterServiceImpl::RewriteErrorMessage(
   return grpc::Status::OK;
 }
 
-// Define a constant for the version.
-const std::string VERSION = "0.1.18";
+// Injected at build time from `git describe --tags --always --dirty`
+// (see CMakeLists.txt). Stays in lock-step with git tags instead of drifting
+// from a hand-maintained literal.
+const std::string VERSION = REWRITER_VERSION;
 const std::string hash = GIT_COMMIT_HASH;
 
 void RunServer(uint16_t grpc_port, uint16_t http_port) {

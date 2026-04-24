@@ -25,6 +25,20 @@ execute_process(
         OUTPUT_VARIABLE GIT_COMMIT_HASH
         OUTPUT_STRIP_TRAILING_WHITESPACE)
 
+# Derive the rewriter version from `git describe`. On a tagged commit this
+# yields the tag name (e.g. `v0.1.18`); off-tag it adds a commit count and
+# short hash (e.g. `v0.1.18-5-gabc123`). Falls back to "unknown" when git
+# info is unavailable (e.g. source tarball build with no .git directory).
+execute_process(
+        COMMAND git describe --tags --always --dirty
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE REWRITER_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+if (NOT REWRITER_VERSION)
+    set(REWRITER_VERSION "unknown")
+endif ()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -161,7 +175,8 @@ target_link_libraries(rewriter_core PUBLIC
     clickhouse_parsers clickhouse_common_io dbms clickhouse_functions
     rewriter_grpc_protos absl::debugging_internal)
 target_compile_definitions(rewriter_core PUBLIC
-    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
+    "-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\""
+    "-DREWRITER_VERSION=\"${REWRITER_VERSION}\"")
 
 # Server executable.
 clickhouse_add_executable(clickhouse_housegate_rewriter
