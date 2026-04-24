@@ -37,12 +37,18 @@ void doTableNameRewrite(
   DB::ASTPtr ast,
   const std::unordered_map<std::string, std::string> &table_name_map,
   const std::unordered_map<std::string, DB::RemoteTable> &remote_table_map,
-  const std::unordered_map<std::string, DB::TableWithDatabase> &table_with_database_map) {
+  const std::unordered_map<std::string, DB::TableWithDatabase> &table_with_database_map,
+  std::map<std::string, std::string> *out_table_rewrites) {
   DB::ASTReplaceTransformer transformer;
   transformer.setTableNameMap(table_name_map);
   transformer.setRemoteTableMap(remote_table_map);
   transformer.setTableWithDatabaseMap(table_with_database_map);
   transformer.transform(ast);
+  if (out_table_rewrites) {
+    for (const auto &[k, v] : transformer.rewrites) {
+      (*out_table_rewrites)[k] = v;
+    }
+  }
   if (shouldDumpAst()) {
     std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
   }
@@ -161,7 +167,8 @@ void applyPendingSelectTransforms(DB::ASTPtr ast, PendingSelectTransforms &pendi
 DB::ASTPtr applyRewriteOptions(
   const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
   DB::ASTPtr ast,
-  const std::vector<ParsedCTEASTMap> *preparsed_cte_ast_maps) {
+  const std::vector<ParsedCTEASTMap> *preparsed_cte_ast_maps,
+  std::map<std::string, std::string> *out_table_rewrites) {
 
   std::map<std::string, DB::CommonTableExpr> cte_map_;
   std::unordered_map<std::string, std::string> table_name_map_;
@@ -229,7 +236,8 @@ DB::ASTPtr applyRewriteOptions(
           table_with_database_map_[kv.first] = table_with_database;
         }
       }
-      doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
+      doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_,
+                         out_table_rewrites);
       has_table_name_written = true;
       break;
     }
@@ -288,7 +296,8 @@ DB::ASTPtr applyRewriteOptions(
 
       // If the table name has been rewritten previously, apply it again after the CTE rewrite.
       if (has_table_name_written) {
-        doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_);
+        doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_,
+                           out_table_rewrites);
       }
       break;
     }
@@ -334,12 +343,21 @@ void handleSelectQuery(DB::ASTPtr ast,
     preparsed_cte_ast_maps.push_back(std::move(cte_ast_map));
   }
 
-  ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps);
+  std::map<std::string, std::string> table_rewrites;
+  ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps, &table_rewrites);
 
   for (const auto &name : original_accessed_table_names_set) {
     response->add_original_accessed_table_names(name);
   }
-  setSuccessResponse(response, formatAst(ast), "SELECT");
+  auto *resp_rewrites = response->mutable_table_rewrites();
+  for (const auto &[k, v] : table_rewrites) {
+    // Only record entries where the rewrite actually changed the name —
+    // per-handler contract documented on RewriteSQLResponse.table_rewrites.
+    if (k != v) {
+      (*resp_rewrites)[k] = v;
+    }
+  }
+  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SELECT);
 }
 
 } // namespace rewriter_handlers

@@ -1,12 +1,14 @@
 // src/handlers/writes.h
 //
-// Single-table write handler. Covers CREATE/DROP/ALTER TABLE, INSERT,
-// UPDATE, DELETE, and rejects the unsupported variants (CREATE VIEW,
-// DROP DATABASE, TRUNCATE, RENAME, OPTIMIZE, GRANT, KILL, BACKUP, ...).
+// Write-statement handler. Covers CREATE/DROP/ALTER TABLE, INSERT,
+// UPDATE, DELETE, RENAME TABLE, and rejects the unsupported variants
+// (CREATE VIEW, DROP DATABASE, TRUNCATE, OPTIMIZE, GRANT, KILL, BACKUP,
+// ATTACH/REPLACE/FETCH PARTITION FROM ..., ...).
 //
-// Writes are parsed for classification only; no rewrite-option pipeline
-// is applied. sql_after_rewrite is the normalized original SQL,
-// write_stmt_value.target_table carries the single target.
+// Applies TableNameRewrite options from `request->options()` to each named
+// table slot before echoing the SQL. Other rewrite ops (Limit, Settings,
+// CTE, ...) are ignored for writes. A Remote hit for any write target is
+// rejected — remote_table_map is SELECT-only.
 #pragma once
 #include <Parsers/IAST.h>
 #include "rewriter.grpc.pb.h"

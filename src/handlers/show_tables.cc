@@ -30,7 +30,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   if (show_query->databases || show_query->clusters || show_query->cluster
       || show_query->dictionaries || show_query->m_settings
       || show_query->merges || show_query->caches) {
-    setSuccessResponse(response, formatAst(ast), "SHOW_TABLES");
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
     return true;
   }
 
@@ -52,7 +52,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
 
     // Empty logical -> passthrough (caller decides).
     if (logical.empty()) {
-      setSuccessResponse(response, formatAst(ast), "SHOW_TABLES");
+      setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
       response->mutable_show_stmt_value()->set_show_tables_passthrough(true);
       return true;
     }
@@ -73,12 +73,12 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
             "WHERE database = '" + esc_physical + "' "
               "AND startsWith(name, '" + esc_logical + "'))";
 
-    setSuccessResponse(response, result_sql, "SHOW_TABLES");
+    setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
     return true;
   }
 
   // No rewrite option - echo back the original SQL.
-  setSuccessResponse(response, formatAst(ast), "SHOW_TABLES");
+  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
   return true;
 }
 

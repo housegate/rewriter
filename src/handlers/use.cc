@@ -24,7 +24,7 @@ bool handleUseQuery(DB::ASTPtr ast,
     // 1. database_map hit -> rewrite to the mapped physical DB.
     auto it = db_map.find(db_name);
     if (it != db_map.end()) {
-      setSuccessResponse(response, "USE " + it->second, "USE");
+      setSuccessResponse(response, "USE " + it->second, rewriter::STATEMENT_TYPE_USE);
       return true;
     }
 
@@ -37,7 +37,7 @@ bool handleUseQuery(DB::ASTPtr ast,
       }
     }
     if (is_known_physical) {
-      setSuccessResponse(response, formatAst(ast), "USE");
+      setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
       return true;
     }
 
@@ -45,14 +45,14 @@ bool handleUseQuery(DB::ASTPtr ast,
     //    target so the caller can track it on the connection.
     const std::string &default_db = args.default_database();
     if (!default_db.empty()) {
-      setSuccessResponse(response, "USE " + default_db, "USE");
+      setSuccessResponse(response, "USE " + default_db, rewriter::STATEMENT_TYPE_USE);
       response->mutable_use_stmt_value()->set_specified_database(db_name);
       return true;
     }
   }
 
   // No matching option - echo back the original SQL.
-  setSuccessResponse(response, formatAst(ast), "USE");
+  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
   return true;
 }
 

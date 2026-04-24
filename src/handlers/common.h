@@ -26,7 +26,7 @@ inline std::string formatAst(const DB::ASTPtr &ast) {
 
 inline void setSuccessResponse(rewriter::RewriteSQLResponse *response,
                                const std::string &sql,
-                               const std::string &statement_type) {
+                               rewriter::StatementType statement_type) {
   response->set_sql_after_rewrite(sql);
   response->set_statement_type(statement_type);
   response->set_message("success");

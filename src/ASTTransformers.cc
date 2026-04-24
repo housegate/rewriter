@@ -125,6 +125,41 @@ void ASTReplaceTransformer::format(WriteBuffer &ostr, const FormatSettings &sett
   }
 }
 
+TableRewritePlan planTableRewrite(
+  const String &origin_name,
+  const std::unordered_map<String, String> &table_name_map,
+  const std::unordered_map<String, RemoteTable> &remote_table_map,
+  const std::unordered_map<String, TableWithDatabase> &table_with_database_map) {
+  TableRewritePlan plan;
+  if (const auto it = table_name_map.find(origin_name); it != table_name_map.end()) {
+    plan.kind = TableRewriteKind::Rename;
+    plan.table = it->second;
+    return plan;
+  }
+  if (const auto it = remote_table_map.find(origin_name); it != remote_table_map.end()) {
+    plan.kind = TableRewriteKind::Remote;
+    plan.remote = it->second;
+    return plan;
+  }
+  if (const auto it = table_with_database_map.find(origin_name);
+      it != table_with_database_map.end()) {
+    plan.kind = TableRewriteKind::WithDatabase;
+    plan.db = it->second.database_name;
+    plan.table = it->second.table_name;
+    return plan;
+  }
+  return plan; // kind = None
+}
+
+namespace {
+// "db.table" (or bare "table" when db is empty). Matches the key format
+// callers hand off to table_name_map and the value format we write into
+// ASTReplaceTransformer::rewrites / RewriteSQLResponse.table_rewrites.
+inline std::string qualifyTable(const std::string &db, const std::string &table) {
+  return db.empty() ? table : db + "." + table;
+}
+} // namespace
+
 void ASTReplaceTransformer::transform(ASTPtr &ast) const {
   // replace table identifier with table name from map
   if (auto *table_expression = ast->as<ASTTableExpression>()) {
@@ -132,16 +167,22 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
       auto *identifier = table_expression->database_and_table_name->as<ASTTableIdentifier>();
       auto origin_table_name = identifier->name();
       auto origin_alias = identifier->tryGetAlias();
-      if (const auto it = table_name_map.find(origin_table_name); it != table_name_map.end()) {
-        identifier->setShortName(it->second);
+      const auto plan = planTableRewrite(
+        origin_table_name, table_name_map, remote_table_map, table_with_database_map);
+      switch (plan.kind) {
+      case TableRewriteKind::Rename: {
+        identifier->setShortName(plan.table);
         if (origin_alias != "") {
           identifier->setAlias(origin_alias);
         } else {
           identifier->setAlias(origin_table_name);
         }
-      } else if (const auto it = remote_table_map.find(origin_table_name); it != remote_table_map.end()) {
+        rewrites[origin_table_name] = identifier->name();
+        break;
+      }
+      case TableRewriteKind::Remote: {
         // use remote() function to replace table identifier
-        const auto &remote_table = it->second;
+        const auto &remote_table = plan.remote;
         auto addr = std::make_shared<ASTLiteral>(remote_table.addr);
         auto database_name = std::make_shared<ASTLiteral>(remote_table.database_name);
         auto table_name = std::make_shared<ASTLiteral>(remote_table.table_name);
@@ -157,19 +198,25 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
         } else {
           table_expression->table_function->setAlias(origin_table_name);
         }
-      } else if (const auto it = table_with_database_map.find(origin_table_name);
-                 it != table_with_database_map.end()) {
-        const auto &table_with_database = it->second;
-        if (table_with_database.database_name.empty()) {
-          identifier->setShortName(table_with_database.table_name);
+        rewrites[origin_table_name] = qualifyTable(remote_table.database_name, remote_table.table_name);
+        break;
+      }
+      case TableRewriteKind::WithDatabase: {
+        if (plan.db.empty()) {
+          identifier->setShortName(plan.table);
         } else {
-          identifier->resetTable(table_with_database.database_name, table_with_database.table_name);
+          identifier->resetTable(plan.db, plan.table);
         }
         if (origin_alias != "") {
           identifier->setAlias(origin_alias);
         } else {
           identifier->setAlias(origin_table_name);
         }
+        rewrites[origin_table_name] = identifier->name();
+        break;
+      }
+      case TableRewriteKind::None:
+        break;
       }
     } else if (table_expression->subquery) {
       for (auto &child : ast->children) { transform(child); }

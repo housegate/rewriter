@@ -15,7 +15,9 @@
 #include <sstream>
 #include <string>
 
+#include "handlers/exists.h"
 #include "handlers/select.h"
+#include "handlers/show_create.h"
 #include "handlers/show_tables.h"
 #include "handlers/use.h"
 #include "handlers/writes.h"
@@ -140,7 +142,9 @@ void RewriterServiceImpl::doRewrite(
       const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count();
       std::cerr << "[access] method=Rewrite sql=" << sql_id
-                << " stmt=" << (response->statement_type().empty() ? "-" : response->statement_type())
+                << " stmt=" << (response->statement_type() == rewriter::STATEMENT_TYPE_UNSPECIFIED
+                                  ? "-"
+                                  : rewriter::StatementType_Name(response->statement_type()))
                 << " code=" << response->code()
                 << " sql_len=" << sql_len
                 << " took_us=" << us << std::endl;
@@ -161,6 +165,14 @@ void RewriterServiceImpl::doRewrite(
 
     if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowTablesQuery(ast, request, response)) return;
+    if (rewriter_handlers::handleExistsQuery(ast, request, response)
+        == rewriter_handlers::ExistsDispatchResult::Handled) {
+      return;
+    }
+    if (rewriter_handlers::handleShowCreateQuery(ast, request, response)
+        == rewriter_handlers::ShowCreateDispatchResult::Handled) {
+      return;
+    }
     switch (rewriter_handlers::handleWriteQuery(ast, request, response)) {
       case rewriter_handlers::WriteDispatchResult::Handled:
       case rewriter_handlers::WriteDispatchResult::Rejected:

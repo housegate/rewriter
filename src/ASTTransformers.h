@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <map>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -52,6 +54,36 @@ public:
   String table_name;
 };
 
+// One of the three TableNameRewrite branches, or None if no map matched.
+// Produced by planTableRewrite() and consumed by each statement handler to
+// apply the rewrite to its own AST slot. Keeping this as a plain struct (vs.
+// a fatter transformer that walks every AST kind) lets each handler own its
+// AST-specific mutation logic while sharing the same lookup precedence.
+enum class TableRewriteKind { None, Rename, WithDatabase, Remote };
+
+struct TableRewritePlan {
+  TableRewriteKind kind = TableRewriteKind::None;
+  // Rename: `table` holds the new short name; `db` is empty (caller preserves
+  //         whatever db the original AST node had).
+  // WithDatabase: `db` + `table` fully specify the target (either may be empty
+  //         depending on how the caller populated table_with_database_map).
+  // Remote: `db`/`table` are unused; `remote` carries the full remote() args.
+  String db;
+  String table;
+  RemoteTable remote;
+};
+
+// Lookup precedence matches ASTReplaceTransformer::transform():
+//   table_name_map → remote_table_map → table_with_database_map.
+// The lookup key is exactly `origin_name` (caller decides whether that's a
+// short name or a dot-qualified "db.table" form — the maps must be keyed to
+// match).
+TableRewritePlan planTableRewrite(
+  const String &origin_name,
+  const std::unordered_map<String, String> &table_name_map,
+  const std::unordered_map<String, RemoteTable> &remote_table_map,
+  const std::unordered_map<String, TableWithDatabase> &table_with_database_map);
+
 class CommonTableExpr {
 public:
   String alias;
@@ -94,6 +126,14 @@ public:
   std::unordered_map<String, String> table_name_map;
   std::unordered_map<String, RemoteTable> remote_table_map;
   std::unordered_map<String, TableWithDatabase> table_with_database_map;
+
+  // Populated by transform(): maps every origin identifier name that got
+  // rewritten to its post-rewrite form. For Remote hits, the value is the
+  // remote-side "db.table" (or bare "table" when db is empty). Unmatched
+  // identifiers produce no entry. mutable so transform() can stay const.
+  mutable std::map<std::string, std::string> rewrites;
+
+  void clearRewrites() { rewrites.clear(); }
 
 protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;

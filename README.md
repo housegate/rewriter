@@ -4,6 +4,22 @@ A C++ service that rewrites ClickHouse SQL before it hits a backend ClickHouse
 cluster. Runs as a gRPC server, an HTTP/JSON server on the same process,
 and ships with a standalone CLI for one-off rewrites.
 
+Covers `SELECT` (with CTE injection, LIMIT/OFFSET/SETTINGS tweaks, table-name
+rewrites — including `remote()` substitution), `USE`, `SHOW TABLES`,
+`SHOW CREATE TABLE`, `EXISTS TABLE`, `CREATE/DROP/ALTER TABLE`, `INSERT`,
+`UPDATE`, `DELETE`, and `RENAME TABLE`. Every statement that carries a named
+table target honors `TableNameRewrite`; the rewrites that actually fired are
+reported on `response.table_rewrites` (a `map<original, rewritten>`, each side
+formatted as `"db.table"` or bare `"table"`).
+
+Responses carry two enums for programmatic dispatch: `statement_type`
+(`StatementType` — `STATEMENT_TYPE_SELECT`, `_INSERT`, `_ALTER_TABLE`, …) for
+routing / auth control, and `code` (`RewriteCode`) with a four-way rejection
+taxonomy: `Success`, `SyntaxError`, `UnsupportedStatement` (statement kind out
+of scope — caller may pass through), and `InvalidRewriteRequest` (caller's
+options don't match the SQL — caller must NOT pass through). Full details in
+[protos/rewriter.proto](protos/rewriter.proto).
+
 ## What's in the box
 
 | Binary | Role |
@@ -62,6 +78,21 @@ curl -s -XPOST http://localhost:50052/rewrite \
       {"op": "LimitRewrite",     "limit_args":      {"force_limit": 100}}
     ]
   }'
+
+# Write statements honor TableNameRewrite too.
+# The response's `table_rewrites` field reports the {original -> rewritten}
+# mapping the rewriter actually applied.
+curl -s -XPOST http://localhost:50052/rewrite \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "sql": "INSERT INTO events VALUES (1)",
+    "options": [
+      {"op": "TableNameRewrite", "table_name_args": {"table_map": {"events": "events_v2"}}}
+    ]
+  }'
+# => { "code": "Success", "statement_type": "INSERT",
+#      "sql_after_rewrite": "INSERT INTO events_v2 VALUES (1)",
+#      "table_rewrites": {"events": "events_v2"}, ... }
 ```
 
 ### Talk to it over gRPC

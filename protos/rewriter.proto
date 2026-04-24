@@ -121,16 +121,62 @@ message RewriteSQLRequest {
 
 enum RewriteCode {
     Success = 0;
+    // SQL failed to parse via ClickHouse's ParserQuery. Message carries the
+    // ClickHouse parser's displayText().
     SyntaxError = 1;
+    // Kept as a catch-all for unexpected rewrite failures. Prefer the more
+    // specific codes below for well-defined rejection cases; only fall back
+    // to RewriteError when the classification truly isn't clear.
     RewriteError = 2;
+    // The SQL is valid but the rewriter does not support this statement
+    // kind or variant (CREATE VIEW, DROP DATABASE, TRUNCATE, OPTIMIZE,
+    // RENAME DATABASE, EXISTS VIEW/DATABASE/DICTIONARY, SHOW CREATE
+    // VIEW/DATABASE/DICTIONARY, INSERT INTO FUNCTION, multi-table DROP,
+    // ALTER TABLE with cross-table partition refs, GRANT/KILL/BACKUP/...).
+    // Callers may choose to pass the SQL through to ClickHouse unchanged.
+    UnsupportedStatement = 3;
+    // The caller's RewriteOption cannot be applied to this statement —
+    // their rewrite config is semantically incorrect for the SQL they sent.
+    // Callers should treat this as a configuration bug; do NOT pass the SQL
+    // through. Current case: a write / EXISTS / SHOW CREATE target hits
+    // remote_table_map (remote() is only meaningful as a SELECT source).
+    InvalidRewriteRequest = 4;
+}
+
+// Statement kind the rewriter classified the request into. Callers use this
+// for routing / authorization / metrics. Values are stable — adding new ones
+// is fine, renumbering or reusing numbers is not. UNSPECIFIED is the default
+// when no classification ran (e.g. parse error); non-Success responses may
+// leave statement_type at UNSPECIFIED.
+enum StatementType {
+    STATEMENT_TYPE_UNSPECIFIED = 0;
+    STATEMENT_TYPE_SELECT = 1;
+    STATEMENT_TYPE_USE = 2;
+    STATEMENT_TYPE_SHOW_TABLES = 3;
+    STATEMENT_TYPE_SHOW_CREATE_TABLE = 4;
+    STATEMENT_TYPE_EXISTS_TABLE = 5;
+    STATEMENT_TYPE_CREATE_TABLE = 6;
+    STATEMENT_TYPE_DROP_TABLE = 7;
+    STATEMENT_TYPE_ALTER_TABLE = 8;
+    STATEMENT_TYPE_RENAME_TABLE = 9;
+    STATEMENT_TYPE_INSERT = 10;
+    STATEMENT_TYPE_UPDATE = 11;
+    STATEMENT_TYPE_DELETE = 12;
 }
 
 message RewriteSQLResponse {
     RewriteCode code = 1;
     string message = 2;
     string sql_after_rewrite = 3;
+    // Tables that the original SQL referenced. For SELECT/DML this includes
+    // tables reached through CTEs. Tables that TableNameRewrite rewrote are
+    // still listed here with their original names; callers can cross-reference
+    // `table_rewrites` to learn the post-rewrite form.
     repeated string original_accessed_table_names = 4;
-    string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
+    // Kind of statement the rewriter identified. See the StatementType enum
+    // for the full list. UNSPECIFIED on non-Success responses whose
+    // classification didn't run (parse errors, etc.).
+    StatementType statement_type = 5;
 
     message UseStmtValue {
         // USE DatabaseNameRewrite: when the default_database fallback branch fired,
@@ -148,13 +194,13 @@ message RewriteSQLResponse {
     }
 
     message WriteStmtValue {
-        // Set for single-table write operations (CREATE/DROP/ALTER TABLE, INSERT,
-        // UPDATE, DELETE). Format: "db.table" if the DB was specified in the SQL,
-        // otherwise bare "table". Empty for non-write statements. Unsupported
-        // variants (CREATE VIEW/DATABASE, DROP DATABASE, TRUNCATE, RENAME,
-        // multi-table DROP, INSERT INTO FUNCTION, etc.) return code=RewriteError
-        // and leave this field empty.
-        string target_table = 1;
+        // DEPRECATED: prefer `table_rewrites` on the top-level response.
+        // Kept for backward compatibility. Holds the post-rewrite primary
+        // target of single-table write operations (CREATE/DROP/ALTER TABLE,
+        // INSERT, UPDATE, DELETE). Format: "db.table" if the DB was specified
+        // in the SQL, otherwise bare "table". Empty for non-write statements
+        // and for RENAME (which has no single target; use `table_rewrites`).
+        string target_table = 1 [deprecated = true];
     }
 
     oneof extra_value {
@@ -168,6 +214,20 @@ message RewriteSQLResponse {
     // rewrite still proceeds; surfaced here so callers can diagnose "my CTE
     // wasn't applied" without reading server logs. Empty on the happy path.
     repeated string failed_cte_aliases = 9;
+
+    // Map of tables rewritten by TableNameRewrite, keyed by the original
+    // "db.table" (or bare "table" when no db was present), mapping to the
+    // post-rewrite "db.table" form. Only entries whose original differs from
+    // the rewritten form appear here; untouched tables are in
+    // `original_accessed_table_names` only.
+    //
+    // For remote_table_map hits (SELECT only), the value is the remote-side
+    // "db.table" pulled from RemoteTable.database/table; the full remote()
+    // call with addr/user/password is reflected in `sql_after_rewrite`.
+    //
+    // For RENAME TABLE, every participating logical table (each `from` and
+    // each `to`) appears as its own entry with its rewritten form.
+    map<string, string> table_rewrites = 10;
 }
 
 service RewriterService {
