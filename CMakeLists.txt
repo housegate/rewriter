@@ -169,6 +169,12 @@ clickhouse_add_executable(clickhouse_sentio_rewriter
     $<TARGET_OBJECTS:rewriter_core>)
 target_link_libraries(clickhouse_sentio_rewriter PRIVATE rewriter_core)
 
+# CLI executable — one-shot rewriter for scripting.
+clickhouse_add_executable(clickhouse_sentio_rewriter_cli
+    src/rewriter-cli.cc
+    $<TARGET_OBJECTS:rewriter_core>)
+target_link_libraries(clickhouse_sentio_rewriter_cli PRIVATE rewriter_core)
+
 option(BUILD_TESTING "Build unit tests" OFF)
 if (BUILD_TESTING)
     enable_testing()

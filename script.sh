@@ -141,7 +141,7 @@ build() {
         echo 4
     )
     echo ">>> [5/5] 编译主程序（使用 $JOBS 个并行任务）"
-    ninja -C build -j"$JOBS" clickhouse_sentio_rewriter
+    ninja -C build -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
     
     # 如果启用了测试，也编译测试
     if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
@@ -191,7 +191,7 @@ rebuild() {
     
     echo ">>> [1/2] 重新编译修改的源文件"
     cd build
-    ninja -j"$JOBS" clickhouse_sentio_rewriter
+    ninja -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
     cd ..
     
     # 如果启用了测试，也编译测试
