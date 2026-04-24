@@ -105,8 +105,8 @@ Each transformer subclasses `IASTTransformer` (itself an `IAST` so it can live i
 
 - `ASTReplaceTransformer` — table-name rewrites. Three maps: `table_name_map` (plain rename), `remote_table_map` (swap a bare identifier for a `remote('addr', db, table, user, password)` call), `table_with_database_map` (attach an explicit database).
 - `ASTRewriteCTETransformer` — injects named CTEs into `WITH` clauses of every `SELECT` subquery that actually references them. See `parseCTEMapToAST` (parses each CTE SQL once, tolerant of individual failures) and `collectCTEKeysForSelect`.
-- `ASTRewriteLimitTransformer` — two modes: `setLimit(force_limit=true)` unconditionally replaces; otherwise applies `replace_to` when original limit is 0 or `> threshold`.
-- `ASTRewriteOffsetTransformer` / `ASTSettingsTransformer` — straightforward.
+
+`LimitRewrite` / `OffsetRewrite` / `SettingsRewrite` used to have their own transformer classes but are now applied inline in [handlers/select.cc](src/handlers/select.cc) — all three batch into a `PendingSelectTransforms` struct and flush in a single AST walk.
 
 `collectTableNamesFromAST` also lives here and is what fills `response.original_accessed_table_names`.
 
