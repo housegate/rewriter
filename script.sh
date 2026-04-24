@@ -1,43 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 函数定义
+# Function definitions
 usage() {
     cat <<EOF
 Usage: $0 <command> [args]
 
 Commands:
-  prepare                   安装环境依赖（Linux/macOS 自动识别）
-  build                     完整重新构建（删除 build 目录）
-  rebuild                   增量编译（快速，推荐用于日常开发）
-  test                      构建并运行单元测试
-  clean                     清理 build 目录
-  docker list               列出本地所有 Docker 镜像
-  docker build <version>    根据版本号构建 Docker 镜像
-  docker push  <version>    将指定版本的镜像推送到远端仓库
+  prepare                   Install build dependencies (auto-detect Linux/macOS).
+  build                     Full rebuild (wipes the build/ directory).
+  rebuild                   Incremental build (fast, recommended for day-to-day work).
+  test                      Build and run unit tests.
+  clean                     Remove the build/ directory.
+  docker list               List local Docker images.
+  docker build <version>    Build a Docker image tagged <version>.
+  docker push  <version>    Push the image for <version> to the remote registry.
 
-优化建议:
-  - 首次构建使用: ./script.sh build
-  - 后续修改使用: ./script.sh rebuild (快 10 倍以上)
-  - 测试优化:     ./script.sh test
+Tips:
+  - First-time build:           ./script.sh build
+  - For later iterations:       ./script.sh rebuild  (10x faster)
+  - Run tests:                  ./script.sh test
 EOF
 }
 
-# 确保 ClickHouse 源码和 contrib 的 symlink 就绪（cmake 重配置时会引用这些路径）
+# Ensure the ClickHouse source + contrib symlinks exist. cmake re-reads them on each configure.
 ensure_symlinks() {
-    # clickHouse/src/clickHouse -> . 让 #include "clickHouse/..." 能解析
+    # clickHouse/src/clickHouse -> .  so `#include "clickHouse/..."` resolves.
     if [ ! -e clickHouse/src/clickHouse ]; then
         (cd clickHouse/src && ln -s . clickHouse)
     fi
-    # ./contrib -> clickHouse/contrib 给顶层 CMakeLists.txt 用
+    # ./contrib -> clickHouse/contrib  so the top-level CMakeLists.txt finds it.
     if [ ! -e contrib ]; then
         ln -s clickHouse/contrib contrib
     fi
 }
 
-# 幂等地把必要的兼容性补丁打到子模块源码上。每次 build/rebuild 都调一次，
-# 避免 `git submodule foreach git clean` 或开发者手动 reset 把补丁撤销后，
-# ninja 重新编译 numactl 等库时缺符号（undefined symbol: resolve_affinity 等）。
+# Re-apply compatibility patches to submodule sources, idempotently. Called on every
+# build/rebuild so that when `git submodule foreach git clean` or a manual reset
+# wipes them, the next build re-adds them — otherwise ninja hits missing symbols
+# like `undefined symbol: resolve_affinity` when relinking numactl.
 ensure_patches() {
     local flatbuf=clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
     if [ -f "$flatbuf" ] && grep -q 'const size_type count_' "$flatbuf"; then
@@ -45,14 +46,14 @@ ensure_patches() {
     fi
 
     local numactl=clickHouse/contrib/numactl-cmake/CMakeLists.txt
-    # 检测 distance.c 是否已被追加，未追加才打补丁（避免重复追加导致无限叠加）
+    # Only patch if distance.c is not already listed, to avoid duplicate appends.
     if [ -f "$numactl" ] && ! grep -q '"${LIBRARY_DIR}/distance.c"' "$numactl"; then
         sed -i 's|"${LIBRARY_DIR}/syscall.c"|"${LIBRARY_DIR}/syscall.c"\n    "${LIBRARY_DIR}/distance.c"\n    "${LIBRARY_DIR}/affinity.c"\n    "${LIBRARY_DIR}/sysfs.c"\n    "${LIBRARY_DIR}/rtnetlink.c"|g' \
             "$numactl"
     fi
 }
 
-# 安装依赖
+# Install build dependencies.
 prepare() {
     echo ">>> Preparing environment"
     case "$(uname -s)" in
@@ -89,19 +90,19 @@ prepare() {
     echo ">>> prepare done"
 }
 
-# 编译项目（完整重新构建）
+# Full rebuild (wipes build/).
 build() {
     echo "=========================================="
-    echo "完整重新构建（删除 build 目录）"
-    echo "注意：首次构建约需 15-20 分钟"
+    echo "Full rebuild (wipes build/)"
+    echo "Note: first build takes ~15-20 minutes."
     echo "=========================================="
     START_TIME=$(date +%s)
-    
+
     prepare
-    echo ">>> [1/5] 清理旧的构建目录"
+    echo ">>> [1/5] Clean previous build directory"
     rm -rf build/
-    
-    echo ">>> [2/5] 修补子模块兼容性问题"
+
+    echo ">>> [2/5] Apply submodule compatibility patches"
     ensure_patches
 
     pushd clickHouse/src > /dev/null
@@ -110,7 +111,7 @@ build() {
     rm -rf contrib
     ensure_symlinks
 
-    echo ">>> [3/5] 配置 CMake（优化：禁用 ThinLTO + 使用 mold 链接器）"
+    echo ">>> [3/5] Configure CMake (ThinLTO off, mold linker)"
     cmake -B build -S . -GNinja \
       -DENABLE_RUST=OFF \
       -DENABLE_TESTS=OFF \
@@ -119,7 +120,7 @@ build() {
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 
-    echo ">>> [4/5] 构建 OpenSSL 库"
+    echo ">>> [4/5] Build OpenSSL libraries"
     ARCH=$(uname -m)
     INC=clickHouse/contrib/openssl-cmake/linux_${ARCH}/include
     LIB=build/clickHouse/contrib/openssl-cmake
@@ -140,81 +141,82 @@ build() {
         getconf _NPROCESSORS_ONLN 2>/dev/null ||
         echo 4
     )
-    echo ">>> [5/5] 编译主程序（使用 $JOBS 个并行任务）"
+    echo ">>> [5/5] Build the main target (-j$JOBS)"
     ninja -C build -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
-    
-    # 如果启用了测试，也编译测试
+
+    # If testing is enabled, build tests too.
     if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
-        echo ">>> [5.1/5] 编译测试程序"
+        echo ">>> [5.1/5] Build test binary"
         ninja -C build -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
     fi
 
-    # 清理子模块改动（撤销打在子模块里的兼容性补丁，下次 build 重新打）
+    # Undo any submodule changes the build made (reset patches).
+    # ensure_patches on the next build re-applies them idempotently.
     git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null
-    # 子模块清理会把 clickHouse/src/clickHouse 这个 symlink 也一并清掉，
-    # 这样 cmake 再次重新配置（例如修改 .proto 触发）时就会找不到
-    # clickHouse/Dictionaries/DictionaryFactory.h。这里补回 symlink。
+    # The submodule cleanup above also wipes the clickHouse/src/clickHouse
+    # self-symlink. Without it, cmake reconfigures fail to resolve
+    # Dictionaries/DictionaryFactory.h. Restore it here.
     ensure_symlinks
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     echo "=========================================="
-    echo "✅ 构建完成！总耗时: ${DURATION} 秒 ($((DURATION / 60)) 分 $((DURATION % 60)) 秒)"
-    echo "可执行文件: build/clickhouse_sentio_rewriter"
+    echo "Build done in ${DURATION}s ($((DURATION / 60))m $((DURATION % 60))s)"
+    echo "Binary: build/clickhouse_sentio_rewriter"
     echo "=========================================="
 }
 
-# 增量编译（快速，适合日常开发）
+# Incremental build (fast; for day-to-day work).
 rebuild() {
     echo "=========================================="
-    echo "增量编译模式（只重新编译修改的文件）"
-    echo "预计耗时: 30秒 - 3分钟"
+    echo "Incremental build (only recompiles changed files)"
+    echo "Expected time: 30s-3min."
     echo "=========================================="
     START_TIME=$(date +%s)
-    
+
     if [ ! -d "build" ]; then
-        echo "❌ build 目录不存在，请先运行: ./script.sh build"
+        echo "build/ does not exist; run ./script.sh build first."
         exit 1
     fi
 
-    # 补 symlink 和子模块补丁，避免 cmake 重新配置或 ninja 重新构建 numactl 等
-    # 依赖时缺文件 / 缺符号。
+    # Restore symlinks and patches before ninja so incremental configure/build
+    # doesn't trip on missing files or missing symbols.
     ensure_symlinks
     ensure_patches
-    
+
     JOBS=$(
         command -v nproc   >/dev/null && nproc ||
         sysctl -n hw.ncpu  2>/dev/null ||
         getconf _NPROCESSORS_ONLN 2>/dev/null ||
         echo 4
     )
-    
-    echo ">>> [1/2] 重新编译修改的源文件"
+
+    echo ">>> [1/2] Recompile changed sources"
     cd build
     ninja -j"$JOBS" clickhouse_sentio_rewriter clickhouse_sentio_rewriter_cli
     cd ..
-    
-    # 如果启用了测试，也编译测试
+
+    # If testing is enabled, build tests too.
     if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
-        echo ">>> [2/2] 重新编译测试程序"
+        echo ">>> [2/2] Recompile tests"
         cd build
         ninja -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
         cd ..
     fi
-    
+
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     echo "=========================================="
-    echo "✅ 增量编译完成！耗时: ${DURATION} 秒"
-    echo "可执行文件: build/clickhouse_sentio_rewriter"
+    echo "Incremental build done in ${DURATION}s."
+    echo "Binary: build/clickhouse_sentio_rewriter"
     echo "=========================================="
 }
 
-# 清理构建目录
+# Clean the build directory.
 clean() {
-    echo ">>> 清理 build 目录..."
+    echo ">>> Cleaning build/"
     rm -rf build/
-    echo ">>> 清理完成"
+    echo ">>> Done."
 }
 
 test() {
@@ -230,34 +232,34 @@ docker_list() {
 docker_build_image() {
     local ver=$1
     echo "=========================================="
-    echo "构建 Docker 镜像: $ver"
+    echo "Build Docker image: $ver"
     echo "=========================================="
-    
-    # 检查本地二进制文件是否存在
+
+    # Check local binary exists.
     if [ ! -f "build/clickhouse_sentio_rewriter" ]; then
-        echo "❌ 错误: build/clickhouse_sentio_rewriter 不存在"
-        echo "请先运行: ./script.sh build 或 ./script.sh rebuild"
+        echo "build/clickhouse_sentio_rewriter is missing."
+        echo "Run ./script.sh build or ./script.sh rebuild first."
         exit 1
     fi
-    
-    echo ">>> [1/3] 更新 Docker 中的二进制文件"
+
+    echo ">>> [1/3] Copy binary into the Docker context"
     cp -v build/clickhouse_sentio_rewriter docker/bare/root/clickhouse_sentio_rewriter
-    
+
     local old_size=$(du -h docker/bare/root/clickhouse_sentio_rewriter | awk '{print $1}')
-    echo "二进制文件大小: $old_size"
-    
-    echo ">>> [2/3] 构建 Docker 镜像"
+    echo "Binary size: $old_size"
+
+    echo ">>> [2/3] Build Docker image"
     (
       cd docker/bare
       docker buildx build --platform linux/amd64 . \
           -t us-west1-docker.pkg.dev/sentio-352722/sentio/sql-rewriter:"${ver}"
     )
-    
-    echo ">>> [3/3] Docker 镜像构建完成"
+
+    echo ">>> [3/3] Docker image built"
     echo "=========================================="
-    echo "✅ 镜像标签: sql-rewriter:$ver"
+    echo "Image tag: sql-rewriter:$ver"
     echo "=========================================="
-    echo "下一步: ./script.sh docker push $ver"
+    echo "Next: ./script.sh docker push $ver"
     echo "=========================================="
 }
 
@@ -271,7 +273,7 @@ docker_push_image() {
     echo ">>> Back to project root ($(pwd))"
 }
 
-# 主逻辑分发
+# Command dispatch.
 if [[ $# -lt 1 ]]; then
     usage
     exit 1

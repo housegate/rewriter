@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ---------- 引入 GoogleTest ----------
+# ---------- GoogleTest via FetchContent ----------
 include(FetchContent)
 FetchContent_Declare(
   googletest

@@ -2,30 +2,30 @@
 #!/usr/bin/env bash
 set -e
 
-# 切到脚本自身目录
+# Switch into the script's own directory.
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 OS="$(uname -s)"
-echo "→ Detected OS: $OS"
+echo "-> Detected OS: $OS"
 
 SRC_DIR="../../.."
 BUILD_DIR="${SRC_DIR}/build"
 
-# 清理并创建结构
+# Clean out and recreate the output tree.
 rm -rf root
 mkdir -p root/{lib,lib64,etc,tmp,root}
 pushd root >/dev/null
 
-# 拷贝可执行文件
+# Copy the compiled binary.
 cp "${BUILD_DIR}/clickhouse_sentio_rewriter" .
 
 if [ "$OS" = "Linux" ]; then
-  echo "→ Copying Linux .so libraries…"
+  echo "-> Copying Linux .so libraries..."
   cp /lib/x86_64-linux-gnu/{libc.so.6,libdl.so.2,libm.so.6,libpthread.so.0,librt.so.1,libnss_dns.so.2,libresolv.so.2} lib/ &&
     cp /lib64/ld-linux-x86-64.so.2 lib64/
   # elif [ "$OS" = "Darwin" ]; then
-  # echo "→ Copying macOS .dylib dependencies…"
-  # # 1) 自动扫描依赖
+  # echo "-> Copying macOS .dylib dependencies..."
+  # # 1) Auto-scan transitive deps.
   # for dylib in $(otool -L clickhouse_sentio_rewriter |
   #   tail -n +2 | awk '{print $1}'); do
   #   if [ -f "$dylib" ]; then
@@ -35,7 +35,7 @@ if [ "$OS" = "Linux" ]; then
   #     echo "   [skip] $dylib not found"
   #   fi
   # done
-  # # 2) 拷贝 dyld loader
+  # # 2) Copy the dyld loader.
   # DYLD_PATH=$(otool -l clickhouse_sentio_rewriter |
   #   awk '/LC_LOAD_DYLINKER/{getline; print $2}')
   # if [ -f "$DYLD_PATH" ]; then
@@ -44,7 +44,7 @@ if [ "$OS" = "Linux" ]; then
   # else
   #   echo "   [warn] dyld loader not found: $DYLD_PATH"
   # fi
-  # # 3) 系统级 libSystem
+  # # 3) System libSystem.
   # for syslib in /usr/lib/libSystem.B.dylib /usr/lib/libSystem.dylib; do
   #   if [ -f "$syslib" ]; then
   #     echo "   copying $syslib"
@@ -57,16 +57,16 @@ else
   exit 1
 fi
 
-# DNS 配置（macOS 下 /etc/resolv.conf 通常存在）
+# DNS config (usually present on macOS too).
 if [ -f /etc/resolv.conf ]; then
   cp /etc/resolv.conf etc/
 else
-  echo "→ No /etc/resolv.conf, skipped"
+  echo "-> No /etc/resolv.conf, skipped"
 fi
 
-# strip（macOS 上可能失败，但我们捕获错误继续）
-strip clickhouse_sentio_rewriter 2>/dev/null || echo "→ strip failed or skipped"
+# strip (may fail on macOS; swallow the error and continue).
+strip clickhouse_sentio_rewriter 2>/dev/null || echo "-> strip failed or skipped"
 
 popd >/dev/null
 
-echo "✅ prepare.sh 完成，产出目录： docker/bare/root"
+echo "prepare.sh done. Output directory: docker/bare/root"

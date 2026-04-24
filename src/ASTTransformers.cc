@@ -231,7 +231,7 @@ std::unordered_set<String> ASTRewriteCTETransformer::collectCTEKeysForSelect(
   return used;
 }
 
-// 为每个select子句构建with ... as ...
+// Build a `WITH ... AS ...` clause for each SELECT that references the CTE.
 ASTPtr ASTRewriteCTETransformer::buildWithList(
   const DB::ASTSelectQuery *select_ast, const std::unordered_set<String> &used_key) const {
   std::cout << "========cout used_key========" << std::endl;
@@ -296,7 +296,7 @@ void ASTRewriteCTETransformer::mergeWithIntoSelect(ASTSelectQuery *sel, ASTPtr &
     }
   }
 
-  // 前插
+  // Prepend new CTEs (so injected ones come before existing ones).
   for (auto &n : add->children) {
     String nm;
     if (auto *we = n->as<ASTWithElement>())

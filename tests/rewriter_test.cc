@@ -538,7 +538,7 @@ TEST(TableOnly, TableRewrite_NoCTE) {
   EXPECT_NE(norm.find(" AS Withdraw"), std::string::npos);
 }
 
-// 仅在使用到的 key 注入（大 map 中只取子集）
+// Only inject keys actually used (take a subset of the large map).
 TEST(CTEOnly, LargeMap_OnlyUsedInjected_Subset) {
   const std::string origin_sql = "SELECT * FROM c3 JOIN e5 USING (id)";
 
@@ -560,14 +560,14 @@ TEST(CTEOnly, LargeMap_OnlyUsedInjected_Subset) {
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(norm.empty());
 
-  // 仅一次 WITH
+  // Exactly one WITH.
   EXPECT_EQ(CountSubstr(norm, "WITH "), 1u);
 
-  // 仅注入 c3/e5
+  // Only c3/e5 were injected.
   EXPECT_EQ(CountSubstr(norm, " c3 AS "), 1u);
   EXPECT_EQ(CountSubstr(norm, " e5 AS "), 1u);
 
-  // 未使用的 key 不应出现
+  // Unused keys must not appear.
   EXPECT_EQ(norm.find(" a1 AS "), std::string::npos);
   EXPECT_EQ(norm.find(" a2 AS "), std::string::npos);
   EXPECT_EQ(norm.find(" b1 AS "), std::string::npos);
@@ -577,7 +577,7 @@ TEST(CTEOnly, LargeMap_OnlyUsedInjected_Subset) {
   EXPECT_EQ(norm.find(" d2 AS "), std::string::npos);
   EXPECT_EQ(norm.find(" f6 AS "), std::string::npos);
 
-  // JOIN 仍然存在
+  // JOIN is still present.
   EXPECT_NE(norm.find("JOIN"), std::string::npos);
 }
 
@@ -607,12 +607,12 @@ TEST(CTEOnly, LargeMap_MultiRefs_DedupAndOnlyUsed) {
   EXPECT_EQ(CountSubstr(norm, " c1 AS "), 1u);
   EXPECT_EQ(CountSubstr(norm, " d2 AS "), 1u);
 
-  // 未使用的不应出现
+  // Unused CTEs must not appear.
   EXPECT_EQ(norm.find(" a0 AS "), std::string::npos);
   EXPECT_EQ(norm.find(" c2 AS "), std::string::npos);
   EXPECT_EQ(norm.find(" x9 AS "), std::string::npos);
 
-  // UNION 结构保留
+  // UNION structure is preserved.
   EXPECT_NE(norm.find("UNION ALL"), std::string::npos);
 }
 
@@ -709,7 +709,8 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
     R"MSG(Code: 41. DB::Exception: Cannot parse datetime: Cannot parse DateTime from String: In scope WITH base AS (SELECT * FROM prod_subgraph.`8CsFI8hZ_latestView_PoolSnapshot` AS PoolSnapshot) SELECT formatDateTime(toDateTime(base.timestamp), '%Y-%m-%d %H:%i') AS timestamp, formatDateTime(dateTrunc('day', toDateTime(base.timestamp)), '%Y-%m-%d %H:%i') AS block_date, base.* EXCEPT (timestamp, __genBlockChain__) FROM base WHERE toDateTime(base.timestamp, 'UTC') > toDateTime('{{timestamp}}') ORDER BY base.timestamp DESC LIMIT 100 SETTINGS log_comment = '{""processor_id"":""8CsFI8hZ"",""processor_version"":63,""project_id"":""8CsFI8hZ"",""project_name"":""paeter3/club246test"",""method"":""ExecuteInternalSQL"",""user_id"":""UtjecdnRnjRB"",""async_query_id"":""sqlquery-KnJ4npcm"",""async_execution_id"":""sqlexec-LaXFqjlq""}', max_execution_time = 600. (CANNOT_PARSE_DATETIME) (version 25.6.4.12 (official build))MSG";
 
   // ---------- Manually inferred ORIGINAL SQL (pre-rewrite) ----------
-  // 仅改变来源表为逻辑表名，其他语义保持一致，便于整条 SQL 替换后用户能看懂。
+  // Only the source table is swapped for its logical name; the rest of the SQL stays identical
+  // so the user can read the post-substitution result without confusion.
   const std::string kOriginalSQL = R"(WITH base AS (
     SELECT * FROM latestView_PoolSnapshot AS PoolSnapshot
   )
@@ -746,7 +747,7 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
   RewriterServiceImpl service;
   auto status = service.RewriteErrorMessage(&server_context, &request, &response);
   ASSERT_TRUE(status.ok());
-  // 打印整个响应，便于肉眼核对最终替换是否符合预期
+  // Print the whole response so a human can eyeball the final substitution.
   std::cout << "\n=== Rewriter Response (Case: CANNOT_PARSE_DATETIME) ===\n"
             << response.DebugString() << std::endl;
 }
@@ -812,18 +813,18 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_UnknownFunctionArgMin) {
 }
 
 // ============================================================================
-// QueryPreprocessor Tests - 防止栈溢出的查询预处理
+// QueryPreprocessor Tests - guard against stack overflow in the query preprocessor.
 // ============================================================================
 
 TEST(QueryPreprocessorTest, NoPreprocessingNeeded) {
-  // 小查询不需要预处理
+  // Small queries don't need preprocessing.
   std::string sql = "SELECT * FROM table WHERE id IN (1, 2, 3)";
   std::string result = QueryPreprocessor::preprocess(sql);
   EXPECT_EQ(sql, result) << "Small queries should not be modified";
 }
 
 TEST(QueryPreprocessorTest, SimpleINClauseSplit) {
-  // 创建一个有 100 个元素的 IN 子句
+  // Build an IN clause with 100 elements.
   std::string sql = "SELECT * FROM table WHERE id IN (";
   for (int i = 0; i < 100; i++) {
     if (i > 0) sql += ", ";
@@ -833,15 +834,15 @@ TEST(QueryPreprocessorTest, SimpleINClauseSplit) {
   
   std::string result = QueryPreprocessor::preprocess(sql);
   
-  // 验证结果包含 OR
-  EXPECT_NE(result.find(" OR "), std::string::npos) 
+  // Result should contain OR.
+  EXPECT_NE(result.find(" OR "), std::string::npos)
     << "Large IN clause should be split with OR";
-  
-  // 验证包含原始列名
+
+  // Original column name should be present.
   EXPECT_NE(result.find("id IN"), std::string::npos)
     << "Column name should be preserved";
-  
-  // 验证所有数字都在
+
+  // All of the numeric literals should be present.
   EXPECT_NE(result.find("0"), std::string::npos);
   EXPECT_NE(result.find("99"), std::string::npos);
   
@@ -850,7 +851,7 @@ TEST(QueryPreprocessorTest, SimpleINClauseSplit) {
 }
 
 TEST(QueryPreprocessorTest, TupleINClauseSplit) {
-  // 创建一个有 80 个元组的 IN 子句
+  // Build an IN clause with 80 tuples.
   std::string sql = "SELECT * FROM table WHERE (owner_address, coin_type) IN [";
   for (int i = 0; i < 80; i++) {
     if (i > 0) sql += ", ";
@@ -860,15 +861,15 @@ TEST(QueryPreprocessorTest, TupleINClauseSplit) {
   
   std::string result = QueryPreprocessor::preprocess(sql);
   
-  // 验证结果包含 OR
+  // Result should contain OR.
   EXPECT_NE(result.find(" OR "), std::string::npos)
     << "Large tuple IN clause should be split";
-  
-  // 验证保留了方括号
+
+  // Square brackets should be preserved.
   EXPECT_NE(result.find("IN ["), std::string::npos)
     << "Square brackets should be preserved";
-  
-  // 验证保留了元组格式
+
+  // Tuple shape on the LHS should be preserved.
   EXPECT_NE(result.find("(owner_address, coin_type)"), std::string::npos)
     << "Tuple columns should be preserved";
   
@@ -877,7 +878,7 @@ TEST(QueryPreprocessorTest, TupleINClauseSplit) {
 }
 
 TEST(QueryPreprocessorTest, MultipleINClausesSplit) {
-  // 创建包含多个大 IN 子句的查询
+  // Build a query containing several large IN clauses.
   std::string sql = "SELECT * FROM table WHERE id IN (";
   for (int i = 0; i < 70; i++) {
     if (i > 0) sql += ", ";
@@ -892,7 +893,7 @@ TEST(QueryPreprocessorTest, MultipleINClausesSplit) {
   
   std::string result = QueryPreprocessor::preprocess(sql);
   
-  // 应该有多个 OR（因为有多个 IN 子句被拆分）
+  // Multiple ORs expected (multiple IN clauses got split).
   size_t or_count = 0;
   size_t pos = 0;
   while ((pos = result.find(" OR ", pos)) != std::string::npos) {
@@ -909,13 +910,13 @@ TEST(QueryPreprocessorTest, MultipleINClausesSplit) {
 }
 
 TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
-  // 模拟真实的崩溃查询场景：300+ 元组的 IN 子句
+  // Simulate a real-world crashing query: 300+ tuple IN clauses.
   std::ostringstream oss;
   oss << "SELECT coin_type, countDistinctIf(owner_address, balance > 0) AS holders ";
   oss << "FROM (SELECT coin_type, owner_address, sum(amount_number) AS balance, ";
   oss << "((owner_address, coin_type) IN [";
   
-  // 第一个大 IN 子句：320 个元组
+  // First large IN clause: 320 tuples.
   for (int i = 0; i < 320; i++) {
     if (i > 0) oss << ", ";
     oss << "('0x" << std::hex << (i * 1000) << "', '0x" << std::hex << (i * 2000) 
@@ -925,7 +926,7 @@ TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
   oss << "]) AS is_dev, ";
   oss << "((owner_address, coin_type) IN [";
   
-  // 第二个大 IN 子句：320 个元组
+  // Second large IN clause: 320 tuples.
   for (int i = 0; i < 320; i++) {
     if (i > 0) oss << ", ";
     oss << "('0x" << std::hex << (i * 3000) << "', '0x" << std::hex << (i * 4000) 
@@ -935,7 +936,7 @@ TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
   oss << "]) AS is_sniper ";
   oss << "FROM sui.balance_changes WHERE coin_type IN (";
   
-  // 第三个大 IN 子句：320 个地址
+  // Third large IN clause: 320 addresses.
   for (int i = 0; i < 320; i++) {
     if (i > 0) oss << ", ";
     oss << "'0x" << std::hex << (i * 5000) << "::token::TOKEN" << std::dec << i << "'";
@@ -948,12 +949,12 @@ TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
   std::cout << "\n=== RealWorldCrashQuery Test ===\n"
             << "Original query length: " << sql.size() << " bytes\n";
   
-  // 这个查询会导致栈溢出，但预处理后应该安全
+  // This query would otherwise overflow the parser stack, but the preprocessor splits it first.
   std::string result = QueryPreprocessor::preprocess(sql);
   
   std::cout << "Preprocessed query length: " << result.size() << " bytes\n";
   
-  // 验证所有大 IN 子句都被拆分了
+  // Every large IN clause should be split.
   size_t or_count = 0;
   size_t pos = 0;
   while ((pos = result.find(" OR ", pos)) != std::string::npos) {
@@ -961,8 +962,8 @@ TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
     pos += 4;
   }
   
-  // 每个 320 元素的 IN 子句应该被拆分成 7 批（50*6 + 20），所以每个有 6 个 OR
-  // 3 个 IN 子句 × 6 个 OR = 18 个 OR
+  // Each 320-element IN clause splits into 7 batches (50*6 + 20), giving 6 ORs each.
+  // 3 IN clauses x 6 ORs = 18 ORs.
   EXPECT_GE(or_count, 15) << "Large query should have many OR clauses from splitting";
   
   std::cout << "OR count after preprocessing: " << or_count << "\n";
@@ -970,7 +971,7 @@ TEST(QueryPreprocessorTest, RealWorldCrashQuery) {
 }
 
 TEST(QueryPreprocessorTest, StringWithCommas) {
-  // 测试包含逗号的字符串不会被错误拆分
+  // Commas inside quoted strings should NOT be treated as delimiters.
   std::string sql = "SELECT * FROM table WHERE description IN (";
   for (int i = 0; i < 60; i++) {
     if (i > 0) sql += ", ";
@@ -980,7 +981,7 @@ TEST(QueryPreprocessorTest, StringWithCommas) {
   
   std::string result = QueryPreprocessor::preprocess(sql);
   
-  // 应该仍然包含字符串中的逗号
+  // Commas inside string literals should survive the split.
   EXPECT_NE(result.find(", with comma"), std::string::npos)
     << "Commas in strings should be preserved";
   

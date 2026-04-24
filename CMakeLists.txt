@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0135 NEW)
 project(MyProject)
 
-# 禁用不支持的链接器选项
+# Disable unsupported linker options on macOS.
 if (APPLE)
     set(CMAKE_C_LINK_FLAGS "")
     set(CMAKE_CXX_LINK_FLAGS "")
-    # 确保不会使用 --threads 选项
+    # Make sure --threads is never passed to the linker.
     set(CMAKE_TRY_COMPILE_CONFIGURATION "Release")
 endif ()
 
@@ -182,7 +182,7 @@ if (BUILD_TESTING)
 endif ()
 
 if (OS_DARWIN)
-    # 清空 linker flags 中所有 --threads
+    # Strip any --threads occurrences out of the linker flags on macOS.
     string(REPLACE "-Wl,--threads=16" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
     string(REPLACE "-Wl,--threads=16" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
     string(REPLACE "-Wl,--threads=16" "" CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS}")
