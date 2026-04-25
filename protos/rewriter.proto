@@ -1,12 +1,37 @@
 syntax = "proto3";
 
+// rewriter — gRPC contract for the ClickHouse SQL rewriter.
+//
+// A caller (typically a proxy in front of ClickHouse) sends a SQL string +
+// a list of RewriteOptions; the rewriter parses the SQL with ClickHouse's
+// own parser, applies the requested transformations to the AST, and
+// returns the rewritten SQL plus enough bookkeeping for the caller to do
+// routing, authorization, and result-name post-processing.
+//
+// Syntactic / semantic rewrite failures return Status::OK with a
+// non-Success RewriteCode — only unexpected server errors come back as
+// gRPC errors. See RewriteCode for the rejection taxonomy.
 package rewriter;
 
+// One transformation kind. Each RewriteOption tags its `value` oneof with
+// the matching op so the dispatcher can pick the right handler. Ops are
+// applied in the order they appear in the request; chaining is supported
+// for SettingsRewrite, LimitRewrite, etc., and the SELECT path re-applies
+// the active TableNameRewrite after CommonTableExprRewrite injects any new
+// subqueries (since CTE inlining can introduce table references the first
+// pass didn't see).
 enum RewriteOp {
+    // Rewrite table identifiers. See RewriteTableNameArgs for the
+    // static→dynamic precedence rule and the two underlying modes.
     TableNameRewrite = 0;
+    // Cap or replace the SELECT LIMIT clause. See RewriteLimitArgs.
     LimitRewrite = 1;
+    // Add / replace the SELECT OFFSET clause. See RewriteOffsetArgs.
     OffsetRewrite = 2;
+    // Push session SETTINGS into the AST. See RewriteSettingsArgs.
     SettingsRewrite = 3;
+    // Inject named CTEs into the WITH clause of every SELECT subquery
+    // that references them. See RewriteCommonTableExprArgs.
     CommonTableExprRewrite = 4;
 }
 
@@ -33,38 +58,175 @@ message RewriteCommonTableExprArgs {
     map<string, CommonTableExpr> cte_map = 1;
 }
 
-message RewriteTableForSelectStmtArgs {
+// =============================================================================
+// Table-name rewriting: the two modes
+// =============================================================================
+//
+// `RewriteTableNameArgs` carries one of two sub-messages:
+//
+//   * `static_args`  — explicit three-map lookup (RewriteTableStaticArgs).
+//                      Use when the caller has already computed the desired
+//                      target name(s) and just wants the rewriter to swap
+//                      identifiers in the AST.
+//   * `dynamic_args` — policy-driven construction (RewriteTableDynamicArgs).
+//                      Use when the caller wants the rewriter to derive the
+//                      physical (db, table) from a multi-tenant routing
+//                      policy (logical→physical DB map + a per-tenant
+//                      table-name prefix scheme).
+//
+// See `RewriteTableNameArgs` itself for the precedence rule that picks
+// between them.
+
+// Static three-map policy.
+//
+// Lookup key (matches what ClickHouse's parser emits as the table name):
+//   * SELECT path        — `identifier->name()` for each ASTTableExpression
+//                          (bare "table" or qualified "db.table").
+//   * Non-SELECT path    — "origin_db.origin_table", or bare "origin_table"
+//                          when the SQL didn't qualify it.
+//
+// Lookup precedence per target:
+//   1. table_map               -> rename only (db unchanged).
+//   2. remote_table_map        -> SELECT-side: replace identifier with a
+//                                 `remote('addr', db, table, user, password)`
+//                                 table function.
+//                                 Non-SELECT side: REJECTED with
+//                                 RewriteCode.UnsupportedStatement —
+//                                 `remote()` is not a valid INSERT/UPDATE/
+//                                 DELETE/etc. target.
+//   3. table_with_database_map -> set both db + table (when `database` is
+//                                 empty the original db is preserved and
+//                                 only `table` is rewritten).
+//
+// Targets that don't appear in any map PASS THROUGH unchanged. There is no
+// per-target fallback to `dynamic_args` — once static-mode is selected at
+// the statement level (see RewriteTableNameArgs), the unmatched targets
+// stay as the user wrote them.
+//
+// Empty static_args (set with every map empty) is a valid, intentional
+// state: it means "static-mode, no rewrites" — every target passes
+// through.
+message RewriteTableStaticArgs {
+    // SELECT-side `remote()` swap target. For non-SELECT statements,
+    // a `remote_table_map` hit is rejected as UnsupportedStatement.
     message RemoteTable {
-        string addr = 1;
-        string database = 2;
-        string table = 3;
-        string user = 4;
-        string password = 5;
+        string addr = 1;     // host[:port] passed to remote().
+        string database = 2; // remote-side database.
+        string table = 3;    // remote-side table.
+        string user = 4;     // remote-side user.
+        string password = 5; // remote-side password (rendered in the SQL).
     }
+    // Explicit (db, table) target. Empty `database` keeps the origin db.
     message TableWithDatabase {
         string database = 1;
         string table = 2;
     }
 
+    // origin -> new_table. Renames the table in place; the original db
+    // qualifier (if any) is preserved.
     map<string, string> table_map = 1;
+    // origin -> RemoteTable. SELECT-only; rejected on non-SELECT.
     map<string, RemoteTable> remote_table_map = 2;
+    // origin -> TableWithDatabase. Sets both db + table on the AST node.
     map<string, TableWithDatabase> table_with_database_map = 3;
 }
 
-// RewriteTableForDynamicArgs
-// The final table name will be: `${physical_database}`.`${logical_database}${delim}${extra_arguments join by delim}${delim}${original_table}`
-message RewriteTableForDynamicArgs {
-    map<string, string> database_map = 1; // virtual/logical database -> physical database, e.g. : tenant1_database -> testnet, tenant2_database -> testnet
+// Dynamic policy — derive the physical (db, table) from a routing config.
+//
+// Resolution per target:
+//
+//   logical    := origin_db (if the SQL qualified the target)
+//                 OR upstream_logical_database_in_context
+//                 OR REJECT with InvalidRewriteRequest
+//   physical   := database_map[logical]
+//                 OR logical itself, iff logical ∈ known_physical_databases
+//                 OR REJECT with InvalidRewriteRequest
+//   delim      := delim, defaulting to "_" when empty
+//   new_table  := logical + delim
+//                 + (extra_arguments joined by delim, then + delim,
+//                    iff extra_arguments is non-empty)
+//                 + origin_table
+//
+// Examples (delim="_", extra_arguments=[]):
+//   tenant1.events     -> physical_db_1.tenant1_events
+//   events  (USE tenant1)  -> physical_db_1.tenant1_events
+//
+// Example (delim="_", extra_arguments=["shard0"]):
+//   tenant1.events     -> physical_db_1.tenant1_shard0_events
+//
+// SELECT vs non-SELECT behavior on REJECT:
+//   * SELECT (lenient)  — unresolvable identifiers (e.g. `system.numbers`,
+//                         CTE aliases, anything not in the maps) are
+//                         silently skipped. The rest of the rewrite
+//                         proceeds.
+//   * Non-SELECT (strict) — the whole statement is rejected with
+//                         RewriteCode.InvalidRewriteRequest, since each
+//                         non-SELECT statement targets a specific table
+//                         and a misroute would be a correctness bug.
+message RewriteTableDynamicArgs {
+    // Logical (caller-facing) DB -> physical (ClickHouse-side) DB.
+    // Multiple logical DBs may map to the same physical DB.
+    // Example: { "tenant1_database": "testnet", "tenant2_database": "testnet" }.
+    map<string, string> database_map = 1;
+    // DBs that already exist on the physical ClickHouse and are exposed
+    // verbatim (no logical→physical translation). A `logical` that's in
+    // this list resolves to itself as `physical`. Used so callers can let
+    // through "system" / shared schemas without listing them in
+    // `database_map`.
     repeated string known_physical_databases = 2;
-    string upstream_logical_database_in_context = 3; // e.g. tenant1_database, user will use `USE xxx` to switch database
-    string delim = 4; // "_" by default
-    repeated string extra_arguments = 5; // e.g. replica_index, shard_index, will be added by sequence
-    optional string upstream_physical_database_in_context = 6; // used to create database on which physical_database
+    // Default logical DB for unqualified targets in the SQL — typically
+    // tracked via the user's most recent `USE <db>` issued through this
+    // proxy. e.g. "tenant1_database". Empty means "no default": any
+    // unqualified non-SELECT target rejects with InvalidRewriteRequest.
+    string upstream_logical_database_in_context = 3;
+    // Delimiter joining logical, extra_arguments, and original_table in
+    // the constructed `new_table`. Defaults to "_" when empty.
+    string delim = 4;
+    // Extra prefix segments inserted between `logical` and `original_table`,
+    // joined by `delim`. e.g. ["replica_index", "shard_index"]. When empty
+    // the trailing delim is also omitted (no double-delim like
+    // `tenant1__events`).
+    repeated string extra_arguments = 5;
+    // Caller's currently-bound physical DB (if any). Only consulted by the
+    // CREATE DATABASE handler — when set, it must be a member of
+    // `known_physical_databases` or the request is rejected as
+    // InvalidRewriteRequest. Unset means the caller hasn't picked a
+    // physical DB yet, which is fine for the debug-rewrite path.
+    optional string upstream_physical_database_in_context = 6;
 }
 
+// Selects which mode (above) applies to this rewrite.
+//
+// Unified static→dynamic precedence (one rule for every statement kind):
+//
+//   1. If `static_args` is set -> use STATIC mode.
+//      Even an empty `static_args` (every map empty) selects static —
+//      that's an explicit "static-only, no rewrite" intent and every
+//      target passes through. No fallthrough to dynamic.
+//   2. Otherwise, if `dynamic_args` is set -> use DYNAMIC mode.
+//   3. Otherwise -> no rewrite (the original SQL is echoed back as-is).
+//
+// Statement-kind notes:
+//   * SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE,
+//     ALTER TABLE, EXISTS TABLE, SHOW CREATE TABLE, RENAME TABLE
+//     -> follow the precedence above.
+//   * USE, SHOW TABLES, SHOW DATABASES, CREATE DATABASE
+//     -> these are database-level operations. `static_args` is table-keyed
+//        and has nothing to say about a db-level op, so they always read
+//        `dynamic_args` directly (and ignore `static_args` even if set).
+//
+// Last-wins across multiple TableNameRewrite options in a request: each
+// option that carries either sub-message overrides any prior selection.
 message RewriteTableNameArgs {
-    RewriteTableForSelectStmtArgs select_stmt_args = 1; // used in STATEMENT_TYPE_SELECT
-    optional RewriteTableForDynamicArgs general_args = 2; // used in other STATEMENT_TYPE
+    // Dynamic policy. Used when `static_args` is unset on table-targeting
+    // statements, and read directly (regardless of `static_args`) by the
+    // database-level handlers (USE / SHOW TABLES / SHOW DATABASES /
+    // CREATE DATABASE).
+    RewriteTableDynamicArgs dynamic_args = 1;
+    // Static three-map policy. When set on a table-targeting statement,
+    // takes precedence over `dynamic_args` — even when every map is empty
+    // (that's an explicit "static-only, no rewrite" intent).
+    optional RewriteTableStaticArgs static_args = 2;
 }
 
 enum SettingType {
@@ -114,23 +276,46 @@ enum RewriteCode {
     // to RewriteError when the classification truly isn't clear.
     RewriteError = 2;
     // The SQL is valid but the rewriter does not support this statement
-    // kind or variant (CREATE VIEW, DROP DATABASE, TRUNCATE, OPTIMIZE,
-    // RENAME DATABASE, EXISTS VIEW/DATABASE/DICTIONARY, SHOW CREATE
-    // VIEW/DATABASE/DICTIONARY, INSERT INTO FUNCTION, multi-table DROP,
-    // ALTER TABLE with cross-table partition refs, GRANT/KILL/BACKUP/...).
-    // Callers may choose to pass the SQL through to ClickHouse unchanged.
+    // kind or variant. Callers may choose to pass the SQL through to
+    // ClickHouse unchanged (it'll either run or ClickHouse will reject it).
+    // Cases:
+    //   * Statement-kind level: CREATE VIEW, CREATE DICTIONARY,
+    //     CREATE TABLE AS table_function(...), DROP DATABASE,
+    //     DROP VIEW/DICTIONARY, multi-table DROP, TRUNCATE, OPTIMIZE,
+    //     UNDROP, RENAME DATABASE, RENAME DICTIONARY, EXISTS
+    //     VIEW/DATABASE/DICTIONARY, SHOW CREATE
+    //     VIEW/DATABASE/DICTIONARY, INSERT INTO FUNCTION,
+    //     ALTER (non-TABLE), ALTER TABLE with cross-table partition refs
+    //     (ATTACH/REPLACE/FETCH PARTITION FROM other,
+    //     MOVE PARTITION TO TABLE other), GRANT/REVOKE, MOVE,
+    //     BACKUP/RESTORE, KILL, COPY, external DDL, async insert flush.
+    //   * CREATE DATABASE without a TableNameRewrite/dynamic_args option
+    //     to validate against — without context the rewriter can't safely
+    //     emit anything.
+    //   * Static-mode `remote_table_map` hit on a non-SELECT table target —
+    //     `remote()` is not a valid INSERT/UPDATE/DELETE/etc. target.
     UnsupportedStatement = 3;
     // The caller's RewriteOption cannot be applied to this statement —
     // their rewrite config is semantically incorrect for the SQL they sent.
     // Callers should treat this as a configuration bug; do NOT pass the SQL
-    // through. Current cases:
-    //   * Non-SELECT target names a logical database that is neither in
-    //     `general_args.database_map` nor in
-    //     `general_args.known_physical_databases` — i.e. the user does not
-    //     have that database.
-    //   * Non-SELECT target has no qualifier in the SQL and
-    //     `general_args.upstream_logical_database_in_context` is empty —
-    //     the rewriter has no way to pick a physical database.
+    // through. Current cases (all in dynamic-mode; static-mode unmatched
+    // targets pass through without rejecting, and SELECT's dynamic walker
+    // is lenient and silently skips unresolvable identifiers):
+    //   * Non-SELECT table-targeting statement (INSERT / UPDATE / DELETE /
+    //     CREATE TABLE / DROP TABLE / ALTER TABLE / EXISTS TABLE / SHOW
+    //     CREATE TABLE / RENAME TABLE) names a logical database that is
+    //     neither in `dynamic_args.database_map` nor in
+    //     `dynamic_args.known_physical_databases` — the user doesn't have
+    //     that database.
+    //   * Non-SELECT table-targeting statement has no qualifier in the SQL
+    //     and `dynamic_args.upstream_logical_database_in_context` is empty
+    //     — the rewriter has no way to pick a physical database.
+    //   * USE <db> where <db> is neither in `database_map` nor in
+    //     `known_physical_databases`.
+    //   * CREATE DATABASE <db> where <db> is already in `database_map` and
+    //     the SQL is not `IF NOT EXISTS`.
+    //   * CREATE DATABASE where `upstream_physical_database_in_context` is
+    //     set but is not a member of `known_physical_databases`.
     InvalidRewriteRequest = 4;
 }
 
@@ -154,7 +339,7 @@ enum StatementType {
     STATEMENT_TYPE_UPDATE = 11;
     STATEMENT_TYPE_DELETE = 12;
     // CREATE DATABASE — the rewriter does NOT actually execute the DDL on
-    // ClickHouse. It validates the request against general_args (the target
+    // ClickHouse. It validates the request against dynamic_args (the target
     // logical DB must not already be in `database_map`, and any
     // `upstream_physical_database_in_context` must be a known physical),
     // then rewrites the SQL to `SELECT '<original SQL>' AS cdstmt` so the
@@ -162,8 +347,8 @@ enum StatementType {
     // proxy is expected to do the actual database-creation bookkeeping.
     STATEMENT_TYPE_CREATE_DATABASE = 13;
     // SHOW DATABASES — rewritten into a SELECT that returns the logical
-    // databases the caller has access to (from general_args.database_map +
-    // known_physical_databases). Emitted unchanged when no general_args
+    // databases the caller has access to (from dynamic_args.database_map +
+    // known_physical_databases). Emitted unchanged when no dynamic_args
     // option is present.
     STATEMENT_TYPE_SHOW_DATABASES = 14;
 }
@@ -191,30 +376,34 @@ message RewriteSQLResponse {
     // Map of TABLES rewritten by TableNameRewrite, keyed by the original
     // "db.table" (or bare "table" when no db was present), mapping to the
     // post-rewrite "db.table" form. Only entries whose original differs from
-    // the rewritten form appear here; untouched tables are in
-    // `original_accessed_table_names` only.
+    // the rewritten form appear here; untouched tables are listed in
+    // `original_accessed_table_names` instead.
     //
-    // SELECT path: populated from `select_stmt_args` map hits. For
-    // remote_table_map hits, the value is the remote-side "db.table"
-    // (addr/user/password live in `sql_after_rewrite`).
+    // Populated by every table-targeting handler (SELECT plus the
+    // non-SELECT single-target handlers — writes / EXISTS / SHOW CREATE /
+    // RENAME), regardless of which TableNameRewrite mode (static or
+    // dynamic) was active. For RENAME TABLE, every participating logical
+    // table (each `from` and each `to`) gets its own entry.
     //
-    // Non-SELECT path (writes / EXISTS / SHOW CREATE / RENAME): populated
-    // from the dynamic construction driven by `general_args`. Each rewritten
-    // target appears as its own entry. For RENAME TABLE, every participating
-    // logical table (each `from` and each `to`) gets its own entry.
+    // For static-mode `remote_table_map` hits in SELECT, the value is the
+    // remote-side "db.table" — the rest of the `remote(addr, ..., user,
+    // password)` arguments live in `sql_after_rewrite`. (`remote_table_map`
+    // hits in non-SELECT statements are rejected as UnsupportedStatement,
+    // so they never appear here.)
     //
-    // USE and SHOW TABLES are DB-only rewrites and do NOT populate this map;
-    // see `database_rewrites` instead.
+    // USE / SHOW TABLES / SHOW DATABASES are DB-only rewrites and do NOT
+    // populate this map; see `database_rewrites` instead.
     map<string, string> table_rewrites = 10;
 
     // Map of DATABASES rewritten by TableNameRewrite, keyed by the original
-    // logical DB name and mapping to the post-rewrite physical DB name. Only
-    // entries whose original differs from the rewritten form appear here.
+    // logical DB name and mapping to the post-rewrite physical DB name.
+    // Only entries whose original differs from the rewritten form appear
+    // here.
     //
-    // Populated by USE and SHOW TABLES — the two statement kinds whose
-    // rewrite is purely at the database level. Kept separate from
-    // `table_rewrites` so callers can branch on "did the DB change?" vs
-    // "did a table change?" without inspecting key formats.
+    // Populated by the database-level handlers — USE, SHOW TABLES, and
+    // SHOW DATABASES. Kept separate from `table_rewrites` so callers can
+    // branch on "did the DB change?" vs. "did a table change?" without
+    // inspecting key formats.
     map<string, string> database_rewrites = 11;
 }
 

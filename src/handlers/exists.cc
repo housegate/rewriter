@@ -47,24 +47,50 @@ ExistsDispatchResult handleExistsQuery(DB::ASTPtr ast,
   const std::string origin_db = q->getDatabase();
   const std::string origin_table = q->getTable();
 
-  const auto *general = findGeneralArgs(request->options());
-  if (!general) {
-    // No rewrite config → passthrough.
+  const auto sel = findActiveTableRewrite(request->options());
+  switch (sel.mode) {
+  case TableRewriteMode::None:
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_EXISTS_TABLE);
     return ExistsDispatchResult::Handled;
+  case TableRewriteMode::Dynamic: {
+    const auto outcome = applyDynamicRewrite(
+      origin_db, origin_table, *sel.dynamic_args, "EXISTS TABLE");
+    if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
+      rejectExists(response, rewriter::RewriteCode::InvalidRewriteRequest,
+                   outcome.reject_reason);
+      return ExistsDispatchResult::Handled;
+    }
+    q->setDatabase(outcome.physical_db);
+    q->setTable(outcome.new_table);
+    recordTableRewrite(response, origin_db, origin_table,
+                       outcome.physical_db, outcome.new_table);
+    break;
   }
-
-  const auto outcome = applyDynamicRewrite(origin_db, origin_table, *general, "EXISTS TABLE");
-  if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
-    rejectExists(response, rewriter::RewriteCode::InvalidRewriteRequest, outcome.reject_reason);
-    return ExistsDispatchResult::Handled;
+  case TableRewriteMode::Static: {
+    const auto lookup = lookupStaticTableRewrite(
+      origin_db, origin_table, *sel.static_args);
+    switch (lookup.status) {
+    case StaticLookupOutcome::Status::NotMatched:
+      // Static-mode passthrough: target wasn't in any map. Emit unchanged.
+      break;
+    case StaticLookupOutcome::Status::RemoteUnsupported:
+      rejectExists(response, rewriter::RewriteCode::UnsupportedStatement,
+        "EXISTS TABLE target maps to remote_table_map; remote() can only "
+        "appear as a SELECT-side table function");
+      return ExistsDispatchResult::Handled;
+    case StaticLookupOutcome::Status::Matched: {
+      const std::string effective_new_db =
+        lookup.new_db.empty() ? origin_db : lookup.new_db;
+      if (!lookup.new_db.empty()) q->setDatabase(lookup.new_db);
+      q->setTable(lookup.new_table);
+      recordTableRewrite(response, origin_db, origin_table,
+                         effective_new_db, lookup.new_table);
+      break;
+    }
+    }
+    break;
   }
-
-  // OK: rewrite the AST's db + table slots.
-  q->setDatabase(outcome.physical_db);
-  q->setTable(outcome.new_table);
-  recordTableRewrite(response, origin_db, origin_table,
-                     outcome.physical_db, outcome.new_table);
+  }
 
   setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_EXISTS_TABLE);
   return ExistsDispatchResult::Handled;

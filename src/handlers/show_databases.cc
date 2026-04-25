@@ -50,8 +50,8 @@ bool handleShowDatabasesQuery(DB::ASTPtr ast,
   if (!show_query) return false;
   if (!show_query->databases) return false;
 
-  const auto *general = findGeneralArgs(request->options());
-  if (!general) {
+  const auto *dynamic = findDynamicArgs(request->options());
+  if (!dynamic) {
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_DATABASES);
     return true;
   }
@@ -60,8 +60,8 @@ bool handleShowDatabasesQuery(DB::ASTPtr ast,
   // iteration order is unspecified; stable SQL output is cheap and helps
   // tests / log diffing.
   std::vector<std::pair<std::string, std::string>> entries;
-  entries.reserve(general->database_map().size());
-  for (const auto &kv : general->database_map()) {
+  entries.reserve(dynamic->database_map().size());
+  for (const auto &kv : dynamic->database_map()) {
     entries.emplace_back(kv.first, kv.second);
   }
   std::sort(entries.begin(), entries.end(),
@@ -70,16 +70,16 @@ bool handleShowDatabasesQuery(DB::ASTPtr ast,
   std::vector<std::string> subqueries;
   subqueries.reserve(entries.size() + 1);
   for (const auto &[logical, physical] : entries) {
-    const std::string prefix = buildDynamicTablePrefix(logical, *general);
+    const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
     subqueries.push_back(buildDatabaseMapSubquery(logical, physical, prefix));
     recordDatabaseRewrite(response, logical, physical);
   }
 
   // known_physical_databases -> single SELECT against system.databases
   // filtered by IN list. Sort the names so the emitted SQL is stable.
-  if (general->known_physical_databases_size() > 0) {
-    std::vector<std::string> phys(general->known_physical_databases().begin(),
-                                  general->known_physical_databases().end());
+  if (dynamic->known_physical_databases_size() > 0) {
+    std::vector<std::string> phys(dynamic->known_physical_databases().begin(),
+                                  dynamic->known_physical_databases().end());
     std::sort(phys.begin(), phys.end());
 
     std::string in_list;

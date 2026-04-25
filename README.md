@@ -15,9 +15,9 @@ callers can branch on "did a DB change?" vs "did a table change?" without
 parsing key formats.
 
 `TableNameRewrite` carries two modes:
-- **SELECT** uses `select_stmt_args` — three maps (`table_map`,
+- **SELECT** uses `static_args` — three maps (`table_map`,
   `remote_table_map`, `table_with_database_map`) the caller populates directly.
-- **Non-SELECT** uses `general_args` — dynamic construction from
+- **Non-SELECT** uses `dynamic_args` — dynamic construction from
   `database_map` (logical → physical), `known_physical_databases`,
   `upstream_logical_database_in_context` (last `USE`), `delim` (default `_`),
   and `extra_arguments`. Final target =
@@ -83,19 +83,19 @@ After a successful build:
 # Health check.
 curl -s http://localhost:50052/healthz
 
-# Rewrite a SELECT — three-map policy under `select_stmt_args`.
+# Rewrite a SELECT — three-map policy under `static_args`.
 curl -s -XPOST http://localhost:50052/rewrite \
   -H 'Content-Type: application/json' \
   -d '{
     "sql": "SELECT * FROM events",
     "options": [
       {"op": "TableNameRewrite",
-       "table_name_args": {"select_stmt_args": {"table_map": {"events": "events_v2"}}}},
+       "table_name_args": {"static_args": {"table_map": {"events": "events_v2"}}}},
       {"op": "LimitRewrite", "limit_args": {"force_limit": 100}}
     ]
   }'
 
-# Rewrite a write — dynamic construction under `general_args`.
+# Rewrite a write — dynamic construction under `dynamic_args`.
 # Final target = `<physical>`.`<logical>_<original>` (delim defaults to "_").
 curl -s -XPOST http://localhost:50052/rewrite \
   -H 'Content-Type: application/json' \
@@ -103,7 +103,7 @@ curl -s -XPOST http://localhost:50052/rewrite \
     "sql": "INSERT INTO events VALUES (1)",
     "options": [
       {"op": "TableNameRewrite",
-       "table_name_args": {"general_args": {
+       "table_name_args": {"dynamic_args": {
          "database_map": {"tenant1": "testnet"},
          "upstream_logical_database_in_context": "tenant1"}}}
     ]

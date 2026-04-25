@@ -14,29 +14,89 @@ inline std::string qualify(const std::string &db, const std::string &table) {
   return db + "." + table;
 }
 
-inline std::string resolvedDelim(const rewriter::RewriteTableForDynamicArgs &args) {
+inline std::string resolvedDelim(const rewriter::RewriteTableDynamicArgs &args) {
   return args.delim().empty() ? "_" : args.delim();
 }
 
 } // namespace
 
-const rewriter::RewriteTableForDynamicArgs* findGeneralArgs(
+const rewriter::RewriteTableDynamicArgs* findDynamicArgs(
   const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
-  const rewriter::RewriteTableForDynamicArgs *out = nullptr;
+  const rewriter::RewriteTableDynamicArgs *out = nullptr;
   for (const auto &option : options) {
     if (option.op() != rewriter::RewriteOp::TableNameRewrite) continue;
     if (!option.has_table_name_args()) continue;
-    if (!option.table_name_args().has_general_args()) continue;
+    if (!option.table_name_args().has_dynamic_args()) continue;
     // Last-wins: keep scanning so later options override earlier ones,
     // matching the chained semantics the SELECT path already has.
-    out = &option.table_name_args().general_args();
+    out = &option.table_name_args().dynamic_args();
   }
+  return out;
+}
+
+TableRewriteSelection findActiveTableRewrite(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
+  TableRewriteSelection out;
+  for (const auto &option : options) {
+    if (option.op() != rewriter::RewriteOp::TableNameRewrite) continue;
+    if (!option.has_table_name_args()) continue;
+    const auto &args = option.table_name_args();
+    // Per-option: presence of `static_args` alone selects static-mode —
+    // an empty static_args is an explicit "static-only, no rewrite"
+    // intent, NOT a fallthrough to dynamic. Only when `static_args` is
+    // absent do we fall back to `dynamic_args`. Options that contribute
+    // neither sub-message don't override a prior selection (consistent
+    // with findDynamicArgs).
+    if (args.has_static_args()) {
+      out.mode = TableRewriteMode::Static;
+      out.static_args = &args.static_args();
+      out.dynamic_args = nullptr;
+    } else if (args.has_dynamic_args()) {
+      out.mode = TableRewriteMode::Dynamic;
+      out.static_args = nullptr;
+      out.dynamic_args = &args.dynamic_args();
+    }
+  }
+  return out;
+}
+
+StaticLookupOutcome lookupStaticTableRewrite(
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const rewriter::RewriteTableStaticArgs &args) {
+  StaticLookupOutcome out;
+  // Lookup key matches ASTReplaceTransformer's keying for the SELECT path —
+  // either bare "table" or qualified "db.table". Callers that key their
+  // maps the other way will land in NotMatched.
+  const std::string key = origin_db.empty()
+    ? origin_table
+    : origin_db + "." + origin_table;
+
+  // Precedence: table_map -> remote_table_map -> table_with_database_map.
+  if (auto it = args.table_map().find(key); it != args.table_map().end()) {
+    out.status = StaticLookupOutcome::Status::Matched;
+    out.new_db = origin_db;  // table_map only renames; db unchanged.
+    out.new_table = it->second;
+    return out;
+  }
+  if (args.remote_table_map().count(key) > 0) {
+    out.status = StaticLookupOutcome::Status::RemoteUnsupported;
+    return out;
+  }
+  if (auto it = args.table_with_database_map().find(key);
+      it != args.table_with_database_map().end()) {
+    out.status = StaticLookupOutcome::Status::Matched;
+    out.new_db = it->second.database();
+    out.new_table = it->second.table();
+    return out;
+  }
+  out.status = StaticLookupOutcome::Status::NotMatched;
   return out;
 }
 
 std::optional<std::string> resolvePhysicalDatabase(
   const std::string &logical_db,
-  const rewriter::RewriteTableForDynamicArgs &args) {
+  const rewriter::RewriteTableDynamicArgs &args) {
   if (logical_db.empty()) return std::nullopt;
   // 1) database_map: virtual/logical -> physical.
   if (auto it = args.database_map().find(logical_db); it != args.database_map().end()) {
@@ -52,7 +112,7 @@ std::optional<std::string> resolvePhysicalDatabase(
 std::string buildDynamicTableName(
   const std::string &logical_db,
   const std::string &original_table,
-  const rewriter::RewriteTableForDynamicArgs &args) {
+  const rewriter::RewriteTableDynamicArgs &args) {
   const std::string delim = resolvedDelim(args);
   std::string out = logical_db;
   out += delim;
@@ -74,7 +134,7 @@ std::string buildDynamicTableName(
 
 std::string buildDynamicTablePrefix(
   const std::string &logical_db,
-  const rewriter::RewriteTableForDynamicArgs &args) {
+  const rewriter::RewriteTableDynamicArgs &args) {
   // Prefix is everything buildDynamicTableName produces up to (but not
   // including) `original_table`. Equivalent to calling the builder with
   // an empty `original_table`.
@@ -84,7 +144,7 @@ std::string buildDynamicTablePrefix(
 DynamicRewriteOutcome applyDynamicRewrite(
   const std::string &origin_db,
   const std::string &origin_table,
-  const rewriter::RewriteTableForDynamicArgs &args,
+  const rewriter::RewriteTableDynamicArgs &args,
   std::string_view stmt_kind) {
   DynamicRewriteOutcome outcome;
 

@@ -29,14 +29,14 @@ bool handleUseQuery(DB::ASTPtr ast,
 
   const std::string origin_db = use_query->getDatabase();
 
-  const auto *general = findGeneralArgs(request->options());
-  if (!general) {
-    // No TableNameRewrite / general_args in the request → passthrough.
+  const auto *dynamic = findDynamicArgs(request->options());
+  if (!dynamic) {
+    // No TableNameRewrite / dynamic_args in the request → passthrough.
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
     return true;
   }
 
-  auto physical = resolvePhysicalDatabase(origin_db, *general);
+  auto physical = resolvePhysicalDatabase(origin_db, *dynamic);
   if (!physical) {
     rejectInvalid(response,
       "USE target '" + origin_db

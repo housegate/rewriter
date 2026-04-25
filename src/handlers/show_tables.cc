@@ -37,8 +37,8 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
     return true;
   }
 
-  const auto *general = findGeneralArgs(request->options());
-  if (!general) {
+  const auto *dynamic = findDynamicArgs(request->options());
+  if (!dynamic) {
     // No rewrite config → passthrough.
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
     return true;
@@ -54,7 +54,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
 
   // SQL qualifier wins over upstream context, same as applyDynamicRewrite.
   const std::string logical = from_logical.empty()
-    ? general->upstream_logical_database_in_context()
+    ? dynamic->upstream_logical_database_in_context()
     : from_logical;
 
   if (logical.empty()) {
@@ -65,7 +65,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
     return true;
   }
 
-  auto physical = resolvePhysicalDatabase(logical, *general);
+  auto physical = resolvePhysicalDatabase(logical, *dynamic);
   if (!physical) {
     rejectInvalid(response,
       "SHOW TABLES target logical database '" + logical
@@ -74,7 +74,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
     return true;
   }
 
-  const std::string prefix = buildDynamicTablePrefix(logical, *general);
+  const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
   const std::string esc_prefix   = escapeSqlLiteral(prefix);
   const std::string esc_physical = escapeSqlLiteral(*physical);
 

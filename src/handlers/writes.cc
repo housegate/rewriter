@@ -47,31 +47,86 @@ void acceptWrite(const DB::ASTPtr &ast,
   setSuccessResponse(response, formatAst(ast), stmt_type);
 }
 
-// Run applyDynamicRewrite on (origin_db, origin_table) using `general` (may
-// be null, meaning "no rewrite requested"). On OK: updates (*cur_db,
-// *cur_table) via setDb/setTable callbacks and records the rewrite on
-// response.table_rewrites. Returns false on reject — response was populated
-// and the caller must return Rejected.
+// Static-mode lookup result helper: dispatches the three possible static
+// outcomes, populating `response` for the rejection cases. On Matched,
+// invokes setDb only when the lookup gave a non-empty new_db (matching the
+// SELECT path's behavior of preserving the original db when the map entry
+// only renames the table). Returns the effective new_db (origin_db when
+// the matched entry didn't supply one) so the caller can record the
+// rewrite. `applied` tells the caller whether the AST was actually
+// mutated (vs. NotMatched passthrough).
 template <typename SetDb, typename SetTable>
-bool rewriteOneTarget(
+bool applyStaticLookup(
   rewriter::RewriteSQLResponse *response,
-  const rewriter::RewriteTableForDynamicArgs *general,
+  const StaticLookupOutcome &lookup,
   const std::string &origin_db,
   const std::string &origin_table,
   std::string_view stmt_kind,
   SetDb set_db,
   SetTable set_table) {
-  if (!general) return true;  // No rewrite requested; caller echoes the AST.
-
-  const auto outcome = applyDynamicRewrite(origin_db, origin_table, *general, stmt_kind);
-  if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
-    rejectInvalidRequest(response, outcome.reject_reason);
+  switch (lookup.status) {
+  case StaticLookupOutcome::Status::NotMatched:
+    // Statement-level rule: once static-mode is selected, unmatched
+    // targets pass through (no per-target fallback to dynamic).
+    return true;
+  case StaticLookupOutcome::Status::RemoteUnsupported:
+    rejectUnsupported(response,
+      std::string(stmt_kind)
+        + " target maps to remote_table_map; remote() can only appear as a "
+          "SELECT-side table function");
     return false;
+  case StaticLookupOutcome::Status::Matched: {
+    const std::string effective_new_db =
+      lookup.new_db.empty() ? origin_db : lookup.new_db;
+    if (!lookup.new_db.empty()) set_db(lookup.new_db);
+    set_table(lookup.new_table);
+    recordTableRewrite(response, origin_db, origin_table,
+                       effective_new_db, lookup.new_table);
+    return true;
   }
-  set_db(outcome.physical_db);
-  set_table(outcome.new_table);
-  recordTableRewrite(response, origin_db, origin_table,
-                     outcome.physical_db, outcome.new_table);
+  }
+  return true;
+}
+
+// Apply the unified TableNameRewrite policy to one (origin_db, origin_table)
+// target, dispatching on the active mode. Returns false (and populates
+// `response`) on rejection — the caller must short-circuit Rejected.
+//
+// Mode::None       -> no-op (caller echoes the original AST).
+// Mode::Static     -> three-map lookup; see applyStaticLookup.
+// Mode::Dynamic    -> existing applyDynamicRewrite (rejects InvalidRequest).
+template <typename SetDb, typename SetTable>
+bool rewriteOneTarget(
+  rewriter::RewriteSQLResponse *response,
+  const TableRewriteSelection &sel,
+  const std::string &origin_db,
+  const std::string &origin_table,
+  std::string_view stmt_kind,
+  SetDb set_db,
+  SetTable set_table) {
+  switch (sel.mode) {
+  case TableRewriteMode::None:
+    return true;
+  case TableRewriteMode::Dynamic: {
+    const auto outcome =
+      applyDynamicRewrite(origin_db, origin_table, *sel.dynamic_args, stmt_kind);
+    if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
+      rejectInvalidRequest(response, outcome.reject_reason);
+      return false;
+    }
+    set_db(outcome.physical_db);
+    set_table(outcome.new_table);
+    recordTableRewrite(response, origin_db, origin_table,
+                       outcome.physical_db, outcome.new_table);
+    return true;
+  }
+  case TableRewriteMode::Static: {
+    const auto lookup =
+      lookupStaticTableRewrite(origin_db, origin_table, *sel.static_args);
+    return applyStaticLookup(response, lookup, origin_db, origin_table,
+                             stmt_kind, set_db, set_table);
+  }
+  }
   return true;
 }
 
@@ -90,27 +145,20 @@ bool alterHasCrossTableRef(const DB::ASTAlterQuery &alter_query) {
 }
 
 // Rewrite one side of a RENAME element. Returns false on reject (response
-// already populated). Mutates side.database / side.table in place to the
-// resolved physical name + dynamically-built table name.
+// already populated). Mutates side.database / side.table in place per the
+// active TableNameRewrite mode.
 bool rewriteRenameSide(
   rewriter::RewriteSQLResponse *response,
-  const rewriter::RewriteTableForDynamicArgs *general,
+  const TableRewriteSelection &sel,
   DB::ASTRenameQuery::Table &side,
   std::string_view stmt_kind) {
-  if (!general) return true;  // passthrough
   const std::string origin_db = side.getDatabase();
   const std::string origin_table = side.getTable();
 
-  const auto outcome = applyDynamicRewrite(origin_db, origin_table, *general, stmt_kind);
-  if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
-    rejectInvalidRequest(response, outcome.reject_reason);
-    return false;
-  }
-  side.database = std::make_shared<DB::ASTIdentifier>(outcome.physical_db);
-  side.table    = std::make_shared<DB::ASTIdentifier>(outcome.new_table);
-  recordTableRewrite(response, origin_db, origin_table,
-                     outcome.physical_db, outcome.new_table);
-  return true;
+  return rewriteOneTarget(
+    response, sel, origin_db, origin_table, stmt_kind,
+    [&](const std::string &s){ side.database = std::make_shared<DB::ASTIdentifier>(s); },
+    [&](const std::string &s){ side.table    = std::make_shared<DB::ASTIdentifier>(s); });
 }
 
 } // namespace
@@ -118,7 +166,14 @@ bool rewriteRenameSide(
 WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
                                      const rewriter::RewriteSQLRequest *request,
                                      rewriter::RewriteSQLResponse *response) {
-  const auto *general = findGeneralArgs(request->options());
+  // Table-targeting handlers (CREATE/DROP/ALTER/INSERT/UPDATE/DELETE/RENAME)
+  // pick mode via the unified static→dynamic precedence.
+  const auto sel = findActiveTableRewrite(request->options());
+  // CREATE DATABASE is database-level — static_args has no semantic meaning
+  // there, so it goes through findDynamicArgs directly. Multiple table-level
+  // requests in the same call wouldn't expect static_args to suppress the
+  // db-level dynamic_args validation.
+  const auto *dynamic = findDynamicArgs(request->options());
 
   if (auto *create_query = ast->as<DB::ASTCreateQuery>()) {
     if (create_query->is_ordinary_view || create_query->is_materialized_view
@@ -138,14 +193,14 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       // and rewrite to a debug SELECT so the user's intent lands in
       // ClickHouse query_log.
       //
-      // Without a TableNameRewrite/general_args option in the request we
+      // Without a TableNameRewrite/dynamic_args option in the request we
       // can't validate anything and don't have the policy context we'd
       // need to construct the debug rewrite — fall back to the previous
       // behavior of UnsupportedStatement so callers can't accidentally
       // ship the DDL to the physical DB.
-      if (!general) {
+      if (!dynamic) {
         rejectUnsupported(response,
-          "CREATE DATABASE requires a TableNameRewrite/general_args option to validate against");
+          "CREATE DATABASE requires a TableNameRewrite/dynamic_args option to validate against");
         return WriteDispatchResult::Rejected;
       }
 
@@ -155,8 +210,8 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       // (mirrors "database already exists" for the proxy's view of the
       // world). IF NOT EXISTS lets us silently fall through to the debug
       // rewrite, since CH semantics make that case a no-op.
-      const auto db_map_it = general->database_map().find(target_db);
-      if (db_map_it != general->database_map().end() && !create_query->if_not_exists) {
+      const auto db_map_it = dynamic->database_map().find(target_db);
+      if (db_map_it != dynamic->database_map().end() && !create_query->if_not_exists) {
         rejectInvalidRequest(response,
           "CREATE DATABASE target '" + target_db
             + "' already exists (mapped to physical '" + db_map_it->second
@@ -169,10 +224,10 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       // caller hasn't picked a target physical yet — that's fine for the
       // debug rewrite (we don't actually run any DDL). When set, it must
       // be in the known list, otherwise the proxy is sending garbage.
-      if (general->has_upstream_physical_database_in_context()) {
-        const std::string &phys = general->upstream_physical_database_in_context();
+      if (dynamic->has_upstream_physical_database_in_context()) {
+        const std::string &phys = dynamic->upstream_physical_database_in_context();
         bool known = false;
-        for (const auto &p : general->known_physical_databases()) {
+        for (const auto &p : dynamic->known_physical_databases()) {
           if (p == phys) { known = true; break; }
         }
         if (!phys.empty() && !known) {
@@ -201,27 +256,23 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
 
     const std::string origin_db = create_query->getDatabase();
     const std::string origin_table = create_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "CREATE TABLE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "CREATE TABLE",
         [&](const std::string &s){ create_query->setDatabase(s); },
         [&](const std::string &s){ create_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
     }
 
     // CREATE TABLE x AS y — rewrite the AS source the same way. as_database /
-    // as_table are plain Strings; assign directly.
-    if (general && !create_query->as_table.empty()) {
+    // as_table are plain Strings; the lambdas assign through to them.
+    if (sel.mode != TableRewriteMode::None && !create_query->as_table.empty()) {
       const std::string as_origin_db = create_query->as_database;
       const std::string as_origin_table = create_query->as_table;
-      const auto outcome = applyDynamicRewrite(
-        as_origin_db, as_origin_table, *general, "CREATE TABLE AS source");
-      if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
-        rejectInvalidRequest(response, outcome.reject_reason);
+      if (!rewriteOneTarget(response, sel, as_origin_db, as_origin_table,
+          "CREATE TABLE AS source",
+          [&](const std::string &s){ create_query->as_database = s; },
+          [&](const std::string &s){ create_query->as_table    = s; })) {
         return WriteDispatchResult::Rejected;
       }
-      create_query->as_database = outcome.physical_db;
-      create_query->as_table    = outcome.new_table;
-      recordTableRewrite(response, as_origin_db, as_origin_table,
-                         outcome.physical_db, outcome.new_table);
     }
 
     acceptWrite(ast, response, rewriter::STATEMENT_TYPE_CREATE_TABLE);
@@ -252,7 +303,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
 
     const std::string origin_db = drop_query->getDatabase();
     const std::string origin_table = drop_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "DROP TABLE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "DROP TABLE",
         [&](const std::string &s){ drop_query->setDatabase(s); },
         [&](const std::string &s){ drop_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
@@ -275,7 +326,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
 
     const std::string origin_db = alter_query->getDatabase();
     const std::string origin_table = alter_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "ALTER TABLE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "ALTER TABLE",
         [&](const std::string &s){ alter_query->setDatabase(s); },
         [&](const std::string &s){ alter_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
@@ -296,7 +347,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
 
     const std::string origin_db = insert_query->getDatabase();
     const std::string origin_table = insert_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "INSERT",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "INSERT",
         [&](const std::string &s){ insert_query->setDatabase(s); },
         [&](const std::string &s){ insert_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
@@ -308,7 +359,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   if (auto *update_query = ast->as<DB::ASTUpdateQuery>()) {
     const std::string origin_db = update_query->getDatabase();
     const std::string origin_table = update_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "UPDATE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "UPDATE",
         [&](const std::string &s){ update_query->setDatabase(s); },
         [&](const std::string &s){ update_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
@@ -320,7 +371,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   if (auto *delete_query = ast->as<DB::ASTDeleteQuery>()) {
     const std::string origin_db = delete_query->getDatabase();
     const std::string origin_table = delete_query->getTable();
-    if (!rewriteOneTarget(response, general, origin_db, origin_table, "DELETE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "DELETE",
         [&](const std::string &s){ delete_query->setDatabase(s); },
         [&](const std::string &s){ delete_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
@@ -344,10 +395,10 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     // uniquely own the AST here, so const_cast is safe.
     auto &elements = const_cast<DB::ASTRenameQuery::Elements &>(rename_query->getElements());
     for (auto &elem : elements) {
-      if (!rewriteRenameSide(response, general, elem.from, kind)) {
+      if (!rewriteRenameSide(response, sel, elem.from, kind)) {
         return WriteDispatchResult::Rejected;
       }
-      if (!rewriteRenameSide(response, general, elem.to, kind)) {
+      if (!rewriteRenameSide(response, sel, elem.to, kind)) {
         return WriteDispatchResult::Rejected;
       }
     }

@@ -277,7 +277,7 @@ static std::pair<std::string, std::vector<std::string>> RunCTEAndTableRewriteWit
   if (!table_map.empty()) {
     auto *tbl_option = req.add_options();
     tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_select_stmt_args();
+    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_static_args();
     for (const auto &kv : table_map) { (*tbl_args->mutable_table_map())[kv.first] = kv.second; }
   }
 
@@ -322,7 +322,7 @@ static std::string RunCTEAndTableRewrite(const std::string &origin_sql,
   if (!table_map.empty()) {
     auto *tbl_option = req.add_options();
     tbl_option->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_select_stmt_args();
+    auto *tbl_args = tbl_option->mutable_table_name_args()->mutable_static_args();
     for (const auto &kv : table_map) { (*tbl_args->mutable_table_map())[kv.first] = kv.second; }
   }
 
@@ -736,7 +736,7 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
     // prod_subgraph.`8CsFI8hZ_latestView_PoolSnapshot`
     auto *opt = request.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *args = opt->mutable_table_name_args()->mutable_select_stmt_args();
+    auto *args = opt->mutable_table_name_args()->mutable_static_args();
     // "prod_subgraph.`8CsFI8hZ_latestView_PoolSnapshot`";;
 
     auto &item = (*args->mutable_table_with_database_map())["latestView_PoolSnapshot"];
@@ -794,7 +794,7 @@ TEST(ERROR_MESSAGE_REWRITE, ManualCase_UnknownFunctionArgMin) {
     // ORIGINAL logical table -> remote() physical source
     auto *opt = request.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *args = opt->mutable_table_name_args()->mutable_select_stmt_args();
+    auto *args = opt->mutable_table_name_args()->mutable_static_args();
     // Use remote_table_map to specify a structured remote source.
     auto &remote_map = *args->mutable_remote_table_map();
     auto *remote = &remote_map["sui.events"]; // key: original logical table (db.table)
@@ -989,10 +989,10 @@ TEST(QueryPreprocessorTest, StringWithCommas) {
 }
 
 // ============================================================================
-// Shared helper for non-SELECT tests driven by general_args.
+// Shared helper for non-SELECT tests driven by dynamic_args.
 // ============================================================================
 
-struct GeneralArgs {
+struct DynamicArgs {
   std::map<std::string, std::string> database_map;
   std::vector<std::string> known_physical_databases;
   std::string upstream_logical_database_in_context;
@@ -1003,8 +1003,8 @@ struct GeneralArgs {
   std::optional<std::string> upstream_physical_database_in_context;
 };
 
-static void applyGeneralArgs(rewriter::RewriteTableForDynamicArgs *args,
-                             const GeneralArgs &g) {
+static void applyDynamicArgs(rewriter::RewriteTableDynamicArgs *args,
+                             const DynamicArgs &g) {
   for (const auto &kv : g.database_map) {
     (*args->mutable_database_map())[kv.first] = kv.second;
   }
@@ -1021,7 +1021,7 @@ static void applyGeneralArgs(rewriter::RewriteTableForDynamicArgs *args,
   }
 }
 
-struct GeneralProbe {
+struct DynamicProbe {
   rewriter::RewriteCode code;
   rewriter::StatementType statement_type;
   std::string sql_after_rewrite;
@@ -1030,21 +1030,21 @@ struct GeneralProbe {
   std::map<std::string, std::string> database_rewrites;
 };
 
-static GeneralProbe RunGeneral(const std::string &sql, const GeneralArgs &g) {
+static DynamicProbe RunDynamic(const std::string &sql, const DynamicArgs &g) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql(sql);
 
   auto *opt = req.add_options();
   opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-  applyGeneralArgs(opt->mutable_table_name_args()->mutable_general_args(), g);
+  applyDynamicArgs(opt->mutable_table_name_args()->mutable_dynamic_args(), g);
 
   rewriter::RewriteSQLResponse resp;
   grpc::ServerContext ctx;
   auto status = service.Rewrite(&ctx, &req, &resp);
   EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
 
-  GeneralProbe p;
+  DynamicProbe p;
   p.code = resp.code();
   p.statement_type = resp.statement_type();
   p.sql_after_rewrite = resp.sql_after_rewrite();
@@ -1072,7 +1072,7 @@ TEST(UseStatement, Passthrough_NoOptions) {
 }
 
 TEST(UseStatement, DatabaseMap_Hit) {
-  auto r = RunGeneral("USE coinbase",
+  auto r = RunDynamic("USE coinbase",
                       {.database_map = {{"coinbase", "sentio_coinbase"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
@@ -1087,7 +1087,7 @@ TEST(UseStatement, DatabaseMap_Hit) {
 TEST(UseStatement, KnownPhysical_Passthrough) {
   // Target is already a known physical DB -> leave SQL unchanged, no
   // rewrite entry on either map.
-  auto r = RunGeneral("USE sentio_coinbase",
+  auto r = RunDynamic("USE sentio_coinbase",
                       {.known_physical_databases = {"sentio_coinbase"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
@@ -1097,13 +1097,13 @@ TEST(UseStatement, KnownPhysical_Passthrough) {
 }
 
 TEST(UseStatement, UnknownDatabase_Rejected) {
-  auto r = RunGeneral("USE mydb",
+  auto r = RunDynamic("USE mydb",
                       {.database_map = {{"other", "sentio_other"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
 TEST(UseStatement, UseWithBackticks) {
-  auto r = RunGeneral("USE `my-db`",
+  auto r = RunDynamic("USE `my-db`",
                       {.database_map = {{"my-db", "sentio_mydb"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("sentio_mydb"), std::string::npos);
@@ -1127,7 +1127,7 @@ TEST(ShowTables, Passthrough_NoOptions) {
 
 TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
   // No FROM clause; logical comes from upstream context. prefix = "coinbase_".
-  auto r = RunGeneral("SHOW TABLES",
+  auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"coinbase", "sentio_coinbase"}},
                        .upstream_logical_database_in_context = "coinbase"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1144,7 +1144,7 @@ TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
 
 TEST(ShowTables, FromClauseOverridesUpstream) {
   // `SHOW TABLES FROM mydb` -> logical = "mydb", not the upstream context.
-  auto r = RunGeneral("SHOW TABLES FROM mydb",
+  auto r = RunDynamic("SHOW TABLES FROM mydb",
                       {.database_map = {{"mydb", "physdb"}, {"coinbase", "sentio_coinbase"}},
                        .upstream_logical_database_in_context = "coinbase"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1154,7 +1154,7 @@ TEST(ShowTables, FromClauseOverridesUpstream) {
 
 TEST(ShowTables, WithExtraArgs_PrefixIncludesThem) {
   // prefix = logical + delim + extras.join(delim) + delim
-  auto r = RunGeneral("SHOW TABLES",
+  auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .extra_arguments = {"v2", "shard0"}});
@@ -1164,7 +1164,7 @@ TEST(ShowTables, WithExtraArgs_PrefixIncludesThem) {
 }
 
 TEST(ShowTables, CustomDelim) {
-  auto r = RunGeneral("SHOW TABLES",
+  auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .delim = "-",
@@ -1176,13 +1176,13 @@ TEST(ShowTables, CustomDelim) {
 
 TEST(ShowTables, NoContext_Rejected) {
   // No FROM clause and no upstream context -> can't pick a logical db.
-  auto r = RunGeneral("SHOW TABLES",
+  auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"coinbase", "sentio_coinbase"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
 TEST(ShowTables, UnknownLogical_Rejected) {
-  auto r = RunGeneral("SHOW TABLES FROM mydb",
+  auto r = RunDynamic("SHOW TABLES FROM mydb",
                       {.database_map = {{"other", "sentio_other"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
@@ -1211,7 +1211,7 @@ TEST(ShowDatabases, Passthrough_NoOptions) {
 TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
   // database_map -> one existence-check subquery per logical, alphabetical
   // by logical name, joined with UNION ALL, wrapped with ORDER BY name.
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant2", "testnet2"}, {"tenant1", "testnet1"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1241,7 +1241,7 @@ TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
 
 TEST(ShowDatabases, DatabaseMap_WithExtraArgs) {
   // extra_arguments thread through buildDynamicTablePrefix.
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
      .extra_arguments = {"v2", "shard0"}});
@@ -1251,7 +1251,7 @@ TEST(ShowDatabases, DatabaseMap_WithExtraArgs) {
 }
 
 TEST(ShowDatabases, DatabaseMap_CustomDelim) {
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
      .delim = "-",
@@ -1265,7 +1265,7 @@ TEST(ShowDatabases, KnownPhysicalOnly) {
   // No database_map; only known_physical_databases. The output is a single
   // subquery against system.databases filtered by the IN clause; nothing
   // lands in database_rewrites because logical == physical.
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES",
     {.known_physical_databases = {"realdb2", "realdb1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1284,7 +1284,7 @@ TEST(ShowDatabases, KnownPhysicalOnly) {
 }
 
 TEST(ShowDatabases, Mixed_DatabaseMapAndKnownPhysical) {
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet1"}},
      .known_physical_databases = {"realdb1"}});
@@ -1300,7 +1300,7 @@ TEST(ShowDatabases, Mixed_DatabaseMapAndKnownPhysical) {
 }
 
 TEST(ShowDatabases, Like_Pattern) {
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES LIKE 'tenant%'",
     {.database_map = {{"tenant1", "testnet1"}, {"sysdb", "physsys"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1309,7 +1309,7 @@ TEST(ShowDatabases, Like_Pattern) {
 }
 
 TEST(ShowDatabases, NotLike_Pattern) {
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES NOT LIKE 'sys%'",
     {.database_map = {{"tenant1", "testnet1"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1318,7 +1318,7 @@ TEST(ShowDatabases, NotLike_Pattern) {
 }
 
 TEST(ShowDatabases, Ilike_Pattern) {
-  auto r = RunGeneral(
+  auto r = RunDynamic(
     "SHOW DATABASES ILIKE 'TENANT%'",
     {.database_map = {{"tenant1", "testnet1"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1326,9 +1326,9 @@ TEST(ShowDatabases, Ilike_Pattern) {
             std::string::npos);
 }
 
-TEST(ShowDatabases, EmptyGeneralArgs_NoEntries) {
-  // general_args is set but both maps are empty -> empty result, no rewrites.
-  auto r = RunGeneral("SHOW DATABASES", {});
+TEST(ShowDatabases, EmptyDynamicArgs_NoEntries) {
+  // dynamic_args is set but both maps are empty -> empty result, no rewrites.
+  auto r = RunDynamic("SHOW DATABASES", {});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_DATABASES);
   // The well-typed empty body sentinel.
@@ -1343,7 +1343,7 @@ TEST(ShowDatabases, ShowDictionaries_StillPassthroughAsShowTables) {
   // Regression: SHOW DICTIONARIES should not be claimed by the new
   // SHOW DATABASES handler — it still passes through with the existing
   // STATEMENT_TYPE_SHOW_TABLES classification.
-  auto r = RunGeneral("SHOW DICTIONARIES",
+  auto r = RunDynamic("SHOW DICTIONARIES",
                       {.database_map = {{"tenant1", "testnet1"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
@@ -1377,7 +1377,7 @@ struct WriteOpResult {
 
 // Run a write statement with NO rewrite options — verifies the classification
 // / rejection path. When the caller wants to exercise the dynamic-rewrite
-// path, use RunGeneral() instead.
+// path, use RunDynamic() instead.
 static WriteOpResult RunWriteOp(const std::string &sql) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
@@ -1430,7 +1430,7 @@ TEST(WriteOp, CreateMaterializedView_Rejected) {
 }
 
 TEST(WriteOp, CreateDatabase_NoOptions_Rejected) {
-  // Without a TableNameRewrite/general_args option we can't validate the
+  // Without a TableNameRewrite/dynamic_args option we can't validate the
   // request, so we fail closed rather than ship the DDL through.
   auto r = RunWriteOp("CREATE DATABASE d");
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
@@ -1583,7 +1583,7 @@ TEST(WriteOp, Optimize_Rejected) {
 // TableNameRewrite — dynamic construction (non-SELECT) coverage
 // ============================================================================
 //
-// The GeneralArgs / GeneralProbe / RunGeneral helpers live above with the
+// The DynamicArgs / DynamicProbe / RunDynamic helpers live above with the
 // USE / SHOW TABLES tests.
 
 // --- INSERT ---
@@ -1591,7 +1591,7 @@ TEST(WriteOp, Optimize_Rejected) {
 TEST(TableRewrite, Insert_QualifiedDB_DynamicConstruction) {
   // `INSERT INTO tenant1.t` — SQL qualifier gives logical, database_map
   // provides physical. No extra_args -> final name = tenant1_t.
-  auto r = RunGeneral("INSERT INTO tenant1.t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO tenant1.t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
@@ -1602,7 +1602,7 @@ TEST(TableRewrite, Insert_QualifiedDB_DynamicConstruction) {
 
 TEST(TableRewrite, Insert_UnqualifiedDB_FromUpstreamContext) {
   // `INSERT INTO t` — no SQL qualifier, upstream context fills in.
-  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1613,7 +1613,7 @@ TEST(TableRewrite, Insert_UnqualifiedDB_FromUpstreamContext) {
 
 TEST(TableRewrite, Insert_WithExtraArgs) {
   // extra_args = ["v2", "shard1"] -> name = tenant1_v2_shard1_t.
-  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .extra_arguments = {"v2", "shard1"}});
@@ -1622,7 +1622,7 @@ TEST(TableRewrite, Insert_WithExtraArgs) {
 }
 
 TEST(TableRewrite, Insert_CustomDelim) {
-  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .delim = "-",
@@ -1633,7 +1633,7 @@ TEST(TableRewrite, Insert_CustomDelim) {
 
 TEST(TableRewrite, Insert_EmptyExtraArgs_NoDoubleDelim) {
   // Empty extra_args must NOT produce "tenant1__t".
-  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1645,7 +1645,7 @@ TEST(TableRewrite, Insert_EmptyExtraArgs_NoDoubleDelim) {
 TEST(TableRewrite, Insert_KnownPhysical_Passthrough) {
   // Logical db is already a known physical -> logical == physical; table
   // name is still prefixed.
-  auto r = RunGeneral("INSERT INTO testnet.t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO testnet.t VALUES (1)",
                       {.known_physical_databases = {"testnet"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("testnet.testnet_t"), std::string::npos)
@@ -1654,7 +1654,7 @@ TEST(TableRewrite, Insert_KnownPhysical_Passthrough) {
 }
 
 TEST(TableRewrite, Insert_UnknownLogical_Rejected) {
-  auto r = RunGeneral("INSERT INTO mystery.t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO mystery.t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
   EXPECT_NE(r.message.find("mystery"), std::string::npos);
@@ -1662,7 +1662,7 @@ TEST(TableRewrite, Insert_UnknownLogical_Rejected) {
 
 TEST(TableRewrite, Insert_NoContext_Rejected) {
   // Unqualified target and no upstream context -> rejected.
-  auto r = RunGeneral("INSERT INTO t VALUES (1)",
+  auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
@@ -1692,7 +1692,7 @@ TEST(TableRewrite, Insert_Passthrough_WhenNoOption) {
 TEST(TableRewrite, Insert_FormatNative) {
   // `INSERT INTO t FORMAT Native` — what clickhouse-go's batch typically
   // sends when columns aren't pre-declared.
-  auto r = RunGeneral("INSERT INTO t FORMAT Native",
+  auto r = RunDynamic("INSERT INTO t FORMAT Native",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1709,7 +1709,7 @@ TEST(TableRewrite, Insert_WithColumnList_FormatNative) {
   // unchanged: the data blocks that follow in the protocol stream are
   // ordered by this list, so reordering or dropping columns would break
   // the binary decode.
-  auto r = RunGeneral("INSERT INTO t (a, b, c) FORMAT Native",
+  auto r = RunDynamic("INSERT INTO t (a, b, c) FORMAT Native",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1725,7 +1725,7 @@ TEST(TableRewrite, Insert_WithColumnList_FormatNative) {
 // --- CREATE TABLE ---
 
 TEST(TableRewrite, CreateTable_Basic) {
-  auto r = RunGeneral("CREATE TABLE t (a Int32) ENGINE=Memory",
+  auto r = RunDynamic("CREATE TABLE t (a Int32) ENGINE=Memory",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1736,7 +1736,7 @@ TEST(TableRewrite, CreateTable_Basic) {
 
 TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
   // CREATE TABLE dst AS src — both sides rewrite using the same context.
-  auto r = RunGeneral("CREATE TABLE dst ENGINE=Memory AS src",
+  auto r = RunDynamic("CREATE TABLE dst ENGINE=Memory AS src",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1754,7 +1754,7 @@ TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
 TEST(TableRewrite, CreateDatabase_NewLogical_Rewritten) {
   // Logical DB not in database_map and no upstream_physical conflict ->
   // accept and emit the debug SELECT.
-  auto r = RunGeneral("CREATE DATABASE my_new_db",
+  auto r = RunDynamic("CREATE DATABASE my_new_db",
                       {.known_physical_databases = {"testnet1"},
                        .upstream_physical_database_in_context = "testnet1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1769,7 +1769,7 @@ TEST(TableRewrite, CreateDatabase_NewLogical_Rewritten) {
 
 TEST(TableRewrite, CreateDatabase_AlreadyMapped_Rejected) {
   // Target logical DB is already in database_map -> "already exists".
-  auto r = RunGeneral("CREATE DATABASE tenant1",
+  auto r = RunDynamic("CREATE DATABASE tenant1",
                       {.database_map = {{"tenant1", "testnet1"}},
                        .known_physical_databases = {"testnet1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
@@ -1780,7 +1780,7 @@ TEST(TableRewrite, CreateDatabase_AlreadyMapped_IfNotExists_Accepted) {
   // IF NOT EXISTS suppresses the "already exists" error and lets us emit
   // the debug SELECT — matches CH semantics where the IF NOT EXISTS form
   // silently no-ops when the DB exists.
-  auto r = RunGeneral("CREATE DATABASE IF NOT EXISTS tenant1",
+  auto r = RunDynamic("CREATE DATABASE IF NOT EXISTS tenant1",
                       {.database_map = {{"tenant1", "testnet1"}},
                        .known_physical_databases = {"testnet1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1791,7 +1791,7 @@ TEST(TableRewrite, CreateDatabase_AlreadyMapped_IfNotExists_Accepted) {
 TEST(TableRewrite, CreateDatabase_UnknownPhysicalContext_Rejected) {
   // upstream_physical_database_in_context set to a value that's NOT in
   // known_physical_databases -> the proxy is sending garbage; reject.
-  auto r = RunGeneral("CREATE DATABASE my_new_db",
+  auto r = RunDynamic("CREATE DATABASE my_new_db",
                       {.known_physical_databases = {"testnet1"},
                        .upstream_physical_database_in_context = "ghost_physical"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
@@ -1801,7 +1801,7 @@ TEST(TableRewrite, CreateDatabase_UnknownPhysicalContext_Rejected) {
 TEST(TableRewrite, CreateDatabase_NoUpstreamPhysical_Accepted) {
   // upstream_physical_database_in_context unset is fine — we don't run
   // any DDL, the proxy just hasn't routed yet.
-  auto r = RunGeneral("CREATE DATABASE my_new_db", {});
+  auto r = RunDynamic("CREATE DATABASE my_new_db", {});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_DATABASE);
 }
@@ -1809,7 +1809,7 @@ TEST(TableRewrite, CreateDatabase_NoUpstreamPhysical_Accepted) {
 TEST(TableRewrite, CreateDatabase_LiteralEscaping) {
   // A SQL with single quotes round-trips into the debug SELECT with the
   // quotes doubled (CH single-quoted-literal escape).
-  auto r = RunGeneral("CREATE DATABASE `weird'name`", {});
+  auto r = RunDynamic("CREATE DATABASE `weird'name`", {});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   // The single quote inside the original identifier should appear as ''
   // inside the SELECT literal; bare ' would mean we forgot to escape.
@@ -1820,7 +1820,7 @@ TEST(TableRewrite, CreateDatabase_LiteralEscaping) {
 // --- DROP / ALTER / UPDATE / DELETE ---
 
 TEST(TableRewrite, DropTable_Basic) {
-  auto r = RunGeneral("DROP TABLE t",
+  auto r = RunDynamic("DROP TABLE t",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1830,7 +1830,7 @@ TEST(TableRewrite, DropTable_Basic) {
 }
 
 TEST(TableRewrite, AlterTable_Basic) {
-  auto r = RunGeneral("ALTER TABLE t ADD COLUMN c Int32",
+  auto r = RunDynamic("ALTER TABLE t ADD COLUMN c Int32",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1839,7 +1839,7 @@ TEST(TableRewrite, AlterTable_Basic) {
 }
 
 TEST(TableRewrite, Update_Basic) {
-  auto r = RunGeneral("UPDATE t SET a = 1 WHERE id = 0",
+  auto r = RunDynamic("UPDATE t SET a = 1 WHERE id = 0",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1848,7 +1848,7 @@ TEST(TableRewrite, Update_Basic) {
 }
 
 TEST(TableRewrite, Delete_Basic) {
-  auto r = RunGeneral("DELETE FROM t WHERE id = 0",
+  auto r = RunDynamic("DELETE FROM t WHERE id = 0",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1859,7 +1859,7 @@ TEST(TableRewrite, Delete_Basic) {
 // --- RENAME ---
 
 TEST(TableRewrite, Rename_BothSidesRewritten) {
-  auto r = RunGeneral("RENAME TABLE a TO b",
+  auto r = RunDynamic("RENAME TABLE a TO b",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1869,7 +1869,7 @@ TEST(TableRewrite, Rename_BothSidesRewritten) {
 }
 
 TEST(TableRewrite, Rename_MultiplePairs) {
-  auto r = RunGeneral("RENAME TABLE a TO b, c TO d",
+  auto r = RunDynamic("RENAME TABLE a TO b, c TO d",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1882,7 +1882,7 @@ TEST(TableRewrite, Rename_MultiplePairs) {
 
 TEST(TableRewrite, Rename_QualifiedSidesUseTheirOwnLogical) {
   // Each side can carry its own qualified logical DB.
-  auto r = RunGeneral("RENAME TABLE t1.a TO t2.b",
+  auto r = RunDynamic("RENAME TABLE t1.a TO t2.b",
                       {.database_map = {{"t1", "phys1"}, {"t2", "phys2"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.table_rewrites["t1.a"], "phys1.t1_a");
@@ -1892,7 +1892,7 @@ TEST(TableRewrite, Rename_QualifiedSidesUseTheirOwnLogical) {
 // --- EXISTS TABLE ---
 
 TEST(TableRewrite, ExistsTable_Basic) {
-  auto r = RunGeneral("EXISTS TABLE t",
+  auto r = RunDynamic("EXISTS TABLE t",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1902,20 +1902,20 @@ TEST(TableRewrite, ExistsTable_Basic) {
 }
 
 TEST(TableRewrite, ExistsTable_UnknownLogical_Rejected) {
-  auto r = RunGeneral("EXISTS TABLE mystery.t",
+  auto r = RunDynamic("EXISTS TABLE mystery.t",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
 TEST(TableRewrite, ExistsDatabase_Unsupported) {
-  auto r = RunGeneral("EXISTS DATABASE d", {});
+  auto r = RunDynamic("EXISTS DATABASE d", {});
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
 // --- SHOW CREATE TABLE ---
 
 TEST(TableRewrite, ShowCreateTable_Basic) {
-  auto r = RunGeneral("SHOW CREATE TABLE t",
+  auto r = RunDynamic("SHOW CREATE TABLE t",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1924,12 +1924,12 @@ TEST(TableRewrite, ShowCreateTable_Basic) {
 }
 
 TEST(TableRewrite, ShowCreateDatabase_Unsupported) {
-  auto r = RunGeneral("SHOW CREATE DATABASE d", {});
+  auto r = RunDynamic("SHOW CREATE DATABASE d", {});
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
 // ============================================================================
-// SELECT path still uses select_stmt_args maps (table_map / remote_table_map
+// SELECT path still uses static_args maps (table_map / remote_table_map
 // / table_with_database_map). Cover the basics to prove the split works.
 // ============================================================================
 
@@ -1941,14 +1941,14 @@ struct SelectMaps {
   std::map<std::string, std::pair<std::string, std::string>> with_db_map;  // key -> {db, table}
 };
 
-GeneralProbe RunSelect(const std::string &sql, const SelectMaps &maps) {
+DynamicProbe RunSelect(const std::string &sql, const SelectMaps &maps) {
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql(sql);
 
   auto *opt = req.add_options();
   opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-  auto *sel = opt->mutable_table_name_args()->mutable_select_stmt_args();
+  auto *sel = opt->mutable_table_name_args()->mutable_static_args();
   for (const auto &kv : maps.table_map) {
     (*sel->mutable_table_map())[kv.first] = kv.second;
   }
@@ -1974,7 +1974,7 @@ GeneralProbe RunSelect(const std::string &sql, const SelectMaps &maps) {
   auto status = service.Rewrite(&ctx, &req, &resp);
   EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
 
-  GeneralProbe p;
+  DynamicProbe p;
   p.code = resp.code();
   p.statement_type = resp.statement_type();
   p.sql_after_rewrite = resp.sql_after_rewrite();

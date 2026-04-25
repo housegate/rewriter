@@ -1,7 +1,7 @@
 // src/handlers/use.h
 //
-// USE <db> rewrite. Consumes `general_args.database_map` +
-// `general_args.known_physical_databases` from the TableNameRewrite option:
+// USE <db> rewrite. Consumes `dynamic_args.database_map` +
+// `dynamic_args.known_physical_databases` from the TableNameRewrite option:
 //   * `database_map` hit         -> "USE <physical>" + table_rewrites entry
 //                                   for the origin logical DB
 //   * known physical DB          -> leave SQL unchanged (logical == physical)

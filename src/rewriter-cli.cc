@@ -194,7 +194,7 @@ void applyShortcutFlags(const Args &args, rewriter::RewriteSQLRequest &req) {
   if (!args.rename_tables.empty()) {
     auto *opt = req.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    auto *m = opt->mutable_table_name_args()->mutable_select_stmt_args()->mutable_table_map();
+    auto *m = opt->mutable_table_name_args()->mutable_static_args()->mutable_table_map();
     for (const auto &[k, v] : args.rename_tables) (*m)[k] = v;
   }
   if (!args.settings.empty()) {

@@ -5,9 +5,9 @@
 //
 // Resolution:
 //   logical := FROM/IN-clause (stripped to its leading name component)
-//              OR general_args.upstream_logical_database_in_context
-//   physical := general_args.database_map[logical] OR logical itself if
-//              it's in general_args.known_physical_databases
+//              OR dynamic_args.upstream_logical_database_in_context
+//   physical := dynamic_args.database_map[logical] OR logical itself if
+//              it's in dynamic_args.known_physical_databases
 //   prefix := logical + delim + (extra_args joined by delim + delim iff
 //                                extra_args is non-empty)
 //

@@ -2,13 +2,16 @@
 #include "handlers/select.h"
 
 #include <Core/Field.h>
+#include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSetQuery.h>
+#include <Parsers/ASTTablesInSelectQuery.h>
 
 #include <cstdlib>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -16,6 +19,7 @@
 
 #include "ASTTransformers.h"
 #include "handlers/common.h"
+#include "handlers/name_rewrite.h"
 
 namespace rewriter_handlers {
 
@@ -51,6 +55,77 @@ void doTableNameRewrite(
   }
   if (shouldDumpAst()) {
     std::cout << "after table name transformation " << ast->dumpTree() << std::endl;
+  }
+}
+
+void dynamicRewriteWalk(
+  DB::ASTPtr ast,
+  const rewriter::RewriteTableDynamicArgs &args,
+  std::map<std::string, std::string> *out_table_rewrites) {
+  if (!ast) return;
+
+  if (auto *table_expression = ast->as<DB::ASTTableExpression>()) {
+    if (table_expression->database_and_table_name) {
+      auto *identifier = table_expression->database_and_table_name->as<DB::ASTTableIdentifier>();
+      if (identifier) {
+        const std::string origin_full_name = identifier->name();
+        const std::string origin_alias = identifier->tryGetAlias();
+
+        // Split "db.table" → (db, table); bare "table" → ("", table). Matches
+        // the key shape that recordTableRewrite / table_rewrites use.
+        std::string origin_db;
+        std::string origin_table;
+        if (const auto dot = origin_full_name.find('.'); dot != std::string::npos) {
+          origin_db = origin_full_name.substr(0, dot);
+          origin_table = origin_full_name.substr(dot + 1);
+        } else {
+          origin_table = origin_full_name;
+        }
+
+        const auto outcome = applyDynamicRewrite(
+          origin_db, origin_table, args, "SELECT");
+        if (outcome.status == DynamicRewriteStatus::OK) {
+          identifier->resetTable(outcome.physical_db, outcome.new_table);
+          if (!origin_alias.empty()) {
+            identifier->setAlias(origin_alias);
+          } else {
+            identifier->setAlias(origin_full_name);
+          }
+          if (out_table_rewrites) {
+            (*out_table_rewrites)[origin_full_name] = identifier->name();
+          }
+        }
+      }
+    } else if (table_expression->subquery) {
+      for (auto &child : ast->children) {
+        dynamicRewriteWalk(child, args, out_table_rewrites);
+      }
+    }
+    return;
+  }
+
+  for (auto &child : ast->children) {
+    dynamicRewriteWalk(child, args, out_table_rewrites);
+  }
+}
+
+// SELECT-path fallback when the caller set `dynamic_args` but no
+// `static_args`: walk every ASTTableExpression and apply the same
+// dynamic construction the non-SELECT handlers use, via applyDynamicRewrite.
+//
+// Lenient on InvalidRequest — unlike INSERT/CREATE/etc. which target a
+// single table, SELECT may legitimately reference system tables, CTE
+// aliases, or DBs the caller didn't declare in `database_map` /
+// `known_physical_databases`. Silently skipping unresolvable identifiers
+// matches the three-map path's behavior of leaving unmatched names alone;
+// the caller is expected to enforce DB-access policy elsewhere.
+void doDynamicSelectTableRewrite(
+  DB::ASTPtr ast,
+  const rewriter::RewriteTableDynamicArgs &args,
+  std::map<std::string, std::string> *out_table_rewrites) {
+  dynamicRewriteWalk(ast, args, out_table_rewrites);
+  if (shouldDumpAst()) {
+    std::cout << "after dynamic table name transformation " << ast->dumpTree() << std::endl;
   }
 }
 
@@ -175,6 +250,13 @@ DB::ASTPtr applyRewriteOptions(
   std::unordered_map<std::string, DB::RemoteTable> remote_table_map_;
   std::unordered_map<std::string, DB::TableWithDatabase> table_with_database_map_;
   bool has_table_name_written = false;
+  // Last-wins stash for the SELECT-path `dynamic_args` fallback: when a
+  // TableNameRewrite option carries `dynamic_args` but no `static_args`,
+  // we apply the dynamic rewrite directly and remember the args so the
+  // post-CTE re-apply (which mirrors the three-map path's re-apply) covers
+  // any tables introduced by CTE inlining. Mutually exclusive with the
+  // three-map state above — set the one that matches the latest option.
+  std::optional<rewriter::RewriteTableDynamicArgs> last_dynamic_args;
   size_t cte_option_index = 0;
   PendingSelectTransforms pending_select;
   auto flushPendingSelect = [&]() {
@@ -202,49 +284,66 @@ DB::ASTPtr applyRewriteOptions(
       break;
     }
     case rewriter::RewriteOp::TableNameRewrite: {
-      // SELECT-path rewrites live under `select_stmt_args`; `general_args`
-      // is only consumed by the non-SELECT handlers. If this option
-      // carries no select_stmt_args we skip it silently — the caller may
-      // have set only general_args for a write in the same request.
-      if (!option.table_name_args().has_select_stmt_args()) break;
-      const auto &select_args = option.table_name_args().select_stmt_args();
-      // table_name
-      {
-        const auto &table_name_map = select_args.table_map();
+      // Unified static→dynamic precedence (matches the non-SELECT handlers):
+      //   1. Use `static_args` whenever it's set (even with every map
+      //      empty — an explicit "static-only, no rewrite" intent).
+      //   2. Else fall back to `dynamic_args` (lenient walk).
+      //   3. Else skip silently.
+      const auto &args = option.table_name_args();
+      if (args.has_static_args()) {
+        const auto &select_args = args.static_args();
+        // table_name
+        {
+          const auto &table_name_map = select_args.table_map();
+          table_name_map_.clear();
+          table_name_map_.reserve(table_name_map.size());
+          for (auto &kv : table_name_map) { table_name_map_[kv.first] = kv.second; }
+        }
+        // remote_table
+        {
+          const auto &remote_table_map = select_args.remote_table_map();
+          remote_table_map_.clear();
+          remote_table_map_.reserve(remote_table_map.size());
+          for (auto &kv : remote_table_map) {
+            DB::RemoteTable remote_table;
+            remote_table.addr = kv.second.addr();
+            remote_table.database_name = kv.second.database();
+            remote_table.table_name = kv.second.table();
+            remote_table.user_name = kv.second.user();
+            remote_table.password = kv.second.password();
+            remote_table_map_[kv.first] = remote_table;
+          }
+        }
+        // table_with_database
+        {
+          const auto &table_with_database_map = select_args.table_with_database_map();
+          table_with_database_map_.clear();
+          table_with_database_map_.reserve(table_with_database_map.size());
+          for (auto &kv : table_with_database_map) {
+            DB::TableWithDatabase table_with_database;
+            table_with_database.database_name = kv.second.database();
+            table_with_database.table_name = kv.second.table();
+            table_with_database_map_[kv.first] = table_with_database;
+          }
+        }
+        doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_,
+                           out_table_rewrites);
+        has_table_name_written = true;
+        // The two paths are mutually exclusive — drop any stashed dynamic
+        // args from a prior option so the post-CTE re-apply stays on the
+        // three-map branch.
+        last_dynamic_args.reset();
+      } else if (args.has_dynamic_args()) {
+        const auto &dyn_args = args.dynamic_args();
+        doDynamicSelectTableRewrite(ast, dyn_args, out_table_rewrites);
+        last_dynamic_args = dyn_args;
+        // Symmetric reset: clear three-map state so the post-CTE re-apply
+        // doesn't double-apply a stale set of mappings.
         table_name_map_.clear();
-        table_name_map_.reserve(table_name_map.size());
-        for (auto &kv : table_name_map) { table_name_map_[kv.first] = kv.second; }
-      }
-      // remote_table
-      {
-        const auto &remote_table_map = select_args.remote_table_map();
         remote_table_map_.clear();
-        remote_table_map_.reserve(remote_table_map.size());
-        for (auto &kv : remote_table_map) {
-          DB::RemoteTable remote_table;
-          remote_table.addr = kv.second.addr();
-          remote_table.database_name = kv.second.database();
-          remote_table.table_name = kv.second.table();
-          remote_table.user_name = kv.second.user();
-          remote_table.password = kv.second.password();
-          remote_table_map_[kv.first] = remote_table;
-        }
-      }
-      // table_with_database
-      {
-        const auto &table_with_database_map = select_args.table_with_database_map();
         table_with_database_map_.clear();
-        table_with_database_map_.reserve(table_with_database_map.size());
-        for (auto &kv : table_with_database_map) {
-          DB::TableWithDatabase table_with_database;
-          table_with_database.database_name = kv.second.database();
-          table_with_database.table_name = kv.second.table();
-          table_with_database_map_[kv.first] = table_with_database;
-        }
+        has_table_name_written = false;
       }
-      doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_,
-                         out_table_rewrites);
-      has_table_name_written = true;
       break;
     }
     case rewriter::RewriteOp::OffsetRewrite: {
@@ -300,10 +399,16 @@ DB::ASTPtr applyRewriteOptions(
       cte_transformer.setCTEMap(cte_map_);
       cte_transformer.transform(ast);
 
-      // If the table name has been rewritten previously, apply it again after the CTE rewrite.
+      // If a TableNameRewrite was applied earlier in this option chain,
+      // re-apply it now — CTE inlining can introduce new SELECT subqueries
+      // that reference tables which weren't visible to the first pass. The
+      // two TableNameRewrite branches are mutually exclusive (see the
+      // TableNameRewrite case above), so at most one of these fires.
       if (has_table_name_written) {
         doTableNameRewrite(ast, table_name_map_, remote_table_map_, table_with_database_map_,
                            out_table_rewrites);
+      } else if (last_dynamic_args.has_value()) {
+        doDynamicSelectTableRewrite(ast, *last_dynamic_args, out_table_rewrites);
       }
       break;
     }
