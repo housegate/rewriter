@@ -54,7 +54,7 @@ enum class DynamicRewriteStatus {
                       // RewriteCode.UnsupportedStatement.
   InvalidRequest,     // Logical DB can't be resolved (not in database_map,
                       // not in known_physical_databases, and no upstream
-                      // context), or a remote upstream index is missing
+                      // context), or a remote upstream key is missing
                       // from `remote_upstreams`. Caller should return
                       // InvalidRewriteRequest.
   NoRewriteRequested, // Request carries no TableNameRewrite option with

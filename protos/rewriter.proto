@@ -147,8 +147,9 @@ message RewriteTableStaticArgs {
 //                    iff extra_arguments is non-empty)
 //                 + origin_table
 //   IF logical ∈ logical_database_to_remote_upstream_index THEN
-//       upstream := remote_upstreams[ index ]
-//                   (REJECT InvalidRewriteRequest if the index is missing)
+//       key      := logical_database_to_remote_upstream_index[logical]
+//       upstream := remote_upstreams[key]
+//                   (REJECT InvalidRewriteRequest if the key is missing)
 //       SELECT-side: emit
 //           remote(upstream.addr, physical, new_table,
 //                  upstream.user, upstream.password)
@@ -167,8 +168,9 @@ message RewriteTableStaticArgs {
 // Example (delim="_", extra_arguments=["shard0"]):
 //   tenant1.events       -> physical_db_1.tenant1_shard0_events
 //
-// Example (tenant2 is remote — index 0 in
-//          logical_database_to_remote_upstream_index):
+// Example (tenant2 is remote — key "remote_us_east" in
+//          logical_database_to_remote_upstream_index, with
+//          remote_upstreams["remote_us_east"] = {addr, user, password}):
 //   tenant2.events       -> remote('ch-remote:9000', 'physical_db_2',
 //                                  'tenant2_events', 'ro', 'secret')
 //
@@ -211,8 +213,8 @@ message RewriteTableDynamicArgs {
     // physical DB yet, which is fine for the debug-rewrite path.
     optional string upstream_physical_database_in_context = 6;
 
-    // Connection info for a remote ClickHouse cluster. Indexed by the
-    // integer keys that appear as values in
+    // Connection info for a remote ClickHouse cluster. Keyed by the
+    // string identifiers that appear as values in
     // `logical_database_to_remote_upstream_index`. Rendered into the SQL
     // as `remote('addr', <physical>, <new_table>, 'user', 'password')`.
     message RemoteUpstream {
@@ -221,12 +223,17 @@ message RewriteTableDynamicArgs {
         string password = 3; // remote-side password (rendered in the SQL).
     }
 
-    // Logical DB -> index into `remote_upstreams`. When a target's logical
+    // Logical DB -> key into `remote_upstreams`. When a target's logical
     // hits this map, the rewrite emits a `remote(...)` table function
     // wrapping the resolved (physical, new_table) instead of a bare
     // `physical.new_table` identifier. The physical name still comes from
     // `database_map` / `known_physical_databases` — only the wrapping
     // changes.
+    //
+    // The value is a free-form string id (e.g. a cluster name like
+    // "remote_us_east") that's looked up in `remote_upstreams`. Multiple
+    // logical DBs may share the same key when they live on the same
+    // remote cluster.
     //
     // SELECT-only at the table level: any non-SELECT table-targeting
     // statement (writes / EXISTS / SHOW CREATE / RENAME) rejects with
@@ -238,14 +245,14 @@ message RewriteTableDynamicArgs {
     // physical (so a "this logical exists" answer reflects local schema,
     // not the remote cluster — known limitation).
     //
-    // A logical pointing to an index that's not in `remote_upstreams` is
-    // a config bug → InvalidRewriteRequest.
-    map<string, int32> logical_database_to_remote_upstream_index = 7;
+    // A logical pointing to a key that's not in `remote_upstreams` is a
+    // config bug → InvalidRewriteRequest.
+    map<string, string> logical_database_to_remote_upstream_index = 7;
 
-    // Remote upstream index -> connection info. See `RemoteUpstream`
-    // above and `logical_database_to_remote_upstream_index` for the
-    // routing map that picks an entry here.
-    map<int32, RemoteUpstream> remote_upstreams = 8;
+    // Remote upstream key -> connection info. See `RemoteUpstream` above
+    // and `logical_database_to_remote_upstream_index` for the routing
+    // map that picks an entry here.
+    map<string, RemoteUpstream> remote_upstreams = 8;
 }
 
 // Selects which mode (above) applies to this rewrite.

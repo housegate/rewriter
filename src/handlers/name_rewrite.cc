@@ -184,13 +184,13 @@ DynamicRewriteOutcome applyDynamicRewrite(
   // non-SELECT handlers reject OkRemote with UnsupportedStatement.
   if (auto idx_it = args.logical_database_to_remote_upstream_index().find(logical);
       idx_it != args.logical_database_to_remote_upstream_index().end()) {
-    const int32_t upstream_idx = idx_it->second;
-    auto upstream_it = args.remote_upstreams().find(upstream_idx);
+    const std::string &upstream_key = idx_it->second;
+    auto upstream_it = args.remote_upstreams().find(upstream_key);
     if (upstream_it == args.remote_upstreams().end()) {
       std::ostringstream oss;
       oss << stmt_kind << " target's logical database '" << logical
-          << "' is mapped to remote upstream index " << upstream_idx
-          << " but that index is not in remote_upstreams";
+          << "' is mapped to remote upstream key '" << upstream_key
+          << "' but that key is not in remote_upstreams";
       outcome.status = DynamicRewriteStatus::InvalidRequest;
       outcome.reject_reason = oss.str();
       return outcome;
