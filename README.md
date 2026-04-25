@@ -7,9 +7,12 @@ and ships with a standalone CLI for one-off rewrites.
 Covers `SELECT` (with CTE injection, LIMIT/OFFSET/SETTINGS tweaks, table-name
 rewrites — including `remote()` substitution), `USE`, `SHOW TABLES`,
 `SHOW CREATE TABLE`, `EXISTS TABLE`, `CREATE/DROP/ALTER TABLE`, `INSERT`,
-`UPDATE`, `DELETE`, and `RENAME TABLE`. The rewrites that actually fired are
-reported on `response.table_rewrites` (a `map<original, rewritten>`, each side
-formatted as `"db.table"` or bare `"table"`).
+`UPDATE`, `DELETE`, and `RENAME TABLE`. The rewrites that fired are reported
+on two top-level response maps: `table_rewrites` (`"db.table"` keys, populated
+by SELECT / writes / EXISTS / SHOW CREATE / RENAME) and `database_rewrites`
+(bare DB keys, populated by USE / SHOW TABLES). They are kept separate so
+callers can branch on "did a DB change?" vs "did a table change?" without
+parsing key formats.
 
 `TableNameRewrite` carries two modes:
 - **SELECT** uses `select_stmt_args` — three maps (`table_map`,

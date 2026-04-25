@@ -998,6 +998,9 @@ struct GeneralArgs {
   std::string upstream_logical_database_in_context;
   std::string delim;  // "" → server defaults to "_"
   std::vector<std::string> extra_arguments;
+  // std::nullopt → leave the optional field unset (proxy hasn't picked
+  // a physical context yet). Empty string → set to "" (rare but valid).
+  std::optional<std::string> upstream_physical_database_in_context;
 };
 
 static void applyGeneralArgs(rewriter::RewriteTableForDynamicArgs *args,
@@ -1013,6 +1016,9 @@ static void applyGeneralArgs(rewriter::RewriteTableForDynamicArgs *args,
   }
   if (!g.delim.empty()) args->set_delim(g.delim);
   for (const auto &e : g.extra_arguments) args->add_extra_arguments(e);
+  if (g.upstream_physical_database_in_context) {
+    args->set_upstream_physical_database_in_context(*g.upstream_physical_database_in_context);
+  }
 }
 
 struct GeneralProbe {
@@ -1021,6 +1027,7 @@ struct GeneralProbe {
   std::string sql_after_rewrite;
   std::string message;
   std::map<std::string, std::string> table_rewrites;
+  std::map<std::string, std::string> database_rewrites;
 };
 
 static GeneralProbe RunGeneral(const std::string &sql, const GeneralArgs &g) {
@@ -1043,6 +1050,7 @@ static GeneralProbe RunGeneral(const std::string &sql, const GeneralArgs &g) {
   p.sql_after_rewrite = resp.sql_after_rewrite();
   p.message = resp.message();
   for (const auto &kv : resp.table_rewrites()) p.table_rewrites[kv.first] = kv.second;
+  for (const auto &kv : resp.database_rewrites()) p.database_rewrites[kv.first] = kv.second;
   return p;
 }
 
@@ -1069,18 +1077,23 @@ TEST(UseStatement, DatabaseMap_Hit) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
   EXPECT_NE(r.sql_after_rewrite.find("sentio_coinbase"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["coinbase"], "sentio_coinbase");
+  // USE produces a DB-level rewrite. It MUST land in database_rewrites,
+  // never in table_rewrites — the latter is reserved for entries with a
+  // table component.
+  EXPECT_EQ(r.database_rewrites["coinbase"], "sentio_coinbase");
+  EXPECT_TRUE(r.table_rewrites.empty());
 }
 
 TEST(UseStatement, KnownPhysical_Passthrough) {
   // Target is already a known physical DB -> leave SQL unchanged, no
-  // rewrite entry.
+  // rewrite entry on either map.
   auto r = RunGeneral("USE sentio_coinbase",
                       {.known_physical_databases = {"sentio_coinbase"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_USE);
   EXPECT_NE(r.sql_after_rewrite.find("sentio_coinbase"), std::string::npos);
   EXPECT_TRUE(r.table_rewrites.empty());
+  EXPECT_TRUE(r.database_rewrites.empty());
 }
 
 TEST(UseStatement, UnknownDatabase_Rejected) {
@@ -1124,6 +1137,9 @@ TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
   // Prefix = logical + default delim "_" (no extra_args).
   EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'coinbase_')"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("multiIf"), std::string::npos);
+  // DB rewrite goes to database_rewrites, NOT table_rewrites.
+  EXPECT_EQ(r.database_rewrites["coinbase"], "sentio_coinbase");
+  EXPECT_TRUE(r.table_rewrites.empty());
 }
 
 TEST(ShowTables, FromClauseOverridesUpstream) {
@@ -1263,7 +1279,9 @@ TEST(WriteOp, CreateMaterializedView_Rejected) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
-TEST(WriteOp, CreateDatabase_Rejected) {
+TEST(WriteOp, CreateDatabase_NoOptions_Rejected) {
+  // Without a TableNameRewrite/general_args option we can't validate the
+  // request, so we fail closed rather than ship the DDL through.
   auto r = RunWriteOp("CREATE DATABASE d");
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
@@ -1527,6 +1545,79 @@ TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.table_rewrites["dst"], "testnet.tenant1_dst");
   EXPECT_EQ(r.table_rewrites["src"], "testnet.tenant1_src");
+}
+
+// --- CREATE DATABASE ---
+//
+// CREATE DATABASE never actually runs the DDL on the physical CH. The
+// rewriter validates the request and rewrites to a debug SELECT
+// (`SELECT '<original SQL>' AS cdstmt`) so the user's intent lands in
+// query_log. The proxy is responsible for the actual database creation.
+
+TEST(TableRewrite, CreateDatabase_NewLogical_Rewritten) {
+  // Logical DB not in database_map and no upstream_physical conflict ->
+  // accept and emit the debug SELECT.
+  auto r = RunGeneral("CREATE DATABASE my_new_db",
+                      {.known_physical_databases = {"testnet1"},
+                       .upstream_physical_database_in_context = "testnet1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_DATABASE);
+  // SQL is wrapped in SELECT '...' AS cdstmt.
+  EXPECT_NE(r.sql_after_rewrite.find("SELECT '"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("AS cdstmt"), std::string::npos);
+  // Original CREATE DATABASE text is embedded inside the literal.
+  EXPECT_NE(r.sql_after_rewrite.find("CREATE DATABASE"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("my_new_db"), std::string::npos);
+}
+
+TEST(TableRewrite, CreateDatabase_AlreadyMapped_Rejected) {
+  // Target logical DB is already in database_map -> "already exists".
+  auto r = RunGeneral("CREATE DATABASE tenant1",
+                      {.database_map = {{"tenant1", "testnet1"}},
+                       .known_physical_databases = {"testnet1"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("already exists"), std::string::npos);
+}
+
+TEST(TableRewrite, CreateDatabase_AlreadyMapped_IfNotExists_Accepted) {
+  // IF NOT EXISTS suppresses the "already exists" error and lets us emit
+  // the debug SELECT — matches CH semantics where the IF NOT EXISTS form
+  // silently no-ops when the DB exists.
+  auto r = RunGeneral("CREATE DATABASE IF NOT EXISTS tenant1",
+                      {.database_map = {{"tenant1", "testnet1"}},
+                       .known_physical_databases = {"testnet1"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_DATABASE);
+  EXPECT_NE(r.sql_after_rewrite.find("AS cdstmt"), std::string::npos);
+}
+
+TEST(TableRewrite, CreateDatabase_UnknownPhysicalContext_Rejected) {
+  // upstream_physical_database_in_context set to a value that's NOT in
+  // known_physical_databases -> the proxy is sending garbage; reject.
+  auto r = RunGeneral("CREATE DATABASE my_new_db",
+                      {.known_physical_databases = {"testnet1"},
+                       .upstream_physical_database_in_context = "ghost_physical"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("ghost_physical"), std::string::npos);
+}
+
+TEST(TableRewrite, CreateDatabase_NoUpstreamPhysical_Accepted) {
+  // upstream_physical_database_in_context unset is fine — we don't run
+  // any DDL, the proxy just hasn't routed yet.
+  auto r = RunGeneral("CREATE DATABASE my_new_db", {});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_DATABASE);
+}
+
+TEST(TableRewrite, CreateDatabase_LiteralEscaping) {
+  // A SQL with single quotes round-trips into the debug SELECT with the
+  // quotes doubled (CH single-quoted-literal escape).
+  auto r = RunGeneral("CREATE DATABASE `weird'name`", {});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  // The single quote inside the original identifier should appear as ''
+  // inside the SELECT literal; bare ' would mean we forgot to escape.
+  EXPECT_NE(r.sql_after_rewrite.find("''"), std::string::npos)
+    << "Expected doubled-quote escape; got: " << r.sql_after_rewrite;
 }
 
 // --- DROP / ALTER / UPDATE / DELETE ---

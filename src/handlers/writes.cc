@@ -131,8 +131,68 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       return WriteDispatchResult::Rejected;
     }
     if (!create_query->table) {
-      rejectUnsupported(response, "CREATE DATABASE is not supported; only CREATE TABLE is allowed");
-      return WriteDispatchResult::Rejected;
+      // CREATE DATABASE — special handling (see proto comment on
+      // STATEMENT_TYPE_CREATE_DATABASE). We never actually emit the DDL
+      // against the physical ClickHouse; the proxy is expected to do its
+      // own database-creation bookkeeping. We just validate the request
+      // and rewrite to a debug SELECT so the user's intent lands in
+      // ClickHouse query_log.
+      //
+      // Without a TableNameRewrite/general_args option in the request we
+      // can't validate anything and don't have the policy context we'd
+      // need to construct the debug rewrite — fall back to the previous
+      // behavior of UnsupportedStatement so callers can't accidentally
+      // ship the DDL to the physical DB.
+      if (!general) {
+        rejectUnsupported(response,
+          "CREATE DATABASE requires a TableNameRewrite/general_args option to validate against");
+        return WriteDispatchResult::Rejected;
+      }
+
+      const std::string target_db = create_query->getDatabase();
+
+      // Check 1: target logical DB already mapped in database_map → reject
+      // (mirrors "database already exists" for the proxy's view of the
+      // world). IF NOT EXISTS lets us silently fall through to the debug
+      // rewrite, since CH semantics make that case a no-op.
+      const auto db_map_it = general->database_map().find(target_db);
+      if (db_map_it != general->database_map().end() && !create_query->if_not_exists) {
+        rejectInvalidRequest(response,
+          "CREATE DATABASE target '" + target_db
+            + "' already exists (mapped to physical '" + db_map_it->second
+            + "'); use IF NOT EXISTS to suppress this error");
+        return WriteDispatchResult::Rejected;
+      }
+
+      // Check 2: caller's claimed physical context must be a real physical
+      // DB. An unset `upstream_physical_database_in_context` means the
+      // caller hasn't picked a target physical yet — that's fine for the
+      // debug rewrite (we don't actually run any DDL). When set, it must
+      // be in the known list, otherwise the proxy is sending garbage.
+      if (general->has_upstream_physical_database_in_context()) {
+        const std::string &phys = general->upstream_physical_database_in_context();
+        bool known = false;
+        for (const auto &p : general->known_physical_databases()) {
+          if (p == phys) { known = true; break; }
+        }
+        if (!phys.empty() && !known) {
+          rejectInvalidRequest(response,
+            "CREATE DATABASE: upstream_physical_database_in_context '" + phys
+              + "' is not in known_physical_databases");
+          return WriteDispatchResult::Rejected;
+        }
+      }
+
+      // Debug rewrite: SELECT '<original SQL>' AS cdstmt
+      //
+      // We use the AST formatter (not request->sql() verbatim) so the
+      // logged string is canonicalized — same shape every time, no
+      // trailing whitespace / case quirks / comments leaking through.
+      const std::string original_sql = formatAst(ast);
+      const std::string debug_sql =
+        "SELECT '" + escapeSqlLiteral(original_sql) + "' AS cdstmt";
+      setSuccessResponse(response, debug_sql, rewriter::STATEMENT_TYPE_CREATE_DATABASE);
+      return WriteDispatchResult::Handled;
     }
     if (create_query->as_table_function) {
       rejectUnsupported(response, "CREATE TABLE AS table_function(...) is not supported");

@@ -127,10 +127,25 @@ void recordTableRewrite(
   const std::string &origin_table,
   const std::string &new_db,
   const std::string &new_table) {
+  // DB-only rewrites belong in `database_rewrites`; route them out so we
+  // don't accidentally produce table_rewrites entries with no table part
+  // (which would be ambiguous to parse from the caller's side).
+  if (origin_table.empty() && new_table.empty()) {
+    recordDatabaseRewrite(response, origin_db, new_db);
+    return;
+  }
   const std::string key = qualify(origin_db, origin_table);
   const std::string val = qualify(new_db, new_table);
   if (key.empty() || key == val) return;
   (*response->mutable_table_rewrites())[key] = val;
+}
+
+void recordDatabaseRewrite(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &origin_db,
+  const std::string &new_db) {
+  if (origin_db.empty() || origin_db == new_db) return;
+  (*response->mutable_database_rewrites())[origin_db] = new_db;
 }
 
 } // namespace rewriter_handlers

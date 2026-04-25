@@ -50,8 +50,9 @@ bool handleUseQuery(DB::ASTPtr ast,
   // so re-formatting the AST wouldn't add anything.
   if (*physical != origin_db) {
     setSuccessResponse(response, "USE " + *physical, rewriter::STATEMENT_TYPE_USE);
-    recordTableRewrite(response, origin_db, /*origin_table=*/"",
-                       *physical, /*new_table=*/"");
+    // USE is purely a DB-level rewrite — record under database_rewrites,
+    // not table_rewrites.
+    recordDatabaseRewrite(response, origin_db, *physical);
   } else {
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
   }

@@ -90,13 +90,22 @@ std::string buildDynamicTablePrefix(
   const std::string &logical_db,
   const rewriter::RewriteTableForDynamicArgs &args);
 
-// Append an {origin -> rewritten} entry to response.table_rewrites. No-op
-// when origin == rewritten. Either side may be bare "table" (no db part).
+// Append an {origin -> rewritten} entry to response.table_rewrites. Both
+// sides are formatted as "db.table" (or bare "table" when origin_db is
+// empty). No-op when origin == rewritten or when origin_table is empty —
+// DB-only rewrites belong in `database_rewrites`, not here.
 void recordTableRewrite(
   rewriter::RewriteSQLResponse *response,
   const std::string &origin_db,
   const std::string &origin_table,
   const std::string &new_db,
   const std::string &new_table);
+
+// Append an {origin -> rewritten} entry to response.database_rewrites. No-op
+// when origin_db == new_db. Used by USE and SHOW TABLES.
+void recordDatabaseRewrite(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &origin_db,
+  const std::string &new_db);
 
 } // namespace rewriter_handlers

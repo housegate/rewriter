@@ -13,16 +13,6 @@ namespace rewriter_handlers {
 
 namespace {
 
-std::string escapeSqlLiteral(const std::string &s) {
-  std::string out;
-  out.reserve(s.size());
-  for (char c : s) {
-    if (c == '\'') out += "''";
-    else out += c;
-  }
-  return out;
-}
-
 void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &msg) {
   std::cerr << "[show-tables-reject] " << msg << std::endl;
   response->set_message(msg);
@@ -100,12 +90,10 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
             "AND startsWith(name, '" + esc_prefix + "'))";
 
   setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
-  // Record the DB rewrite for observability (prefix is encoded into the
-  // output SQL, not into table_rewrites).
-  if (*physical != logical) {
-    recordTableRewrite(response, logical, /*origin_table=*/"",
-                       *physical, /*new_table=*/"");
-  }
+  // Record the DB rewrite for observability — the per-table prefix is
+  // already encoded into the output SQL, so callers only need the logical
+  // -> physical mapping out of band.
+  recordDatabaseRewrite(response, logical, *physical);
   return true;
 }
 

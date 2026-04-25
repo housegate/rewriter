@@ -59,11 +59,12 @@ message RewriteTableForDynamicArgs {
     string upstream_logical_database_in_context = 3; // e.g. tenant1_database, user will use `USE xxx` to switch database
     string delim = 4; // "_" by default
     repeated string extra_arguments = 5; // e.g. replica_index, shard_index, will be added by sequence
+    optional string upstream_physical_database_in_context = 6; // used to create database on which physical_database
 }
 
 message RewriteTableNameArgs {
     RewriteTableForSelectStmtArgs select_stmt_args = 1; // used in STATEMENT_TYPE_SELECT
-    RewriteTableForDynamicArgs general_args = 2; // used in other STATEMENT_TYPE
+    optional RewriteTableForDynamicArgs general_args = 2; // used in other STATEMENT_TYPE
 }
 
 enum SettingType {
@@ -152,6 +153,14 @@ enum StatementType {
     STATEMENT_TYPE_INSERT = 10;
     STATEMENT_TYPE_UPDATE = 11;
     STATEMENT_TYPE_DELETE = 12;
+    // CREATE DATABASE — the rewriter does NOT actually execute the DDL on
+    // ClickHouse. It validates the request against general_args (the target
+    // logical DB must not already be in `database_map`, and any
+    // `upstream_physical_database_in_context` must be a known physical),
+    // then rewrites the SQL to `SELECT '<original SQL>' AS cdstmt` so the
+    // user's intent ends up in ClickHouse query_log for debugging. The
+    // proxy is expected to do the actual database-creation bookkeeping.
+    STATEMENT_TYPE_CREATE_DATABASE = 13;
 }
 
 message RewriteSQLResponse {
@@ -174,7 +183,7 @@ message RewriteSQLResponse {
     // wasn't applied" without reading server logs. Empty on the happy path.
     repeated string failed_cte_aliases = 9;
 
-    // Map of tables rewritten by TableNameRewrite, keyed by the original
+    // Map of TABLES rewritten by TableNameRewrite, keyed by the original
     // "db.table" (or bare "table" when no db was present), mapping to the
     // post-rewrite "db.table" form. Only entries whose original differs from
     // the rewritten form appear here; untouched tables are in
@@ -184,13 +193,24 @@ message RewriteSQLResponse {
     // remote_table_map hits, the value is the remote-side "db.table"
     // (addr/user/password live in `sql_after_rewrite`).
     //
-    // Non-SELECT path (writes / USE / SHOW TABLES / EXISTS / SHOW CREATE):
-    // populated from the dynamic construction driven by `general_args`. Each
-    // rewritten target appears as its own entry. For USE, the entry's table
-    // side is empty (DB-only rewrite); key and value are just DB names.
-    // For RENAME TABLE, every participating logical table (each `from` and
-    // each `to`) appears as its own entry with its rewritten form.
+    // Non-SELECT path (writes / EXISTS / SHOW CREATE / RENAME): populated
+    // from the dynamic construction driven by `general_args`. Each rewritten
+    // target appears as its own entry. For RENAME TABLE, every participating
+    // logical table (each `from` and each `to`) gets its own entry.
+    //
+    // USE and SHOW TABLES are DB-only rewrites and do NOT populate this map;
+    // see `database_rewrites` instead.
     map<string, string> table_rewrites = 10;
+
+    // Map of DATABASES rewritten by TableNameRewrite, keyed by the original
+    // logical DB name and mapping to the post-rewrite physical DB name. Only
+    // entries whose original differs from the rewritten form appear here.
+    //
+    // Populated by USE and SHOW TABLES — the two statement kinds whose
+    // rewrite is purely at the database level. Kept separate from
+    // `table_rewrites` so callers can branch on "did the DB change?" vs
+    // "did a table change?" without inspecting key formats.
+    map<string, string> database_rewrites = 11;
 }
 
 service RewriterService {
