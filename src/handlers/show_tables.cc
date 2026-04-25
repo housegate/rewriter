@@ -19,6 +19,12 @@ void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &ms
   response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
+void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  std::cerr << "[show-tables-reject] " << msg << std::endl;
+  response->set_message(msg);
+  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+}
+
 } // namespace
 
 bool handleShowTablesQuery(DB::ASTPtr ast,
@@ -71,6 +77,18 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
       "SHOW TABLES target logical database '" + logical
         + "' is not in database_map and not a known physical database; "
           "user does not have this database");
+    return true;
+  }
+  if (isLogicalRemoteMapped(logical, *dynamic)) {
+    // The output SQL queries `system.tables` on the LOCAL physical, which
+    // wouldn't reflect the remote cluster's tables. Reject so the proxy /
+    // caller can decide how to surface the remote tenant's table list
+    // (e.g. by issuing a `remote(...) → system.tables` query of its own).
+    rejectUnsupported(response,
+      "SHOW TABLES target logical database '" + logical
+        + "' is mapped to a remote upstream via "
+          "dynamic_args.logical_database_to_remote_upstream_index; "
+          "the rewriter cannot enumerate tables on a remote cluster");
     return true;
   }
 

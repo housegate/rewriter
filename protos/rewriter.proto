@@ -146,23 +146,40 @@ message RewriteTableStaticArgs {
 //                 + (extra_arguments joined by delim, then + delim,
 //                    iff extra_arguments is non-empty)
 //                 + origin_table
+//   IF logical ∈ logical_database_to_remote_upstream_index THEN
+//       upstream := remote_upstreams[ index ]
+//                   (REJECT InvalidRewriteRequest if the index is missing)
+//       SELECT-side: emit
+//           remote(upstream.addr, physical, new_table,
+//                  upstream.user, upstream.password)
+//         instead of a bare `physical.new_table` identifier.
+//       Non-SELECT side: REJECT with UnsupportedStatement — `remote()`
+//         can only appear as a SELECT-side table function in the
+//         rewriter (writes via `INSERT INTO FUNCTION remote(...)` are
+//         out of scope; USE / SHOW TABLES on a remote logical also
+//         reject so callers don't get silently misrouted to the local
+//         physical).
 //
 // Examples (delim="_", extra_arguments=[]):
-//   tenant1.events     -> physical_db_1.tenant1_events
-//   events  (USE tenant1)  -> physical_db_1.tenant1_events
+//   tenant1.events       -> physical_db_1.tenant1_events
+//   events (USE tenant1) -> physical_db_1.tenant1_events
 //
 // Example (delim="_", extra_arguments=["shard0"]):
-//   tenant1.events     -> physical_db_1.tenant1_shard0_events
+//   tenant1.events       -> physical_db_1.tenant1_shard0_events
+//
+// Example (tenant2 is remote — index 0 in
+//          logical_database_to_remote_upstream_index):
+//   tenant2.events       -> remote('ch-remote:9000', 'physical_db_2',
+//                                  'tenant2_events', 'ro', 'secret')
 //
 // SELECT vs non-SELECT behavior on REJECT:
-//   * SELECT (lenient)  — unresolvable identifiers (e.g. `system.numbers`,
-//                         CTE aliases, anything not in the maps) are
-//                         silently skipped. The rest of the rewrite
-//                         proceeds.
-//   * Non-SELECT (strict) — the whole statement is rejected with
-//                         RewriteCode.InvalidRewriteRequest, since each
-//                         non-SELECT statement targets a specific table
-//                         and a misroute would be a correctness bug.
+//   * SELECT (lenient)   — unresolvable identifiers (e.g. `system.numbers`,
+//                          CTE aliases, anything not in the maps) are
+//                          silently skipped. The rest of the rewrite
+//                          proceeds.
+//   * Non-SELECT (strict) — the whole statement is rejected, since each
+//                          non-SELECT statement targets a specific table
+//                          and a misroute would be a correctness bug.
 message RewriteTableDynamicArgs {
     // Logical (caller-facing) DB -> physical (ClickHouse-side) DB.
     // Multiple logical DBs may map to the same physical DB.
@@ -193,6 +210,42 @@ message RewriteTableDynamicArgs {
     // InvalidRewriteRequest. Unset means the caller hasn't picked a
     // physical DB yet, which is fine for the debug-rewrite path.
     optional string upstream_physical_database_in_context = 6;
+
+    // Connection info for a remote ClickHouse cluster. Indexed by the
+    // integer keys that appear as values in
+    // `logical_database_to_remote_upstream_index`. Rendered into the SQL
+    // as `remote('addr', <physical>, <new_table>, 'user', 'password')`.
+    message RemoteUpstream {
+        string addr = 1;     // host[:port] passed to remote().
+        string user = 2;     // remote-side user (rendered in the SQL).
+        string password = 3; // remote-side password (rendered in the SQL).
+    }
+
+    // Logical DB -> index into `remote_upstreams`. When a target's logical
+    // hits this map, the rewrite emits a `remote(...)` table function
+    // wrapping the resolved (physical, new_table) instead of a bare
+    // `physical.new_table` identifier. The physical name still comes from
+    // `database_map` / `known_physical_databases` — only the wrapping
+    // changes.
+    //
+    // SELECT-only at the table level: any non-SELECT table-targeting
+    // statement (writes / EXISTS / SHOW CREATE / RENAME) rejects with
+    // UnsupportedStatement when its target's logical is in this map.
+    // USE and SHOW TABLES likewise reject when the target db is
+    // remote-mapped, so callers don't get silently misrouted to the
+    // local physical. SHOW DATABASES still includes remote logicals in
+    // its output but the existence-check subquery hits the local
+    // physical (so a "this logical exists" answer reflects local schema,
+    // not the remote cluster — known limitation).
+    //
+    // A logical pointing to an index that's not in `remote_upstreams` is
+    // a config bug → InvalidRewriteRequest.
+    map<string, int32> logical_database_to_remote_upstream_index = 7;
+
+    // Remote upstream index -> connection info. See `RemoteUpstream`
+    // above and `logical_database_to_remote_upstream_index` for the
+    // routing map that picks an entry here.
+    map<int32, RemoteUpstream> remote_upstreams = 8;
 }
 
 // Selects which mode (above) applies to this rewrite.

@@ -44,10 +44,19 @@
 namespace rewriter_handlers {
 
 enum class DynamicRewriteStatus {
-  OK,                 // Rewrite applied; physical_db + new_table are populated.
+  OK,                 // Regular rewrite — physical_db + new_table populated;
+                      // caller emits a bare `physical_db.new_table` identifier.
+  OkRemote,           // Remote rewrite — physical_db + new_table populated
+                      // PLUS remote_addr / remote_user / remote_password.
+                      // SELECT path replaces the identifier with a
+                      // `remote(addr, db, table, user, password)` table
+                      // function call; non-SELECT handlers reject this with
+                      // RewriteCode.UnsupportedStatement.
   InvalidRequest,     // Logical DB can't be resolved (not in database_map,
                       // not in known_physical_databases, and no upstream
-                      // context). Caller should return InvalidRewriteRequest.
+                      // context), or a remote upstream index is missing
+                      // from `remote_upstreams`. Caller should return
+                      // InvalidRewriteRequest.
   NoRewriteRequested, // Request carries no TableNameRewrite option with
                       // `dynamic_args` set — handler should passthrough
                       // (echo the original SQL).
@@ -55,14 +64,29 @@ enum class DynamicRewriteStatus {
 
 struct DynamicRewriteOutcome {
   DynamicRewriteStatus status = DynamicRewriteStatus::NoRewriteRequested;
-  std::string physical_db;   // OK: target physical database.
-  std::string new_table;     // OK: constructed table name (empty for USE —
-                             // which is DB-only — and for SHOW TABLES,
-                             // whose handler builds its own output SQL).
-  std::string logical_db;    // OK: the resolved logical db name (for
-                             // table_rewrites bookkeeping).
+  std::string physical_db;   // OK / OkRemote: target physical database.
+  std::string new_table;     // OK / OkRemote: constructed table name (empty
+                             // for USE — which is DB-only — and for SHOW
+                             // TABLES, whose handler builds its own output).
+  std::string logical_db;    // OK / OkRemote: the resolved logical db name
+                             // (for table_rewrites bookkeeping).
   std::string reject_reason; // InvalidRequest: human-readable explanation.
+
+  // Populated only when status == OkRemote. Read straight from the matched
+  // RewriteTableDynamicArgs.RemoteUpstream entry.
+  std::string remote_addr;
+  std::string remote_user;
+  std::string remote_password;
 };
+
+// True iff `logical` is in `dynamic_args.logical_database_to_remote_upstream_index`.
+// Used by handlers that don't go through applyDynamicRewrite (USE,
+// SHOW TABLES) to safety-reject when the target db points at a remote
+// cluster — without this check those handlers would silently rewrite
+// the request against the local physical instead of warning the caller.
+bool isLogicalRemoteMapped(
+  const std::string &logical,
+  const rewriter::RewriteTableDynamicArgs &args);
 
 // Pick the last TableNameRewrite option in `options` whose `dynamic_args`
 // sub-message is present, or return nullptr. Multiple options last-wins.

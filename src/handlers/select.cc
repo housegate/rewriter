@@ -2,6 +2,7 @@
 #include "handlers/select.h"
 
 #include <Core/Field.h>
+#include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTSelectQuery.h>
@@ -94,7 +95,39 @@ void dynamicRewriteWalk(
           if (out_table_rewrites) {
             (*out_table_rewrites)[origin_full_name] = identifier->name();
           }
+        } else if (outcome.status == DynamicRewriteStatus::OkRemote) {
+          // Remote upstream — replace the identifier with a remote() table
+          // function call. Mirrors ASTReplaceTransformer's static
+          // remote_table_map case so the SQL shape is identical regardless
+          // of whether the remote routing came from static or dynamic args.
+          auto addr  = std::make_shared<DB::ASTLiteral>(outcome.remote_addr);
+          auto db    = std::make_shared<DB::ASTLiteral>(outcome.physical_db);
+          auto tbl   = std::make_shared<DB::ASTLiteral>(outcome.new_table);
+          auto user  = std::make_shared<DB::ASTLiteral>(outcome.remote_user);
+          auto pass  = std::make_shared<DB::ASTLiteral>(outcome.remote_password);
+          table_expression->children.clear();
+          table_expression->database_and_table_name = nullptr;
+          table_expression->table_function =
+            DB::makeASTFunction("remote", addr, db, tbl, user, pass);
+          table_expression->children.push_back(table_expression->table_function);
+          if (!origin_alias.empty()) {
+            table_expression->table_function->setAlias(origin_alias);
+          } else {
+            table_expression->table_function->setAlias(origin_full_name);
+          }
+          if (out_table_rewrites) {
+            // Record the (origin -> "physical.new_table") mapping. addr /
+            // user / password are not part of the table-rewrites map; they
+            // only live in `sql_after_rewrite` (matching the static
+            // remote_table_map convention).
+            (*out_table_rewrites)[origin_full_name] =
+              outcome.physical_db.empty()
+                ? outcome.new_table
+                : outcome.physical_db + "." + outcome.new_table;
+          }
         }
+        // InvalidRequest: lenient skip — see doDynamicSelectTableRewrite
+        // doc-comment for why SELECT swallows unresolvable identifiers.
       }
     } else if (table_expression->subquery) {
       for (auto &child : ast->children) {

@@ -60,6 +60,13 @@ ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
                        outcome.reject_reason);
       return ShowCreateDispatchResult::Handled;
     }
+    if (outcome.status == DynamicRewriteStatus::OkRemote) {
+      rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
+        "SHOW CREATE TABLE target's logical resolves to a remote upstream "
+        "(via dynamic_args.logical_database_to_remote_upstream_index); "
+        "remote() can only appear as a SELECT-side table function");
+      return ShowCreateDispatchResult::Handled;
+    }
     q->setDatabase(outcome.physical_db);
     q->setTable(outcome.new_table);
     recordTableRewrite(response, origin_db, origin_table,

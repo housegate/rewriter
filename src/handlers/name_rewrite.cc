@@ -172,13 +172,45 @@ DynamicRewriteOutcome applyDynamicRewrite(
     return outcome;
   }
 
-  outcome.status = DynamicRewriteStatus::OK;
   outcome.logical_db = logical;
   outcome.physical_db = *physical;
   outcome.new_table = origin_table.empty()
     ? ""  // USE: no table, only the DB swap matters.
     : buildDynamicTableName(logical, origin_table, args);
+
+  // Remote-upstream check: if the logical DB is remote-mapped, swap the
+  // outcome to OkRemote and surface the upstream's connection info. The
+  // SELECT path uses these to wrap the identifier in `remote(...)`; the
+  // non-SELECT handlers reject OkRemote with UnsupportedStatement.
+  if (auto idx_it = args.logical_database_to_remote_upstream_index().find(logical);
+      idx_it != args.logical_database_to_remote_upstream_index().end()) {
+    const int32_t upstream_idx = idx_it->second;
+    auto upstream_it = args.remote_upstreams().find(upstream_idx);
+    if (upstream_it == args.remote_upstreams().end()) {
+      std::ostringstream oss;
+      oss << stmt_kind << " target's logical database '" << logical
+          << "' is mapped to remote upstream index " << upstream_idx
+          << " but that index is not in remote_upstreams";
+      outcome.status = DynamicRewriteStatus::InvalidRequest;
+      outcome.reject_reason = oss.str();
+      return outcome;
+    }
+    outcome.status = DynamicRewriteStatus::OkRemote;
+    outcome.remote_addr = upstream_it->second.addr();
+    outcome.remote_user = upstream_it->second.user();
+    outcome.remote_password = upstream_it->second.password();
+    return outcome;
+  }
+
+  outcome.status = DynamicRewriteStatus::OK;
   return outcome;
+}
+
+bool isLogicalRemoteMapped(
+  const std::string &logical,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  if (logical.empty()) return false;
+  return args.logical_database_to_remote_upstream_index().count(logical) > 0;
 }
 
 void recordTableRewrite(

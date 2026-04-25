@@ -114,6 +114,18 @@ bool rewriteOneTarget(
       rejectInvalidRequest(response, outcome.reject_reason);
       return false;
     }
+    if (outcome.status == DynamicRewriteStatus::OkRemote) {
+      // Dynamic-mode remote routing only makes sense for SELECT (where we
+      // can wrap the identifier in remote()). For a write/EXISTS/SHOW
+      // CREATE/RENAME target there's no equivalent — INSERT INTO FUNCTION
+      // remote() is currently rejected by the rewriter anyway.
+      rejectUnsupported(response,
+        std::string(stmt_kind)
+          + " target's logical resolves to a remote upstream "
+            "(via dynamic_args.logical_database_to_remote_upstream_index); "
+            "remote() can only appear as a SELECT-side table function");
+      return false;
+    }
     set_db(outcome.physical_db);
     set_table(outcome.new_table);
     recordTableRewrite(response, origin_db, origin_table,

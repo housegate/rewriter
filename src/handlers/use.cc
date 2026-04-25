@@ -19,6 +19,12 @@ void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &ms
   response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
+void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  std::cerr << "[use-reject] " << msg << std::endl;
+  response->set_message(msg);
+  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+}
+
 } // namespace
 
 bool handleUseQuery(DB::ASTPtr ast,
@@ -42,6 +48,18 @@ bool handleUseQuery(DB::ASTPtr ast,
       "USE target '" + origin_db
         + "' is not in database_map and not a known physical database; "
           "user does not have this database");
+    return true;
+  }
+  if (isLogicalRemoteMapped(origin_db, *dynamic)) {
+    // USE has no remote analog — rewriting to `USE <local physical>` would
+    // silently misroute every subsequent unqualified query to the local
+    // physical instead of the remote cluster. Reject so the proxy /
+    // caller can decide how to expose this state.
+    rejectUnsupported(response,
+      "USE target '" + origin_db
+        + "' is mapped to a remote upstream via "
+          "dynamic_args.logical_database_to_remote_upstream_index; "
+          "USE has no remote analog");
     return true;
   }
 
