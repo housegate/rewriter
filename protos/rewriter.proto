@@ -161,6 +161,11 @@ enum StatementType {
     // user's intent ends up in ClickHouse query_log for debugging. The
     // proxy is expected to do the actual database-creation bookkeeping.
     STATEMENT_TYPE_CREATE_DATABASE = 13;
+    // SHOW DATABASES — rewritten into a SELECT that returns the logical
+    // databases the caller has access to (from general_args.database_map +
+    // known_physical_databases). Emitted unchanged when no general_args
+    // option is present.
+    STATEMENT_TYPE_SHOW_DATABASES = 14;
 }
 
 message RewriteSQLResponse {

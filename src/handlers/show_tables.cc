@@ -27,9 +27,10 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   auto *show_query = ast->as<DB::ASTShowTablesQuery>();
   if (!show_query) return false;
 
-  // SHOW DATABASES / SHOW CLUSTERS / SHOW DICTIONARIES / ... — the rewrite
-  // policy only covers SHOW TABLES proper; anything else echoes back.
-  if (show_query->databases || show_query->clusters || show_query->cluster
+  // SHOW CLUSTERS / SHOW DICTIONARIES / SHOW SETTINGS / ... — the rewrite
+  // policy here only covers SHOW TABLES proper; SHOW DATABASES is handled
+  // by handleShowDatabasesQuery, which dispatches before us.
+  if (show_query->clusters || show_query->cluster
       || show_query->dictionaries || show_query->m_settings
       || show_query->merges || show_query->caches) {
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);

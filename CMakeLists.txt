@@ -165,6 +165,7 @@ add_library(rewriter_core OBJECT
     src/rewriter-http-server.cc
     src/handlers/use.cc
     src/handlers/show_tables.cc
+    src/handlers/show_databases.cc
     src/handlers/writes.cc
     src/handlers/select.cc
     src/handlers/name_rewrite.cc

@@ -18,6 +18,7 @@
 #include "handlers/exists.h"
 #include "handlers/select.h"
 #include "handlers/show_create.h"
+#include "handlers/show_databases.h"
 #include "handlers/show_tables.h"
 #include "handlers/use.h"
 #include "handlers/writes.h"
@@ -164,6 +165,7 @@ void RewriterServiceImpl::doRewrite(
     DB::ASTPtr ast = DB::parseQuery(parser, pos, end, 0, 0, 0);
 
     if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
+    if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowTablesQuery(ast, request, response)) return;
     if (rewriter_handlers::handleExistsQuery(ast, request, response)
         == rewriter_handlers::ExistsDispatchResult::Handled) {
