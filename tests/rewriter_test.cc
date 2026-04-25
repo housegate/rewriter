@@ -1525,6 +1525,53 @@ TEST(TableRewrite, Insert_Passthrough_WhenNoOption) {
   EXPECT_NE(r.sql_after_rewrite.find("INSERT INTO t"), std::string::npos);
 }
 
+// --- INSERT shapes used by clickhouse-go's PrepareBatch (native protocol) ---
+//
+// `clickhouse-go`'s batch insert sends just the SQL header in the native
+// protocol's Query packet, then streams data blocks separately. The rewriter
+// only sees the SQL header — these tests pin the two header forms the
+// native driver actually emits.
+//
+// Note: a fully bare `INSERT INTO t` (no FORMAT, no VALUES, no SELECT)
+// FAILS ClickHouse's `ParserQuery` with SyntaxError. That's not a regression
+// — clickhouse-go always tacks on `FORMAT Native` (or `FORMAT RowBinary` /
+// similar) before the data stream, so the truncated form never reaches us
+// from a real driver. If a caller does send bare `INSERT INTO t`, they get
+// SyntaxError back and can decide what to do.
+
+TEST(TableRewrite, Insert_FormatNative) {
+  // `INSERT INTO t FORMAT Native` — what clickhouse-go's batch typically
+  // sends when columns aren't pre-declared.
+  auto r = RunGeneral("INSERT INTO t FORMAT Native",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  // FORMAT clause must round-trip — the server uses it to pick the decoder.
+  EXPECT_NE(r.sql_after_rewrite.find("FORMAT Native"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, Insert_WithColumnList_FormatNative) {
+  // `INSERT INTO t (a, b, c) FORMAT Native` — clickhouse-go uses this when
+  // the caller pre-declares columns. The column list must round-trip
+  // unchanged: the data blocks that follow in the protocol stream are
+  // ordered by this list, so reordering or dropping columns would break
+  // the binary decode.
+  auto r = RunGeneral("INSERT INTO t (a, b, c) FORMAT Native",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("FORMAT Native"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("a"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("b"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("c"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
 // --- CREATE TABLE ---
 
 TEST(TableRewrite, CreateTable_Basic) {
