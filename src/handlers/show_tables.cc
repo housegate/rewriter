@@ -19,12 +19,6 @@ void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &ms
   response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
 }
 
-void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std::string &msg) {
-  std::cerr << "[show-tables-reject] " << msg << std::endl;
-  response->set_message(msg);
-  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
-}
-
 } // namespace
 
 bool handleShowTablesQuery(DB::ASTPtr ast,
@@ -79,17 +73,32 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
           "user does not have this database");
     return true;
   }
-  if (isLogicalRemoteMapped(logical, *dynamic)) {
-    // The output SQL queries `system.tables` on the LOCAL physical, which
-    // wouldn't reflect the remote cluster's tables. Reject so the proxy /
-    // caller can decide how to surface the remote tenant's table list
-    // (e.g. by issuing a `remote(...) → system.tables` query of its own).
-    rejectUnsupported(response,
-      "SHOW TABLES target logical database '" + logical
-        + "' is mapped to a remote upstream via "
-          "dynamic_args.logical_database_to_remote_upstream_index; "
-          "the rewriter cannot enumerate tables on a remote cluster");
-    return true;
+
+  // Pick the FROM source for `system.tables`. For a local logical it's the
+  // bare identifier; for a remote-mapped logical we route through
+  // remote('addr', system, tables, user, password) so the enumeration runs
+  // on the upstream cluster — same wrapping the SELECT path uses for
+  // remote-mapped tables. The (database, prefix) filter still uses the
+  // physical name resolved from database_map, since the prefix scheme is
+  // the same on both sides.
+  std::string system_tables_source = "system.tables";
+  if (auto idx_it = dynamic->logical_database_to_remote_upstream_index().find(logical);
+      idx_it != dynamic->logical_database_to_remote_upstream_index().end()) {
+    const std::string &upstream_key = idx_it->second;
+    auto upstream_it = dynamic->remote_upstreams().find(upstream_key);
+    if (upstream_it == dynamic->remote_upstreams().end()) {
+      rejectInvalid(response,
+        "SHOW TABLES target logical database '" + logical
+          + "' is mapped to remote upstream key '" + upstream_key
+          + "' but that key is not in remote_upstreams");
+      return true;
+    }
+    const auto &upstream = upstream_it->second;
+    system_tables_source =
+      "remote('" + escapeSqlLiteral(upstream.addr()) + "', "
+      "system, tables, "
+      "'" + escapeSqlLiteral(upstream.user()) + "', "
+      "'" + escapeSqlLiteral(upstream.password()) + "')";
   }
 
   const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
@@ -104,7 +113,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
       "startsWith(name, '" + esc_prefix + "'), "
         "substring(name, length('" + esc_prefix + "') + 1), "
       "name) AS name "
-    "FROM (SELECT name FROM system.tables "
+    "FROM (SELECT name FROM " + system_tables_source + " "
           "WHERE database = '" + esc_physical + "' "
             "AND startsWith(name, '" + esc_prefix + "'))";
 

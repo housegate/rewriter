@@ -992,6 +992,12 @@ TEST(QueryPreprocessorTest, StringWithCommas) {
 // Shared helper for non-SELECT tests driven by dynamic_args.
 // ============================================================================
 
+struct RemoteUpstreamCfg {
+  std::string addr;
+  std::string user;
+  std::string password;
+};
+
 struct DynamicArgs {
   std::map<std::string, std::string> database_map;
   std::vector<std::string> known_physical_databases;
@@ -1001,6 +1007,9 @@ struct DynamicArgs {
   // std::nullopt → leave the optional field unset (proxy hasn't picked
   // a physical context yet). Empty string → set to "" (rare but valid).
   std::optional<std::string> upstream_physical_database_in_context;
+  // logical DB -> upstream key, looked up in `remote_upstreams` below.
+  std::map<std::string, std::string> logical_database_to_remote_upstream_index;
+  std::map<std::string, RemoteUpstreamCfg> remote_upstreams;
 };
 
 static void applyDynamicArgs(rewriter::RewriteTableDynamicArgs *args,
@@ -1018,6 +1027,15 @@ static void applyDynamicArgs(rewriter::RewriteTableDynamicArgs *args,
   for (const auto &e : g.extra_arguments) args->add_extra_arguments(e);
   if (g.upstream_physical_database_in_context) {
     args->set_upstream_physical_database_in_context(*g.upstream_physical_database_in_context);
+  }
+  for (const auto &kv : g.logical_database_to_remote_upstream_index) {
+    (*args->mutable_logical_database_to_remote_upstream_index())[kv.first] = kv.second;
+  }
+  for (const auto &kv : g.remote_upstreams) {
+    auto &out = (*args->mutable_remote_upstreams())[kv.first];
+    out.set_addr(kv.second.addr);
+    out.set_user(kv.second.user);
+    out.set_password(kv.second.password);
   }
 }
 
@@ -1185,6 +1203,45 @@ TEST(ShowTables, UnknownLogical_Rejected) {
   auto r = RunDynamic("SHOW TABLES FROM mydb",
                       {.database_map = {{"other", "sentio_other"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+TEST(ShowTables, RemoteUpstream_RewritesToRemoteSystemTables) {
+  // Logical 'transfer' is mapped to physical 'testnet1' AND routed to the
+  // remote upstream "3". The handler should enumerate `system.tables` on
+  // the upstream cluster via remote(...), filtered by (database, prefix).
+  auto r = RunDynamic("SHOW TABLES",
+                      {.database_map = {{"transfer", "testnet1"},
+                                        {"tenant2", "testnet2"}},
+                       .upstream_logical_database_in_context = "transfer",
+                       .logical_database_to_remote_upstream_index = {{"transfer", "3"}},
+                       .remote_upstreams = {{"3", {.addr = "localhost:3333",
+                                                    .user = "username",
+                                                    .password = "123"}}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
+  // Goes through remote() instead of bare system.tables.
+  EXPECT_NE(r.sql_after_rewrite.find(
+              "remote('localhost:3333', system, tables, 'username', '123')"),
+            std::string::npos)
+    << r.sql_after_rewrite;
+  EXPECT_EQ(r.sql_after_rewrite.find("FROM system.tables"), std::string::npos)
+    << "should not enumerate against the local system.tables: " << r.sql_after_rewrite;
+  // Filter still uses the resolved physical name + prefix from the local
+  // database_map (the upstream uses the same naming scheme).
+  EXPECT_NE(r.sql_after_rewrite.find("database = 'testnet1'"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'transfer_')"), std::string::npos);
+  EXPECT_EQ(r.database_rewrites["transfer"], "testnet1");
+}
+
+TEST(ShowTables, RemoteUpstream_MissingKey_Rejected) {
+  // Logical points at upstream key "ghost" but remote_upstreams has no
+  // such entry — config bug, must reject InvalidRewriteRequest.
+  auto r = RunDynamic("SHOW TABLES",
+                      {.database_map = {{"transfer", "testnet1"}},
+                       .upstream_logical_database_in_context = "transfer",
+                       .logical_database_to_remote_upstream_index = {{"transfer", "ghost"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("ghost"), std::string::npos);
 }
 
 // ============================================================================

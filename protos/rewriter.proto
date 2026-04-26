@@ -238,9 +238,12 @@ message RewriteTableDynamicArgs {
     // SELECT-only at the table level: any non-SELECT table-targeting
     // statement (writes / EXISTS / SHOW CREATE / RENAME) rejects with
     // UnsupportedStatement when its target's logical is in this map.
-    // USE and SHOW TABLES likewise reject when the target db is
-    // remote-mapped, so callers don't get silently misrouted to the
-    // local physical. SHOW DATABASES still includes remote logicals in
+    // USE rejects too, so callers don't get silently misrouted to the
+    // local physical. SHOW TABLES on a remote-mapped logical is rewritten
+    // to enumerate `system.tables` on the upstream cluster via
+    // `remote('addr', system, tables, 'user', 'password')`, with the
+    // same (database = physical AND startsWith(name, prefix)) filter the
+    // local path uses. SHOW DATABASES still includes remote logicals in
     // its output but the existence-check subquery hits the local
     // physical (so a "this logical exists" answer reflects local schema,
     // not the remote cluster — known limitation).

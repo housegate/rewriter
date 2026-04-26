@@ -80,10 +80,11 @@ struct DynamicRewriteOutcome {
 };
 
 // True iff `logical` is in `dynamic_args.logical_database_to_remote_upstream_index`.
-// Used by handlers that don't go through applyDynamicRewrite (USE,
-// SHOW TABLES) to safety-reject when the target db points at a remote
-// cluster — without this check those handlers would silently rewrite
-// the request against the local physical instead of warning the caller.
+// Used by USE (which doesn't go through applyDynamicRewrite) to safety-reject
+// when the target db points at a remote cluster — without this check USE
+// would silently rewrite the request against the local physical instead of
+// warning the caller. SHOW TABLES does its own inline lookup so it can
+// also fetch the matching `remote_upstreams` entry in one step.
 bool isLogicalRemoteMapped(
   const std::string &logical,
   const rewriter::RewriteTableDynamicArgs &args);
