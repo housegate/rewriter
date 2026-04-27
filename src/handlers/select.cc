@@ -26,6 +26,42 @@ namespace rewriter_handlers {
 
 namespace {
 
+struct AccessedTablePair {
+  std::string original_db;     // empty when the SQL didn't qualify the table.
+  std::string original_table;
+};
+
+// Walk every ASTTableExpression and collect its (db, table) split. Keyed by
+// the SQL-shaped name ("db.table" / bare "table") so we can dedup and so
+// CTE-alias entries can be erased by alias when their bodies inline. Replaces
+// the prior set-of-string collector — same dedup behavior, but carries the
+// db/table split forward to the response without the caller having to re-split.
+void collectAccessedTablePairsFromAST(
+  const DB::ASTPtr &node,
+  std::map<std::string, AccessedTablePair> &out) {
+  if (!node) return;
+  if (auto *te = node->as<DB::ASTTableExpression>()) {
+    if (te->database_and_table_name) {
+      if (auto *id = te->database_and_table_name->as<DB::ASTTableIdentifier>()) {
+        const auto full = id->name();  // "db.table" or bare "table"
+        if (!full.empty()) {
+          AccessedTablePair p;
+          // Match the split that dynamicRewriteWalk and the table_rewrites
+          // map keys use — first-dot split, with everything before as db.
+          if (const auto dot = full.find('.'); dot != std::string::npos) {
+            p.original_db = full.substr(0, dot);
+            p.original_table = full.substr(dot + 1);
+          } else {
+            p.original_table = full;
+          }
+          out.emplace(full, std::move(p));
+        }
+      }
+    }
+  }
+  for (auto &ch : node->children) { collectAccessedTablePairsFromAST(ch, out); }
+}
+
 // Per-transformer AST dumps are only useful when debugging the rewrite
 // pipeline; in production they blow up log volume (every SELECT prints the
 // full tree 5x). Gate them behind REWRITER_DUMP_AST=1. Read once at
@@ -461,8 +497,8 @@ void handleSelectQuery(DB::ASTPtr ast,
     std::cout << "before transformation " << ast->dumpTree() << std::endl;
   }
 
-  std::unordered_set<std::string> original_accessed_table_names_set;
-  DB::collectTableNamesFromAST(ast, original_accessed_table_names_set);
+  std::map<std::string, AccessedTablePair> originals;
+  collectAccessedTablePairsFromAST(ast, originals);
   std::vector<ParsedCTEASTMap> preparsed_cte_ast_maps;
 
   // Pre-scan CTE to collect the original table names accessed in the CTE subquery
@@ -478,20 +514,33 @@ void handleSelectQuery(DB::ASTPtr ast,
     auto cte_ast_map = DB::parseCTEMapToAST(cte_map, &failed_aliases);
     for (const auto &a : failed_aliases) response->add_failed_cte_aliases(a);
     for (const auto &kv : cte_ast_map) {
-      if (auto it = original_accessed_table_names_set.find(kv.first);
-          it != original_accessed_table_names_set.end()) {
-        original_accessed_table_names_set.erase(it);
-      }
-      DB::collectTableNamesFromAST(kv.second, original_accessed_table_names_set);
+      // CTE alias was parsed as a bare-table reference in the outer AST;
+      // drop it so the CTE body's actual tables stand in for it.
+      originals.erase(kv.first);
+      collectAccessedTablePairsFromAST(kv.second, originals);
     }
     preparsed_cte_ast_maps.push_back(std::move(cte_ast_map));
   }
 
+  // Resolve each originally-accessed table against the active TableNameRewrite
+  // selection so callers get logical/physical/is_remote without having to
+  // replay the resolution logic themselves. Done after the option-pre-scan but
+  // before applyRewriteOptions mutates the AST — the selection itself is
+  // option-config, not AST state, so there's no ordering hazard.
+  const auto selection = findActiveTableRewrite(request->options());
+
   std::map<std::string, std::string> table_rewrites;
   ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps, &table_rewrites);
 
-  for (const auto &name : original_accessed_table_names_set) {
-    response->add_original_accessed_table_names(name);
+  for (const auto &[_, pair] : originals) {
+    auto *entry = response->add_original_accessed_tables();
+    entry->set_original_database(pair.original_db);
+    entry->set_original_table(pair.original_table);
+    const auto resolution = resolveAccessedTable(
+      pair.original_db, pair.original_table, selection);
+    entry->set_logical_database(resolution.logical_database);
+    entry->set_physical_database(resolution.physical_database);
+    entry->set_is_remote(resolution.is_remote);
   }
   auto *resp_rewrites = response->mutable_table_rewrites();
   for (const auto &[k, v] : table_rewrites) {

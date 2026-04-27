@@ -194,6 +194,28 @@ std::string buildDynamicTablePrefix(
   const std::string &logical_db,
   const rewriter::RewriteTableDynamicArgs &args);
 
+// Best-effort resolution of one (origin_db, origin_table) access against the
+// active TableNameRewrite mode, for response.original_accessed_tables. Does
+// NOT mutate any AST and does NOT reject — when a target can't be resolved
+// (static-mode unmatched, dynamic-mode unresolvable logical, no TableNameRewrite
+// option), the unresolved fields stay empty. SELECT calls this for every
+// ASTTableExpression it collects so callers can see, per access, the logical
+// db and physical db that the rewriter routed (or would have routed) it to.
+struct AccessedTableResolution {
+  std::string logical_database;   // empty in static mode and when dynamic mode
+                                  // has no qualifier + no upstream context.
+  std::string physical_database;  // empty when the rewriter doesn't know
+                                  // (unmatched static / unresolvable dynamic).
+  bool is_remote = false;         // true iff this access maps to a `remote(...)`
+                                  // table function call (static remote_table_map
+                                  // hit or dynamic logical_database_to_remote_upstream_index hit).
+};
+
+AccessedTableResolution resolveAccessedTable(
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const TableRewriteSelection &selection);
+
 // Append an {origin -> rewritten} entry to response.table_rewrites. Both
 // sides are formatted as "db.table" (or bare "table" when origin_db is
 // empty). No-op when origin == rewritten or when origin_table is empty —

@@ -173,17 +173,10 @@ protected:
   void format(WriteBuffer &ostr, const FormatSettings &settings) const;
 };
 
-void collectTableNamesFromAST(const DB::ASTPtr &node, std::unordered_set<std::string> &out);
-
 // Parse each CTE's SQL into an AST once; invalid entries are skipped but others continue.
 // When `failed_aliases` is non-null, aliases whose SQL failed to parse are appended to it
 // (in map iteration order) so the caller can surface them to the client.
 std::unordered_map<String, ASTPtr> parseCTEMapToAST(
     const std::map<String, CommonTableExpr> &cte_map,
     std::vector<String> *failed_aliases = nullptr);
-
-// Convenience: collect table names from all CTE ASTs.
-void collectTableNamesFromCTEMap(
-    const std::map<String, CommonTableExpr> &cte_map,
-    std::unordered_set<std::string> &out);
 } // namespace DB

@@ -213,6 +213,67 @@ bool isLogicalRemoteMapped(
   return args.logical_database_to_remote_upstream_index().count(logical) > 0;
 }
 
+AccessedTableResolution resolveAccessedTable(
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const TableRewriteSelection &selection) {
+  AccessedTableResolution out;
+  if (selection.mode == TableRewriteMode::None) return out;
+
+  if (selection.mode == TableRewriteMode::Static) {
+    // SELECT-side three-map lookup. logical_database stays empty: static
+    // mode doesn't carry a logical/physical distinction beyond what the
+    // caller already encoded into the maps. Lookup key matches
+    // ASTReplaceTransformer's keying — qualified "db.table" or bare
+    // "table" when origin_db is empty.
+    const auto &args = *selection.static_args;
+    const std::string key = qualify(origin_db, origin_table);
+    if (auto it = args.table_map().find(key); it != args.table_map().end()) {
+      // Rename only — db unchanged. When origin_db was empty (bare table),
+      // physical_database stays empty: ClickHouse will resolve it against
+      // the session default at query time, which the rewriter doesn't track.
+      out.physical_database = origin_db;
+      return out;
+    }
+    if (auto it = args.remote_table_map().find(key);
+        it != args.remote_table_map().end()) {
+      out.physical_database = it->second.database();
+      out.is_remote = true;
+      return out;
+    }
+    if (auto it = args.table_with_database_map().find(key);
+        it != args.table_with_database_map().end()) {
+      // Empty `database` in the entry means "preserve origin db" (per the
+      // proto contract for table_with_database_map).
+      out.physical_database = it->second.database().empty()
+        ? origin_db
+        : it->second.database();
+      return out;
+    }
+    return out;  // Unmatched: leave physical_database empty (passthrough).
+  }
+
+  // Dynamic mode.
+  const auto &args = *selection.dynamic_args;
+  const std::string logical = origin_db.empty()
+    ? args.upstream_logical_database_in_context()
+    : origin_db;
+  if (logical.empty()) return out;
+  out.logical_database = logical;
+  if (auto p = resolvePhysicalDatabase(logical, args)) {
+    out.physical_database = *p;
+  }
+  // SELECT is lenient on dynamic-mode misses (e.g. system.numbers / CTE
+  // aliases), so an unresolvable logical lands here with logical_database
+  // populated but physical_database empty. is_remote still reflects the
+  // index lookup so callers can tell remote-targeted accesses apart even
+  // when physical resolution failed elsewhere.
+  if (args.logical_database_to_remote_upstream_index().count(logical) > 0) {
+    out.is_remote = true;
+  }
+  return out;
+}
+
 void recordTableRewrite(
   rewriter::RewriteSQLResponse *response,
   const std::string &origin_db,

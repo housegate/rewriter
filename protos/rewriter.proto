@@ -441,11 +441,12 @@ message RewriteSQLResponse {
     RewriteCode code = 1;
     string message = 2;
     string sql_after_rewrite = 3;
-    // Tables that the original SQL referenced. For SELECT/DML this includes
-    // tables reached through CTEs. Tables that TableNameRewrite rewrote are
-    // still listed here with their original names; callers can cross-reference
-    // `table_rewrites` to learn the post-rewrite form.
-    repeated string original_accessed_table_names = 4;
+    // Tag 4 was `repeated string original_accessed_table_names`; replaced by
+    // `original_accessed_tables` (tag 12) which carries the same information
+    // in a structured form. Old clients reading new responses will see the
+    // tag as unknown and ignore it.
+    reserved 4;
+    reserved "original_accessed_table_names";
     // Kind of statement the rewriter identified. See the StatementType enum
     // for the full list. UNSPECIFIED on non-Success responses whose
     // classification didn't run (parse errors, etc.).
@@ -489,6 +490,48 @@ message RewriteSQLResponse {
     // branch on "did the DB change?" vs. "did a table change?" without
     // inspecting key formats.
     map<string, string> database_rewrites = 11;
+
+    // Tables that the original SQL referenced, in structured form so callers
+    // don't have to parse dotted strings. Currently populated by the SELECT
+    // path only; non-SELECT statements have a single explicit target whose
+    // mapping is already conveyed via `table_rewrites`.
+    //
+    // For SELECT, this includes tables reached through CTE bodies (CTE alias
+    // entries are replaced by the tables their bodies reference). Tables
+    // rewritten by TableNameRewrite are still listed here with their
+    // pre-rewrite names; callers can cross-reference `table_rewrites` for
+    // the post-rewrite form.
+    repeated AccessedTable original_accessed_tables = 12;
+}
+
+// One table the SQL referenced before rewrite, with the rewriter's
+// best-effort resolution of which physical database it'd map to under the
+// active TableNameRewrite mode.
+//
+// `original_database` / `original_table` are exactly what the SQL contained
+// (empty database when the table was unqualified). `logical_database` and
+// `physical_database` are populated when the rewriter has enough context to
+// resolve them; both can legitimately be empty:
+//
+//   * Static-mode unmatched target — physical is unknown, logical is N/A
+//     (static mode has no logical/physical concept). Both empty.
+//   * Dynamic-mode unresolvable target (system tables, CTE aliases, DBs not
+//     in `database_map` / `known_physical_databases`) — SELECT silently
+//     skips the rewrite, and `physical_database` stays empty. `logical_database`
+//     reflects what the rewriter would have used (SQL qualifier or
+//     `upstream_logical_database_in_context`); empty if neither was set.
+//   * No TableNameRewrite option in the request — both empty.
+//
+// `is_remote` is true iff the rewriter routed (or would have routed) this
+// access through `remote(addr, db, table, user, password)` — i.e. a SELECT
+// hit on `static_args.remote_table_map` or on
+// `dynamic_args.logical_database_to_remote_upstream_index`.
+message AccessedTable {
+    string original_database = 1;
+    string original_table = 2;
+    string logical_database = 3;
+    string physical_database = 4;
+    bool is_remote = 5;
 }
 
 service RewriterService {

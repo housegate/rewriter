@@ -244,8 +244,13 @@ static std::pair<std::string, std::vector<std::string>> RunCTERewriteWithNames(
   if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
     return {"", {}}; // or throw
   }
-  std::vector<std::string> names(
-    resp.original_accessed_table_names().begin(), resp.original_accessed_table_names().end());
+  std::vector<std::string> names;
+  names.reserve(resp.original_accessed_tables_size());
+  for (const auto &t : resp.original_accessed_tables()) {
+    names.push_back(t.original_database().empty()
+      ? t.original_table()
+      : t.original_database() + "." + t.original_table());
+  }
   auto out = resp.sql_after_rewrite();
   g_last_debug = DumpContext(origin_sql, out, cte_map, /*table_map*/ {});
   std::cout << "\n******************** REWRITE DEBUG START (CTE+NAMES) ********************\n";
@@ -287,8 +292,13 @@ static std::pair<std::string, std::vector<std::string>> RunCTEAndTableRewriteWit
   if (!status.ok() || resp.code() != rewriter::RewriteCode::Success) {
     return {"", {}}; // or throw
   }
-  std::vector<std::string> names(
-    resp.original_accessed_table_names().begin(), resp.original_accessed_table_names().end());
+  std::vector<std::string> names;
+  names.reserve(resp.original_accessed_tables_size());
+  for (const auto &t : resp.original_accessed_tables()) {
+    names.push_back(t.original_database().empty()
+      ? t.original_table()
+      : t.original_database() + "." + t.original_table());
+  }
   auto out = resp.sql_after_rewrite();
   g_last_debug = DumpContext(origin_sql, out, cte_map, table_map);
   std::cout << "\n****************** REWRITE DEBUG START (CTE+TABLE+NAMES) ******************\n";
@@ -701,6 +711,244 @@ TEST(OriginalNames, NoTables_NoCTE) {
   TRACE_LAST_REWRITE();
   ASSERT_FALSE(out.empty());
   EXPECT_TRUE(names.empty());
+}
+
+// ----- AccessedTable resolution: structured original_accessed_tables field -----
+//
+// These tests exercise the logical_database / physical_database / is_remote
+// fields populated for every entry in response.original_accessed_tables. They
+// run the full RewriterServiceImpl path so the same code that handles real
+// requests is what's under test.
+
+namespace {
+
+// Look up the resolution for `qualify(db, table)` (or bare `table` when db is
+// empty) in resp.original_accessed_tables. ASSERTs the entry exists so test
+// failures point at the missing access rather than a silent miss.
+const rewriter::AccessedTable *FindAccessed(
+  const rewriter::RewriteSQLResponse &resp,
+  const std::string &origin_db,
+  const std::string &origin_table) {
+  for (const auto &t : resp.original_accessed_tables()) {
+    if (t.original_database() == origin_db && t.original_table() == origin_table) {
+      return &t;
+    }
+  }
+  return nullptr;
+}
+
+rewriter::RewriteSQLResponse RunSelectWithStaticArgs(
+  const std::string &sql,
+  const std::map<std::string, std::string> &table_map,
+  const std::map<std::string, std::pair<std::string, std::string>>
+    &remote_table_map = {},
+  const std::map<std::string, std::pair<std::string, std::string>>
+    &table_with_db_map = {}) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *args = opt->mutable_table_name_args()->mutable_static_args();
+  for (const auto &kv : table_map) (*args->mutable_table_map())[kv.first] = kv.second;
+  for (const auto &kv : remote_table_map) {
+    auto &rt = (*args->mutable_remote_table_map())[kv.first];
+    rt.set_addr("ch:9000");
+    rt.set_database(kv.second.first);
+    rt.set_table(kv.second.second);
+    rt.set_user("u");
+    rt.set_password("p");
+  }
+  for (const auto &kv : table_with_db_map) {
+    auto &twd = (*args->mutable_table_with_database_map())[kv.first];
+    twd.set_database(kv.second.first);
+    twd.set_table(kv.second.second);
+  }
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+rewriter::RewriteSQLResponse RunSelectWithDynamicArgs(
+  const std::string &sql,
+  const std::map<std::string, std::string> &database_map,
+  const std::vector<std::string> &known_physical = {},
+  const std::string &upstream_logical_in_context = "",
+  const std::map<std::string, std::string> &remote_index = {},
+  const std::map<std::string, std::tuple<std::string, std::string, std::string>>
+    &remote_upstreams = {}) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  for (const auto &kv : database_map) (*dyn->mutable_database_map())[kv.first] = kv.second;
+  for (const auto &p : known_physical) dyn->add_known_physical_databases(p);
+  dyn->set_upstream_logical_database_in_context(upstream_logical_in_context);
+  for (const auto &kv : remote_index) {
+    (*dyn->mutable_logical_database_to_remote_upstream_index())[kv.first] = kv.second;
+  }
+  for (const auto &kv : remote_upstreams) {
+    auto &up = (*dyn->mutable_remote_upstreams())[kv.first];
+    up.set_addr(std::get<0>(kv.second));
+    up.set_user(std::get<1>(kv.second));
+    up.set_password(std::get<2>(kv.second));
+  }
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+} // namespace
+
+TEST(AccessedTable, Static_TableMapHit_KeepsOriginDB) {
+  // Qualified target — `db.t` rename leaves db unchanged.
+  auto resp = RunSelectWithStaticArgs(
+    "SELECT * FROM mydb.t", {{"mydb.t", "t_renamed"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "mydb", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "");           // static mode: no logical concept.
+  EXPECT_EQ(e->physical_database(), "mydb");       // table_map only renames.
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Static_TableMapHit_BareTable_PhysicalUnknown) {
+  // Bare table — rewriter doesn't track session-default db, so physical is empty.
+  auto resp = RunSelectWithStaticArgs("SELECT * FROM t", {{"t", "t_renamed"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "");
+  EXPECT_EQ(e->physical_database(), "");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Static_RemoteTableMapHit_FlagsRemote) {
+  auto resp = RunSelectWithStaticArgs(
+    "SELECT * FROM t",
+    /*table_map*/ {},
+    /*remote_table_map*/ {{"t", {"remote_db", "remote_t"}}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "remote_db");
+  EXPECT_TRUE(e->is_remote());
+}
+
+TEST(AccessedTable, Static_TableWithDatabaseHit_UsesEntryDB) {
+  auto resp = RunSelectWithStaticArgs(
+    "SELECT * FROM t",
+    /*table_map*/ {},
+    /*remote_table_map*/ {},
+    /*table_with_db_map*/ {{"t", {"explicit_db", "t_renamed"}}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "explicit_db");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Static_Unmatched_PhysicalEmpty) {
+  // Static-mode passthrough — rewriter doesn't know the physical db.
+  auto resp = RunSelectWithStaticArgs(
+    "SELECT * FROM untouched", {{"other", "still_other"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "", "untouched");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "");
+  EXPECT_EQ(e->physical_database(), "");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Dynamic_QualifiedLogical_ResolvesPhysical) {
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM tenant1.events",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "tenant1");
+  EXPECT_EQ(e->physical_database(), "physical_1");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Dynamic_BareTable_UsesUpstreamContext) {
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM events",
+    /*database_map*/ {{"tenant1", "physical_1"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "tenant1");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "tenant1");
+  EXPECT_EQ(e->physical_database(), "physical_1");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Dynamic_KnownPhysicalPassthrough) {
+  // System-table style passthrough: logical resolves to itself as physical.
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM system.numbers",
+    /*database_map*/ {},
+    /*known_physical*/ {"system"});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "system", "numbers");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "system");
+  EXPECT_EQ(e->physical_database(), "system");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Dynamic_Unresolvable_PhysicalEmpty_LogicalKept) {
+  // SELECT is lenient — unresolvable identifiers stay in the response with
+  // logical_database reflecting what we'd have used (here: SQL qualifier).
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM ghost.t",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "ghost", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "ghost");
+  EXPECT_EQ(e->physical_database(), "");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, Dynamic_RemoteMappedLogical_FlagsRemote) {
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM tenant_remote.events",
+    /*database_map*/ {{"tenant_remote", "physical_remote"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "",
+    /*remote_index*/ {{"tenant_remote", "us_east"}},
+    /*remote_upstreams*/ {{"us_east", {"ch-remote:9000", "ro", "secret"}}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "tenant_remote", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "tenant_remote");
+  EXPECT_EQ(e->physical_database(), "physical_remote");
+  EXPECT_TRUE(e->is_remote());
+}
+
+TEST(AccessedTable, NoTableNameRewriteOption_AllResolvedFieldsEmpty) {
+  // No TableNameRewrite option at all — original_database/original_table are
+  // still populated, but the resolved fields stay empty.
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SELECT * FROM mydb.t");
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "mydb", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "");
+  EXPECT_EQ(e->physical_database(), "");
+  EXPECT_FALSE(e->is_remote());
 }
 
 TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
@@ -1450,7 +1698,7 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
     resp.statement_type(),
     resp.sql_after_rewrite(),
     resp.message(),
-    resp.original_accessed_table_names_size(),
+    resp.original_accessed_tables_size(),
   };
 }
 

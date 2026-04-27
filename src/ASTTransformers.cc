@@ -36,21 +36,6 @@ extern const int NO_SUCH_COLUMN_IN_TABLE;
 extern const int CANNOT_COMPILE_REGEXP;
 } // namespace ErrorCodes
 
-void collectTableNamesFromAST(const DB::ASTPtr &node, std::unordered_set<std::string> &out) {
-  if (!node) return;
-
-  if (auto *te = node->as<DB::ASTTableExpression>()) {
-    if (te->database_and_table_name) {
-      if (auto *id = te->database_and_table_name->as<ASTTableIdentifier>()) {
-        const auto n = id->name(); // "db.table"
-        if (!n.empty()) out.insert(n);
-      }
-    }
-  }
-
-  for (auto &ch : node->children) { collectTableNamesFromAST(ch, out); }
-}
-
 std::unordered_map<String, ASTPtr> parseCTEMapToAST(
   const std::map<String, CommonTableExpr> &cte_map,
   std::vector<String> *failed_aliases) {
@@ -83,12 +68,6 @@ std::unordered_map<String, ASTPtr> parseCTEMapToAST(
     }
   }
   return out;
-}
-
-void collectTableNamesFromCTEMap(
-  const std::map<String, CommonTableExpr> &cte_map, std::unordered_set<std::string> &out) {
-  const auto ast_map = parseCTEMapToAST(cte_map);
-  for (const auto &p : ast_map) { collectTableNamesFromAST(p.second, out); }
 }
 
 void ASTTransformerList::format(WriteBuffer &ostr, const FormatSettings &settings) const {
