@@ -104,6 +104,13 @@ bool rewriteOneTarget(
   std::string_view stmt_kind,
   SetDb set_db,
   SetTable set_table) {
+  // Record the access before any reject path so original_accessed_tables
+  // captures every (db, table) the handler intended to rewrite — including
+  // static-mode passthroughs and dynamic-mode misses. RENAME's two sides
+  // and CREATE TABLE AS's source flow through here too, so each gets its
+  // own entry. Called only from non-SELECT single-target handlers; SELECT
+  // populates the field via its own pre-rewrite AST walk.
+  recordAccessedTable(response, origin_db, origin_table, sel);
   switch (sel.mode) {
   case TableRewriteMode::None:
     return true;

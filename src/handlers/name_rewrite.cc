@@ -274,6 +274,21 @@ AccessedTableResolution resolveAccessedTable(
   return out;
 }
 
+void recordAccessedTable(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const TableRewriteSelection &selection) {
+  if (origin_table.empty()) return;
+  auto *entry = response->add_original_accessed_tables();
+  entry->set_original_database(origin_db);
+  entry->set_original_table(origin_table);
+  const auto resolution = resolveAccessedTable(origin_db, origin_table, selection);
+  entry->set_logical_database(resolution.logical_database);
+  entry->set_physical_database(resolution.physical_database);
+  entry->set_is_remote(resolution.is_remote);
+}
+
 void recordTableRewrite(
   rewriter::RewriteSQLResponse *response,
   const std::string &origin_db,

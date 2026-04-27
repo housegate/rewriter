@@ -951,6 +951,229 @@ TEST(AccessedTable, NoTableNameRewriteOption_AllResolvedFieldsEmpty) {
   EXPECT_FALSE(e->is_remote());
 }
 
+// ----- AccessedTable: non-SELECT handlers -----
+//
+// Mirrors the SELECT-side coverage above for every non-SELECT handler that
+// goes through rewriteOneTarget (writes.cc) plus exists.cc / show_create.cc.
+// Confirms each records exactly one AccessedTable per (db, table) target it
+// processed, with logical/physical/is_remote populated against the active
+// TableNameRewrite mode — including static-mode passthrough and the
+// no-option case.
+
+namespace {
+
+rewriter::RewriteSQLResponse RunWithDynamicArgs(
+  const std::string &sql,
+  const std::map<std::string, std::string> &database_map,
+  const std::vector<std::string> &known_physical = {},
+  const std::string &upstream_logical = "") {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  for (const auto &kv : database_map) (*dyn->mutable_database_map())[kv.first] = kv.second;
+  for (const auto &p : known_physical) dyn->add_known_physical_databases(p);
+  dyn->set_upstream_logical_database_in_context(upstream_logical);
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+rewriter::RewriteSQLResponse RunWithStaticTableWithDb(
+  const std::string &sql,
+  const std::string &origin_key,
+  const std::string &physical_db,
+  const std::string &new_table) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *args = opt->mutable_table_name_args()->mutable_static_args();
+  auto &twd = (*args->mutable_table_with_database_map())[origin_key];
+  twd.set_database(physical_db);
+  twd.set_table(new_table);
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+rewriter::RewriteSQLResponse RunNoOptions(const std::string &sql) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+} // namespace
+
+TEST(AccessedTable, Insert_Dynamic_RecordsTargetWithPhysical) {
+  auto resp = RunWithDynamicArgs(
+    "INSERT INTO tenant1.events VALUES (1)",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "tenant1");
+  EXPECT_EQ(e->physical_database(), "physical_1");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, CreateTable_StaticTableWithDb_RecordsPhysical) {
+  auto resp = RunWithStaticTableWithDb(
+    "CREATE TABLE t (a Int32) ENGINE=Memory",
+    /*origin_key*/ "t",
+    /*physical_db*/ "explicit_db",
+    /*new_table*/ "t_renamed");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "explicit_db");
+}
+
+TEST(AccessedTable, DropTable_NoOptions_StillRecordsOriginal) {
+  // Even with no TableNameRewrite option, the rewriter records what was
+  // accessed so callers always get a uniform view of the request shape.
+  auto resp = RunNoOptions("DROP TABLE mydb.t");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "mydb", "t");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->logical_database(), "");    // No mode → no logical resolved.
+  EXPECT_EQ(e->physical_database(), "");
+  EXPECT_FALSE(e->is_remote());
+}
+
+TEST(AccessedTable, TruncateTable_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "TRUNCATE TABLE tenant1.events",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, AlterTable_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "ALTER TABLE tenant1.events ADD COLUMN c Int32",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, Update_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "UPDATE tenant1.events SET a = 1 WHERE id = 0",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, Delete_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "DELETE FROM tenant1.events WHERE id = 0",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, Rename_RecordsBothSides) {
+  auto resp = RunWithDynamicArgs(
+    "RENAME TABLE tenant1.a TO tenant1.b",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 2);
+  const auto *from = FindAccessed(resp, "tenant1", "a");
+  const auto *to = FindAccessed(resp, "tenant1", "b");
+  ASSERT_NE(from, nullptr);
+  ASSERT_NE(to, nullptr);
+  EXPECT_EQ(from->physical_database(), "physical_1");
+  EXPECT_EQ(to->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, CreateTableAsTable_RecordsTargetAndSource) {
+  // CREATE TABLE x AS source — both target and source flow through
+  // rewriteOneTarget, so both get recorded. Distinct from the AS SELECT
+  // form which doesn't record the inner SELECT's tables (writes.cc doesn't
+  // walk into the subquery).
+  auto resp = RunWithDynamicArgs(
+    "CREATE TABLE tenant1.t AS tenant1.src",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 2);
+  EXPECT_NE(FindAccessed(resp, "tenant1", "t"), nullptr);
+  EXPECT_NE(FindAccessed(resp, "tenant1", "src"), nullptr);
+}
+
+TEST(AccessedTable, ExistsTable_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "EXISTS TABLE tenant1.events",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_EXISTS_TABLE);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, ShowCreateTable_Dynamic_RecordsTarget) {
+  auto resp = RunWithDynamicArgs(
+    "SHOW CREATE TABLE tenant1.events",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto *e = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(AccessedTable, CreateDatabase_NotRecorded) {
+  // Database-level handlers do NOT populate original_accessed_tables.
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("CREATE DATABASE newdb");
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  // dynamic_args present so CREATE DATABASE is accepted (debug-rewrite path).
+  opt->mutable_table_name_args()->mutable_dynamic_args();
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_DATABASE);
+  EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+}
+
+TEST(AccessedTable, DropDatabase_NotRecorded) {
+  // Symmetric to CREATE DATABASE — DB-level, not table-level.
+  auto resp = RunWithDynamicArgs(
+    "DROP DATABASE tenant1",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_DATABASE);
+  EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+}
+
 TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
   // ---------- Full original error (as returned by ClickHouse) ----------
   const std::string kErr =
@@ -1708,7 +1931,8 @@ TEST(WriteOp, CreateTable_Simple) {
   auto r = RunWriteOp("CREATE TABLE t (a Int32) ENGINE=Memory");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_EQ(r.original_accessed_count, 0);
+  // Writes record their single rewriteOneTarget target as one access.
+  EXPECT_EQ(r.original_accessed_count, 1);
 }
 
 TEST(WriteOp, CreateTable_WithDatabase) {
@@ -1721,7 +1945,9 @@ TEST(WriteOp, CreateTable_AsSelect_ReturnsTargetOnly) {
   auto r = RunWriteOp("CREATE TABLE t ENGINE=Memory AS SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_EQ(r.original_accessed_count, 0);
+  // Only the CREATE TABLE target — writes.cc does not walk the AS SELECT
+  // subquery into rewriteOneTarget, so `src` is not recorded here.
+  EXPECT_EQ(r.original_accessed_count, 1);
 }
 
 TEST(WriteOp, CreateView_Rejected) {
@@ -1747,7 +1973,7 @@ TEST(WriteOp, DropTable_Simple) {
   auto r = RunWriteOp("DROP TABLE t");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
-  EXPECT_EQ(r.original_accessed_count, 0);
+  EXPECT_EQ(r.original_accessed_count, 1);
 }
 
 TEST(WriteOp, DropTable_WithDatabase) {
@@ -1845,15 +2071,16 @@ TEST(WriteOp, Insert_Values) {
   auto r = RunWriteOp("INSERT INTO t VALUES (1)");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_EQ(r.original_accessed_count, 0);
+  EXPECT_EQ(r.original_accessed_count, 1);
 }
 
 TEST(WriteOp, Insert_Select_ReturnsTargetOnly) {
   auto r = RunWriteOp("INSERT INTO db.t SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  // The SELECT source (src) is NOT reported.
-  EXPECT_EQ(r.original_accessed_count, 0);
+  // Only the INSERT target (db.t). writes.cc doesn't walk the SELECT subquery
+  // into rewriteOneTarget, so `src` doesn't get its own AccessedTable entry.
+  EXPECT_EQ(r.original_accessed_count, 1);
 }
 
 TEST(WriteOp, InsertFunction_Rejected) {

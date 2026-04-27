@@ -492,15 +492,25 @@ message RewriteSQLResponse {
     map<string, string> database_rewrites = 11;
 
     // Tables that the original SQL referenced, in structured form so callers
-    // don't have to parse dotted strings. Currently populated by the SELECT
-    // path only; non-SELECT statements have a single explicit target whose
-    // mapping is already conveyed via `table_rewrites`.
+    // don't have to parse dotted strings. Populated by every table-targeting
+    // handler: SELECT (one entry per ASTTableExpression, including CTE
+    // bodies — CTE alias entries are replaced by the tables their bodies
+    // reference), plus the non-SELECT single-target handlers (writes /
+    // EXISTS / SHOW CREATE / RENAME) — one entry per (db, table) target the
+    // rewriter processed. RENAME records both `from` and `to`; CREATE TABLE
+    // AS records both the target and the source. Database-level handlers
+    // (USE, SHOW TABLES, SHOW DATABASES, CREATE DATABASE, DROP DATABASE) do
+    // NOT populate this field — their rewrites are recorded in
+    // `database_rewrites` instead.
     //
-    // For SELECT, this includes tables reached through CTE bodies (CTE alias
-    // entries are replaced by the tables their bodies reference). Tables
-    // rewritten by TableNameRewrite are still listed here with their
+    // Tables rewritten by TableNameRewrite are listed here with their
     // pre-rewrite names; callers can cross-reference `table_rewrites` for
-    // the post-rewrite form.
+    // the post-rewrite form, or read `physical_database` / `is_remote`
+    // directly off each AccessedTable.
+    //
+    // On a rejected (non-Success) response, this field may contain a
+    // partial list — entries up to the target that triggered the reject.
+    // Callers shouldn't act on it in that case.
     repeated AccessedTable original_accessed_tables = 12;
 }
 

@@ -48,6 +48,9 @@ ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
   const std::string origin_table = q->getTable();
 
   const auto sel = findActiveTableRewrite(request->options());
+  // Record the access regardless of mode/outcome so callers see what target
+  // the rewriter processed even on static-mode passthrough or eventual reject.
+  recordAccessedTable(response, origin_db, origin_table, sel);
   switch (sel.mode) {
   case TableRewriteMode::None:
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);

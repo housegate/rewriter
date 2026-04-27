@@ -132,7 +132,11 @@ Each transformer subclasses `IASTTransformer` (itself an `IAST` so it can live i
 
 `LimitRewrite` / `OffsetRewrite` / `SettingsRewrite` used to have their own transformer classes but are now applied inline in [handlers/select.cc](src/handlers/select.cc) — all three batch into a `PendingSelectTransforms` struct and flush in a single AST walk.
 
-`response.original_accessed_tables` is populated by `collectAccessedTablePairsFromAST` (private to [handlers/select.cc](src/handlers/select.cc)) walking pre-rewrite ASTs (main SQL + each CTE body) and `resolveAccessedTable` (in [handlers/name_rewrite.cc](src/handlers/name_rewrite.cc)) filling the resolved `logical_database` / `physical_database` / `is_remote` fields per access against the active `TableRewriteSelection`.
+`response.original_accessed_tables` is populated by every table-targeting handler:
+
+- **SELECT** uses `collectAccessedTablePairsFromAST` (private to [handlers/select.cc](src/handlers/select.cc)) to walk pre-rewrite ASTs (main SQL + each CTE body, with CTE alias entries erased), then runs each pair through `resolveAccessedTable` ([handlers/name_rewrite.cc](src/handlers/name_rewrite.cc)) to fill in `logical_database` / `physical_database` / `is_remote`.
+- **Non-SELECT table-targeting handlers** (writes / EXISTS / SHOW CREATE) call `recordAccessedTable` (also in [handlers/name_rewrite.cc](src/handlers/name_rewrite.cc)) once per `(db, table)` target processed by `rewriteOneTarget` (in writes.cc) or its inline equivalents in exists.cc / show_create.cc. RENAME records both `from` and `to`; `CREATE TABLE x AS source` records target plus source. Database-level handlers (USE / SHOW TABLES / SHOW DATABASES / CREATE DATABASE / DROP DATABASE) deliberately do NOT populate the field — their rewrites are recorded in `database_rewrites` instead.
+- The recording happens before any reject path, so a partial list may appear on rejected (non-Success) responses.
 
 ### Protocol
 

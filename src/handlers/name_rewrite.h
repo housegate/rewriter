@@ -216,6 +216,22 @@ AccessedTableResolution resolveAccessedTable(
   const std::string &origin_table,
   const TableRewriteSelection &selection);
 
+// Append one AccessedTable entry to response.original_accessed_tables for the
+// (origin_db, origin_table) target the handler is about to process. Resolves
+// `logical_database` / `physical_database` / `is_remote` against the active
+// TableRewriteSelection via resolveAccessedTable. No-op when origin_table is
+// empty (db-level operations record their access via `database_rewrites` and
+// don't populate this field).
+//
+// Called by every non-SELECT table-targeting handler (writes / EXISTS / SHOW
+// CREATE / RENAME) once per target it intends to rewrite. SELECT populates
+// the field via its own pre-rewrite AST walk in handlers/select.cc.
+void recordAccessedTable(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &origin_db,
+  const std::string &origin_table,
+  const TableRewriteSelection &selection);
+
 // Append an {origin -> rewritten} entry to response.table_rewrites. Both
 // sides are formatted as "db.table" (or bare "table" when origin_db is
 // empty). No-op when origin == rewritten or when origin_table is empty —

@@ -2,7 +2,11 @@
 //
 // SELECT and other DML handler: applies the rewrite-option pipeline
 // (Limit, TableName, Offset, Settings, CTE) via ASTTransformers and
-// populates original_accessed_table_names from the pre-transformer AST.
+// populates original_accessed_tables (one AccessedTable per
+// ASTTableExpression collected from the pre-transformer AST, with
+// logical/physical/is_remote resolved against the active TableNameRewrite
+// selection). Non-SELECT handlers populate the same field via
+// recordAccessedTable in handlers/name_rewrite.cc.
 #pragma once
 #include <Parsers/IAST.h>
 #include <google/protobuf/repeated_ptr_field.h>
