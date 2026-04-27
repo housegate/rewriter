@@ -289,6 +289,27 @@ void recordAccessedTable(
   entry->set_is_remote(resolution.is_remote);
 }
 
+void recordAccessedDatabase(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &target_db,
+  const rewriter::RewriteTableDynamicArgs *dynamic_args) {
+  if (target_db.empty()) return;
+  auto *entry = response->add_original_accessed_tables();
+  entry->set_original_database(target_db);
+  // original_table stays empty by default — db-level access has no table
+  // component. Callers branch on `original_table.empty()` to tell db-level
+  // entries apart from table-level ones.
+  entry->set_logical_database(target_db);
+  if (dynamic_args) {
+    if (auto p = resolvePhysicalDatabase(target_db, *dynamic_args)) {
+      entry->set_physical_database(*p);
+    }
+  }
+  // is_remote stays false: CREATE/DROP DATABASE never route through a
+  // remote upstream — the rewriter only emits db-DDL as a debug-rewrite
+  // SELECT against the local CH so the GC binary can pick it up.
+}
+
 void recordTableRewrite(
   rewriter::RewriteSQLResponse *response,
   const std::string &origin_db,

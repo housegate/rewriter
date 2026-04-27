@@ -491,17 +491,27 @@ message RewriteSQLResponse {
     // inspecting key formats.
     map<string, string> database_rewrites = 11;
 
-    // Tables that the original SQL referenced, in structured form so callers
-    // don't have to parse dotted strings. Populated by every table-targeting
-    // handler: SELECT (one entry per ASTTableExpression, including CTE
-    // bodies — CTE alias entries are replaced by the tables their bodies
-    // reference), plus the non-SELECT single-target handlers (writes /
-    // EXISTS / SHOW CREATE / RENAME) — one entry per (db, table) target the
-    // rewriter processed. RENAME records both `from` and `to`; CREATE TABLE
-    // AS records both the target and the source. Database-level handlers
-    // (USE, SHOW TABLES, SHOW DATABASES, CREATE DATABASE, DROP DATABASE) do
-    // NOT populate this field — their rewrites are recorded in
-    // `database_rewrites` instead.
+    // Tables (and, for CREATE/DROP DATABASE, target databases) that the
+    // original SQL referenced, in structured form so callers don't have to
+    // parse dotted strings. Populated by:
+    //
+    //   * SELECT — one entry per ASTTableExpression, including CTE bodies;
+    //     CTE alias entries are replaced by the tables their bodies
+    //     reference.
+    //   * Non-SELECT single-target handlers (writes / EXISTS / SHOW
+    //     CREATE / RENAME) — one entry per (db, table) target processed.
+    //     RENAME records both `from` and `to`; `CREATE TABLE AS source`
+    //     records both target and source.
+    //   * CREATE DATABASE / DROP DATABASE — one db-level entry with
+    //     `original_table` empty and `logical_database` set to the target
+    //     db. `physical_database` is filled when the logical resolves via
+    //     `dynamic_args.database_map` (typically true for DROP, typically
+    //     false for CREATE since the new logical isn't in the map yet).
+    //     `is_remote` is always false. Callers branch on
+    //     `original_table.empty()` to tell db-level entries apart.
+    //
+    // USE / SHOW TABLES / SHOW DATABASES still do NOT populate this field
+    // — those are pure DB rewrites surfaced via `database_rewrites`.
     //
     // Tables rewritten by TableNameRewrite are listed here with their
     // pre-rewrite names; callers can cross-reference `table_rewrites` for
@@ -514,9 +524,9 @@ message RewriteSQLResponse {
     repeated AccessedTable original_accessed_tables = 12;
 }
 
-// One table the SQL referenced before rewrite, with the rewriter's
-// best-effort resolution of which physical database it'd map to under the
-// active TableNameRewrite mode.
+// One table or database the SQL referenced before rewrite, with the
+// rewriter's best-effort resolution of which physical database it'd map to
+// under the active TableNameRewrite mode.
 //
 // `original_database` / `original_table` are exactly what the SQL contained
 // (empty database when the table was unqualified). `logical_database` and
@@ -532,10 +542,22 @@ message RewriteSQLResponse {
 //     `upstream_logical_database_in_context`); empty if neither was set.
 //   * No TableNameRewrite option in the request — both empty.
 //
+// Two shapes of entry:
+//
+//   * Table-level (the common case): `original_table` is non-empty, set
+//     to the table identifier as written in the SQL.
+//   * Database-level (CREATE DATABASE / DROP DATABASE only): `original_table`
+//     is empty and `original_database` / `logical_database` both carry the
+//     target db name. `physical_database` resolves via `database_map` when
+//     possible (typical for DROP DATABASE; typically empty for CREATE
+//     DATABASE since the new logical isn't in the map yet). Callers branch
+//     on `original_table.empty()` to tell the two shapes apart.
+//
 // `is_remote` is true iff the rewriter routed (or would have routed) this
 // access through `remote(addr, db, table, user, password)` — i.e. a SELECT
 // hit on `static_args.remote_table_map` or on
-// `dynamic_args.logical_database_to_remote_upstream_index`.
+// `dynamic_args.logical_database_to_remote_upstream_index`. Always false
+// for db-level entries (CREATE/DROP DATABASE never route through remote).
 message AccessedTable {
     string original_database = 1;
     string original_table = 2;

@@ -224,6 +224,11 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       }
 
       const std::string target_db = create_query->getDatabase();
+      // Record the db-level access before validation so callers see the
+      // target on the response even when the request is rejected. For
+      // CREATE DATABASE the logical is by precondition NOT in database_map
+      // (otherwise we reject below), so physical_database stays empty.
+      recordAccessedDatabase(response, target_db, dynamic);
 
       // Check 1: target logical DB already mapped in database_map → reject
       // (mirrors "database already exists" for the proxy's view of the
@@ -341,6 +346,11 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       }
 
       const std::string target_db = drop_query->getDatabase();
+      // Record the db-level access before validation. On a database_map hit,
+      // physical_database is filled with the resolved physical; on an
+      // IF EXISTS miss we still record the access (with empty physical) so
+      // downstream sees the attempted target.
+      recordAccessedDatabase(response, target_db, dynamic);
 
       const auto db_map_it = dynamic->database_map().find(target_db);
       if (db_map_it == dynamic->database_map().end()) {

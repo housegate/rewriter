@@ -1147,8 +1147,11 @@ TEST(AccessedTable, ShowCreateTable_Dynamic_RecordsTarget) {
   EXPECT_EQ(e->physical_database(), "physical_1");
 }
 
-TEST(AccessedTable, CreateDatabase_NotRecorded) {
-  // Database-level handlers do NOT populate original_accessed_tables.
+TEST(AccessedTable, CreateDatabase_RecordsLogicalEmptyTable) {
+  // CREATE DATABASE records a db-level AccessedTable: original_table empty,
+  // logical_database set to the target. physical_database stays empty
+  // because the new logical isn't in `database_map` yet (precondition for
+  // the request to succeed).
   RewriterServiceImpl service;
   rewriter::RewriteSQLRequest req;
   req.set_sql("CREATE DATABASE newdb");
@@ -1161,17 +1164,54 @@ TEST(AccessedTable, CreateDatabase_NotRecorded) {
   service.Rewrite(&ctx, &req, &resp);
   ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
   ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_DATABASE);
-  EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto &e = resp.original_accessed_tables(0);
+  EXPECT_EQ(e.original_database(), "newdb");
+  EXPECT_TRUE(e.original_table().empty());
+  EXPECT_EQ(e.logical_database(), "newdb");
+  EXPECT_TRUE(e.physical_database().empty());
+  EXPECT_FALSE(e.is_remote());
 }
 
-TEST(AccessedTable, DropDatabase_NotRecorded) {
-  // Symmetric to CREATE DATABASE — DB-level, not table-level.
+TEST(AccessedTable, DropDatabase_RecordsLogicalAndPhysical) {
+  // DROP DATABASE on a `database_map` hit fills physical_database with the
+  // resolved physical so the GC binary can correlate the access with its
+  // physical-side cleanup target.
   auto resp = RunWithDynamicArgs(
     "DROP DATABASE tenant1",
     /*database_map*/ {{"tenant1", "physical_1"}});
   ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
   ASSERT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_DATABASE);
-  EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto &e = resp.original_accessed_tables(0);
+  EXPECT_EQ(e.original_database(), "tenant1");
+  EXPECT_TRUE(e.original_table().empty());
+  EXPECT_EQ(e.logical_database(), "tenant1");
+  EXPECT_EQ(e.physical_database(), "physical_1");
+  EXPECT_FALSE(e.is_remote());
+}
+
+TEST(AccessedTable, DropDatabase_IfExists_Miss_RecordsAccessOnly) {
+  // IF EXISTS on an unmanaged db: the rewrite still succeeds (silently
+  // falls through), and the access is still recorded — but with empty
+  // physical since the logical isn't in database_map.
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("DROP DATABASE IF EXISTS unknown");
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["tenant1"] = "physical_1";
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto &e = resp.original_accessed_tables(0);
+  EXPECT_EQ(e.original_database(), "unknown");
+  EXPECT_TRUE(e.original_table().empty());
+  EXPECT_EQ(e.logical_database(), "unknown");
+  EXPECT_TRUE(e.physical_database().empty());
 }
 
 TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {

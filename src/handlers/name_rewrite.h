@@ -232,6 +232,30 @@ void recordAccessedTable(
   const std::string &origin_table,
   const TableRewriteSelection &selection);
 
+// Append one AccessedTable entry for a database-level access (CREATE
+// DATABASE / DROP DATABASE), where the SQL target is a database name and
+// has no table component. Populates:
+//   * original_database = target_db
+//   * original_table    = ""
+//   * logical_database  = target_db (same as original — the SQL named it
+//                                    explicitly as a logical)
+//   * physical_database = resolvePhysicalDatabase(target_db, *dynamic_args)
+//                         when dynamic_args is non-null and the logical
+//                         resolves; empty otherwise (notably for CREATE
+//                         DATABASE on a brand-new logical not yet in
+//                         database_map).
+//   * is_remote         = false (DDL never routes through remote()).
+//
+// Use this instead of recordAccessedTable for db-level statements; the
+// table-level helper requires a non-empty origin_table. USE / SHOW TABLES
+// / SHOW DATABASES still don't populate this field — those are pure DB
+// rewrites surfaced via `database_rewrites` instead. Only CREATE DATABASE
+// and DROP DATABASE call this helper.
+void recordAccessedDatabase(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &target_db,
+  const rewriter::RewriteTableDynamicArgs *dynamic_args);
+
 // Append an {origin -> rewritten} entry to response.table_rewrites. Both
 // sides are formatted as "db.table" (or bare "table" when origin_db is
 // empty). No-op when origin == rewritten or when origin_table is empty —
