@@ -414,6 +414,27 @@ enum StatementType {
     // known_physical_databases). Emitted unchanged when no dynamic_args
     // option is present.
     STATEMENT_TYPE_SHOW_DATABASES = 14;
+    // DROP DATABASE — like CREATE DATABASE, the rewriter does NOT actually
+    // run the DDL on the physical CH (a logical DB maps to a physical DB
+    // via prefix-sharing, so a single physical DB can hold tables from
+    // multiple logicals — there's no native CH way to drop just one
+    // logical's tables in a single statement). Instead, the rewriter
+    // validates the request against dynamic_args (the target logical DB
+    // must be in `database_map`, unless IF EXISTS) and rewrites the SQL
+    // to `SELECT '<original SQL>' AS ddstmt` so the user's intent ends
+    // up in ClickHouse query_log. An external GC binary is expected to
+    // tail query_log (or another shared signal) and reclaim the
+    // physical-side tables asynchronously.
+    STATEMENT_TYPE_DROP_DATABASE = 15;
+    // TRUNCATE TABLE — single-target write. Goes through the same unified
+    // static→dynamic precedence as DROP TABLE / ALTER TABLE / etc., and
+    // emits the rewritten TRUNCATE statement (NOT a debug SELECT — unlike
+    // DROP DATABASE, TRUNCATE TABLE is safe to execute against the
+    // physical CH because each logical table is a distinct physical
+    // table). TRUNCATE DATABASE / TRUNCATE ALL TABLES FROM remain
+    // unsupported (would need to enumerate prefix-shared tables, same
+    // problem as DROP DATABASE; not currently in scope).
+    STATEMENT_TYPE_TRUNCATE_TABLE = 16;
 }
 
 message RewriteSQLResponse {

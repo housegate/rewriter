@@ -1519,7 +1519,11 @@ TEST(WriteOp, DropTable_MultiTable_Rejected) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
-TEST(WriteOp, DropDatabase_Rejected) {
+TEST(WriteOp, DropDatabase_NoOptions_Rejected) {
+  // Without a TableNameRewrite/dynamic_args option we can't validate the
+  // request (and have no logical -> physical mapping to record for the
+  // GC binary), so we fail closed rather than ship the DDL through. The
+  // dynamic-args-supplied path is exercised by TableRewrite tests below.
   auto r = RunWriteOp("DROP DATABASE d");
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
@@ -1534,8 +1538,26 @@ TEST(WriteOp, Detach_Rejected) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
-TEST(WriteOp, Truncate_Rejected) {
+// --- TRUNCATE TABLE ---
+// TRUNCATE TABLE flows through the same single-target path as DROP TABLE;
+// only TRUNCATE DATABASE / TRUNCATE ALL TABLES FROM remain unsupported
+// (would need to enumerate prefix-shared tables; same problem as DROP
+// DATABASE pre-soft-delete, but TRUNCATE doesn't fit "deferred GC").
+
+TEST(WriteOp, TruncateTable_Simple) {
   auto r = RunWriteOp("TRUNCATE TABLE t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_TRUNCATE_TABLE);
+}
+
+TEST(WriteOp, TruncateTable_IfExists) {
+  auto r = RunWriteOp("TRUNCATE TABLE IF EXISTS t");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_TRUNCATE_TABLE);
+}
+
+TEST(WriteOp, TruncateDatabase_Rejected) {
+  auto r = RunWriteOp("TRUNCATE DATABASE d");
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
@@ -1874,6 +1896,73 @@ TEST(TableRewrite, CreateDatabase_LiteralEscaping) {
     << "Expected doubled-quote escape; got: " << r.sql_after_rewrite;
 }
 
+// --- DROP DATABASE ---
+//
+// DROP DATABASE is symmetric to CREATE DATABASE: never emits the DDL
+// against the physical CH; instead validates and rewrites to
+// `SELECT '<original SQL>' AS ddstmt` so an external GC binary can
+// reclaim the prefixed tables async.
+
+TEST(TableRewrite, DropDatabase_Basic) {
+  // Logical DB present in database_map -> accept and emit the debug
+  // SELECT, recording the logical -> physical mapping in
+  // database_rewrites for the GC binary to pick up.
+  auto r = RunDynamic("DROP DATABASE tenant1",
+                      {.database_map = {{"tenant1", "testnet1"}},
+                       .known_physical_databases = {"testnet1"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_DATABASE);
+  EXPECT_NE(r.sql_after_rewrite.find("SELECT '"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("AS ddstmt"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("DROP DATABASE"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1"), std::string::npos);
+  EXPECT_EQ(r.database_rewrites["tenant1"], "testnet1");
+}
+
+TEST(TableRewrite, DropDatabase_NotMapped_Rejected) {
+  // Target logical DB is NOT in database_map and the SQL doesn't say
+  // IF EXISTS -> reject (the proxy is asking us to drop something we
+  // don't manage).
+  auto r = RunDynamic("DROP DATABASE ghost",
+                      {.database_map = {{"tenant1", "testnet1"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("ghost"), std::string::npos);
+  EXPECT_NE(r.message.find("not in database_map"), std::string::npos);
+}
+
+TEST(TableRewrite, DropDatabase_NotMapped_IfExists_Accepted) {
+  // IF EXISTS suppresses the "not mapped" error and lets us emit the
+  // debug SELECT — matches CH semantics where the IF EXISTS form
+  // silently no-ops when the DB doesn't exist. No database_rewrites
+  // entry since there's no logical -> physical to record.
+  auto r = RunDynamic("DROP DATABASE IF EXISTS ghost",
+                      {.database_map = {{"tenant1", "testnet1"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_DATABASE);
+  EXPECT_NE(r.sql_after_rewrite.find("AS ddstmt"), std::string::npos);
+  EXPECT_TRUE(r.database_rewrites.empty());
+}
+
+TEST(TableRewrite, DropDatabase_KnownPhysicalOnly_Rejected) {
+  // Target appears in known_physical_databases but NOT in database_map.
+  // rewriter-managed DROP is a logical-level concept; bare physical-DB
+  // drops are out of scope. Reject (without IF EXISTS).
+  auto r = RunDynamic("DROP DATABASE testnet1",
+                      {.database_map = {{"tenant1", "testnet1"}},
+                       .known_physical_databases = {"testnet1"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("testnet1"), std::string::npos);
+}
+
+TEST(TableRewrite, DropDatabase_LiteralEscaping) {
+  // Single quote in the target identifier round-trips into the debug
+  // SELECT with the quote doubled (CH single-quoted-literal escape).
+  auto r = RunDynamic("DROP DATABASE IF EXISTS `weird'name`", {});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("''"), std::string::npos)
+    << "Expected doubled-quote escape; got: " << r.sql_after_rewrite;
+}
+
 // --- DROP / ALTER / UPDATE / DELETE ---
 
 TEST(TableRewrite, DropTable_Basic) {
@@ -1882,6 +1971,18 @@ TEST(TableRewrite, DropTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+}
+
+TEST(TableRewrite, TruncateTable_Basic) {
+  // TRUNCATE TABLE shares the unified single-target path with DROP TABLE;
+  // statement_type is the only thing that distinguishes them on the wire.
+  auto r = RunDynamic("TRUNCATE TABLE t",
+                      {.database_map = {{"tenant1", "testnet"}},
+                       .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_TRUNCATE_TABLE);
   EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
   EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
 }

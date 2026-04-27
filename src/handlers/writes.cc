@@ -292,35 +292,88 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   }
 
   if (auto *drop_query = ast->as<DB::ASTDropQuery>()) {
-    if (drop_query->kind == DB::ASTDropQuery::Kind::Truncate) {
-      rejectUnsupported(response, "TRUNCATE is not supported");
-      return WriteDispatchResult::Rejected;
-    }
+    const bool is_truncate = drop_query->kind == DB::ASTDropQuery::Kind::Truncate;
+    const std::string_view stmt_kind_str = is_truncate ? "TRUNCATE TABLE" : "DROP TABLE";
+
     if (drop_query->kind == DB::ASTDropQuery::Kind::Detach) {
       rejectUnsupported(response, "DETACH is not supported");
       return WriteDispatchResult::Rejected;
     }
     if (drop_query->is_view || drop_query->is_dictionary) {
-      rejectUnsupported(response, "DROP VIEW/DICTIONARY is not supported; only DROP TABLE is allowed");
+      rejectUnsupported(response, "DROP/TRUNCATE on VIEW/DICTIONARY is not supported; only DROP TABLE / TRUNCATE TABLE are allowed");
       return WriteDispatchResult::Rejected;
     }
     if (drop_query->database_and_tables) {
-      rejectUnsupported(response, "multi-table DROP is not supported");
+      rejectUnsupported(response, "multi-table DROP/TRUNCATE is not supported");
       return WriteDispatchResult::Rejected;
     }
     if (!drop_query->table) {
-      rejectUnsupported(response, "DROP DATABASE is not supported; only DROP TABLE is allowed");
-      return WriteDispatchResult::Rejected;
+      // TRUNCATE without a table is "TRUNCATE DATABASE" / "TRUNCATE ALL
+      // TABLES FROM <db>". A logical DB shares its physical DB with
+      // siblings via prefix-sharing, so a single CH-level TRUNCATE
+      // DATABASE would clear unrelated tenants. We could add a
+      // soft-flag path symmetric to DROP DATABASE, but TRUNCATE's
+      // semantics ("empty now") don't fit "deferred GC" the way DROP
+      // does — leaving it unsupported until there's a concrete need.
+      if (is_truncate) {
+        rejectUnsupported(response, "TRUNCATE DATABASE / TRUNCATE ALL TABLES FROM is not supported; only TRUNCATE TABLE is allowed");
+        return WriteDispatchResult::Rejected;
+      }
+      // DROP DATABASE — symmetric to the CREATE DATABASE path above. We
+      // never emit the DDL against the physical CH (a logical DB shares a
+      // physical DB with siblings via prefix-sharing; a single CH-level
+      // DROP DATABASE would nuke unrelated tenants). Instead, validate
+      // the request and rewrite to `SELECT '<original SQL>' AS ddstmt`
+      // so the user's intent lands in query_log. An external GC binary
+      // is expected to read query_log and reclaim the physical tables
+      // asynchronously.
+      if (!dynamic) {
+        rejectUnsupported(response,
+          "DROP DATABASE requires a TableNameRewrite/dynamic_args option to validate against");
+        return WriteDispatchResult::Rejected;
+      }
+
+      const std::string target_db = drop_query->getDatabase();
+
+      const auto db_map_it = dynamic->database_map().find(target_db);
+      if (db_map_it == dynamic->database_map().end()) {
+        // Not a managed logical DB. IF EXISTS lets us silently fall
+        // through to the debug rewrite (CH semantics: no-op when the DB
+        // doesn't exist). Without IF EXISTS, reject — the proxy is
+        // asking us to drop something we don't manage. We deliberately
+        // do NOT consult known_physical_databases here: rewriter-managed
+        // DROP is a logical-level concept; physical-DB lifecycle is out
+        // of scope.
+        if (!drop_query->if_exists) {
+          rejectInvalidRequest(response,
+            "DROP DATABASE target '" + target_db
+              + "' is not in database_map; use IF EXISTS to suppress this error");
+          return WriteDispatchResult::Rejected;
+        }
+      } else {
+        // Hit: record logical -> physical so the GC binary knows where
+        // to scan for the prefixed tables. IF EXISTS misses skip this
+        // (no logical -> physical to record).
+        recordDatabaseRewrite(response, target_db, db_map_it->second);
+      }
+
+      const std::string original_sql = formatAst(ast);
+      const std::string debug_sql =
+        "SELECT '" + escapeSqlLiteral(original_sql) + "' AS ddstmt";
+      setSuccessResponse(response, debug_sql, rewriter::STATEMENT_TYPE_DROP_DATABASE);
+      return WriteDispatchResult::Handled;
     }
 
     const std::string origin_db = drop_query->getDatabase();
     const std::string origin_table = drop_query->getTable();
-    if (!rewriteOneTarget(response, sel, origin_db, origin_table, "DROP TABLE",
+    if (!rewriteOneTarget(response, sel, origin_db, origin_table, stmt_kind_str,
         [&](const std::string &s){ drop_query->setDatabase(s); },
         [&](const std::string &s){ drop_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
     }
-    acceptWrite(ast, response, rewriter::STATEMENT_TYPE_DROP_TABLE);
+    acceptWrite(ast, response,
+                is_truncate ? rewriter::STATEMENT_TYPE_TRUNCATE_TABLE
+                            : rewriter::STATEMENT_TYPE_DROP_TABLE);
     return WriteDispatchResult::Handled;
   }
 
