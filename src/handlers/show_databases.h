@@ -1,30 +1,33 @@
 // src/handlers/show_databases.h
 //
 // SHOW DATABASES rewrite. Surfaces logical DBs from dynamic_args.database_map
-// plus known_physical_databases. Honors SHOW DATABASES LIKE / NOT LIKE /
-// ILIKE.
+// only — physical DB names are NEVER returned. `known_physical_databases`
+// is consulted as a trust anchor (which physicals the caller actually owns)
+// but its contents are not exposed to the caller; multi-tenant isolation
+// requires the SQL surface to speak only logical names. Honors SHOW
+// DATABASES LIKE / NOT LIKE / ILIKE.
 //
 // Per-entry handling for `database_map[logical] = physical`:
 //   1. If `physical` is NOT in `known_physical_databases` -> skip the entry
 //      entirely (no subquery, no `database_rewrites` record). The trusted
 //      physical-DB list is the source of truth; an entry pointing outside
 //      it is a config drift.
-//   2. Else if `logical` is in `logical_database_to_remote_upstream_index`
-//      -> emit `SELECT '<logical>' AS name` unconditionally. The local
-//      physical never holds the prefixed tables for a remote-mapped
-//      logical, so an existence check would always be false.
-//   3. Else -> emit the existence-check subquery against the local
-//      physical: `SELECT '<logical>' AS name WHERE (SELECT count() FROM
-//      system.tables WHERE database = '<physical>' AND startsWith(name,
-//      '<prefix>')) > 0`.
+//   2. Otherwise -> emit `SELECT '<logical>' AS name` unconditionally.
+//      A declared+trusted logical DB is always returned; we don't filter
+//      by "any tables exist with the dynamic prefix" — an empty logical
+//      DB is still a valid DB the caller can write into, and remote-mapped
+//      logicals would have failed the existence check anyway.
 //
 // Emits, with dynamic_args:
 //   SELECT name FROM (
-//     <per-entry subquery from rule 2 or 3>
-//     UNION ALL ...
+//     SELECT '<logical_a>' AS name
 //     UNION ALL
-//     SELECT name FROM system.databases WHERE name IN ('<known1>', ...)
+//     SELECT '<logical_b>' AS name
+//     ...
 //   ) [WHERE name LIKE '<pat>'] ORDER BY name
+//
+// When no entries survive the filters, the body is a sentinel that returns
+// zero rows (`SELECT '' AS name WHERE 0`).
 //
 // Without dynamic_args: passthrough as STATEMENT_TYPE_SHOW_DATABASES.
 //

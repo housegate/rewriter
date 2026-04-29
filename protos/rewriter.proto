@@ -243,10 +243,9 @@ message RewriteTableDynamicArgs {
     // to enumerate `system.tables` on the upstream cluster via
     // `remote('addr', system, tables, 'user', 'password')`, with the
     // same (database = physical AND startsWith(name, prefix)) filter the
-    // local path uses. SHOW DATABASES surfaces remote-mapped logicals
-    // unconditionally (a bare `SELECT '<logical>' AS name`) — the local
-    // physical never holds the prefixed tables, so its existence check
-    // would always be false.
+    // local path uses. SHOW DATABASES does not branch on remote-mapping
+    // — every declared+trusted logical (in `database_map` with `physical`
+    // ∈ `known_physical_databases`) is surfaced as a bare row regardless.
     //
     // A logical pointing to a key that's not in `remote_upstreams` is a
     // config bug → InvalidRewriteRequest.

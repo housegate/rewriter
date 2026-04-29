@@ -28,29 +28,17 @@ std::string buildLikeClause(const DB::ASTShowTablesQuery &show_query) {
   return " WHERE name " + op + " '" + escapeSqlLiteral(show_query.like) + "'";
 }
 
-// Local logical: existence-check subquery against system.tables on the
-// physical DB, filtered by the dynamic prefix.
+// Per-entry subquery: unconditionally surface the logical name.
 //
 //   SELECT '<logical>' AS name
-//   WHERE (SELECT count() FROM system.tables
-//          WHERE database = '<physical>' AND startsWith(name, '<prefix>')) > 0
-std::string buildDatabaseMapSubquery(const std::string &logical,
-                                     const std::string &physical,
-                                     const std::string &prefix) {
-  const std::string esc_logical  = escapeSqlLiteral(logical);
-  const std::string esc_physical = escapeSqlLiteral(physical);
-  const std::string esc_prefix   = escapeSqlLiteral(prefix);
-  return "SELECT '" + esc_logical + "' AS name "
-         "WHERE (SELECT count() FROM system.tables "
-                "WHERE database = '" + esc_physical + "' "
-                  "AND startsWith(name, '" + esc_prefix + "')) > 0";
-}
-
-// Remote logical: unconditionally surface the logical name. The local
-// physical never holds remote-mapped tables, so the existence check above
-// would always be false — emit a constant row instead so the caller still
-// sees the database in `SHOW DATABASES`.
-std::string buildRemoteDatabaseMapSubquery(const std::string &logical) {
+//
+// We don't filter by "any tables exist with the dynamic prefix" anymore.
+// A logical DB that the caller declared (via `database_map`) and trusted
+// (its `physical` is in `known_physical_databases`) is always returned —
+// an empty logical DB is still a valid DB the caller can write into, and
+// for remote-mapped logicals the existence check would have been false
+// anyway (the prefixed tables live on the upstream cluster).
+std::string buildLogicalSubquery(const std::string &logical) {
   return "SELECT '" + escapeSqlLiteral(logical) + "' AS name";
 }
 
@@ -88,39 +76,17 @@ bool handleShowDatabasesQuery(DB::ASTPtr ast,
       dynamic->known_physical_databases().begin(),
       dynamic->known_physical_databases().end());
 
+  // known_physical_databases is a trust anchor only — physical DBs are
+  // never surfaced to the caller directly. Multi-tenant isolation: the
+  // caller speaks logical names; physical names are an implementation
+  // detail of the rewriter and should never leak into a `SHOW DATABASES`
+  // result.
   std::vector<std::string> subqueries;
-  subqueries.reserve(entries.size() + 1);
+  subqueries.reserve(entries.size());
   for (const auto &[logical, physical] : entries) {
     if (!known_physical.count(physical)) continue;
-
-    // Remote-mapped logicals can't be existence-checked against the local
-    // cluster (the prefixed tables live on the upstream). Always include
-    // them. Local logicals keep the prefix-existence check.
-    const bool is_remote =
-      dynamic->logical_database_to_remote_upstream_index().count(logical) > 0;
-    if (is_remote) {
-      subqueries.push_back(buildRemoteDatabaseMapSubquery(logical));
-    } else {
-      const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
-      subqueries.push_back(buildDatabaseMapSubquery(logical, physical, prefix));
-    }
+    subqueries.push_back(buildLogicalSubquery(logical));
     recordDatabaseRewrite(response, logical, physical);
-  }
-
-  // known_physical_databases -> single SELECT against system.databases
-  // filtered by IN list. Sort the names so the emitted SQL is stable.
-  if (dynamic->known_physical_databases_size() > 0) {
-    std::vector<std::string> phys(dynamic->known_physical_databases().begin(),
-                                  dynamic->known_physical_databases().end());
-    std::sort(phys.begin(), phys.end());
-
-    std::string in_list;
-    for (size_t i = 0; i < phys.size(); ++i) {
-      if (i > 0) in_list += ", ";
-      in_list += "'" + escapeSqlLiteral(phys[i]) + "'";
-    }
-    subqueries.push_back(
-      "SELECT name FROM system.databases WHERE name IN (" + in_list + ")");
   }
 
   std::string body;

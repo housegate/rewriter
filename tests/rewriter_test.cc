@@ -1777,9 +1777,11 @@ TEST(ShowDatabases, Passthrough_NoOptions) {
 }
 
 TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
-  // database_map -> one existence-check subquery per logical (whose
-  // physical is in known_physical_databases), alphabetical by logical
-  // name, joined with UNION ALL, wrapped with ORDER BY name.
+  // database_map -> one bare `SELECT '<logical>' AS name` subquery per
+  // entry whose physical is in known_physical_databases, alphabetical by
+  // logical name, joined with UNION ALL, wrapped with ORDER BY name. We
+  // don't existence-check tables anymore: a declared+trusted logical DB
+  // is always returned (an empty logical DB is still a valid DB).
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant2", "testnet2"}, {"tenant1", "testnet1"}},
@@ -1788,18 +1790,21 @@ TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_DATABASES);
 
   const auto &sql = r.sql_after_rewrite;
-  // Per-tenant subquery shape.
+  // Per-tenant subquery shape: bare SELECT, no count()/startsWith/system.tables.
   EXPECT_NE(sql.find("SELECT 'tenant1' AS name"), std::string::npos);
   EXPECT_NE(sql.find("SELECT 'tenant2' AS name"), std::string::npos);
-  EXPECT_NE(sql.find("database = 'testnet1'"), std::string::npos);
-  EXPECT_NE(sql.find("database = 'testnet2'"), std::string::npos);
-  EXPECT_NE(sql.find("startsWith(name, 'tenant1_')"), std::string::npos);
-  EXPECT_NE(sql.find("startsWith(name, 'tenant2_')"), std::string::npos);
+  EXPECT_EQ(sql.find("count()"),        std::string::npos);
+  EXPECT_EQ(sql.find("startsWith"),     std::string::npos);
+  EXPECT_EQ(sql.find("system.tables"),  std::string::npos);
+  EXPECT_EQ(sql.find("system.databases"), std::string::npos);
+  // No physical names leak.
+  EXPECT_EQ(sql.find("testnet1"), std::string::npos);
+  EXPECT_EQ(sql.find("testnet2"), std::string::npos);
   // Alphabetical: tenant1 appears before tenant2.
   EXPECT_LT(sql.find("'tenant1'"), sql.find("'tenant2'"));
   // Outer ORDER BY.
   EXPECT_NE(sql.find("ORDER BY name"), std::string::npos);
-  // UNION ALL joins the per-tenant subqueries plus the known_physical IN clause.
+  // UNION ALL joins the two per-tenant subqueries.
   EXPECT_NE(sql.find("UNION ALL"), std::string::npos);
 
   // database_rewrites contains all map entries (logical != physical).
@@ -1829,9 +1834,10 @@ TEST(ShowDatabases, DatabaseMap_SkipsEntryWhosePhysicalIsNotKnown) {
   EXPECT_EQ(r.database_rewrites["tenant_ok"], "testnet_ok");
 }
 
-TEST(ShowDatabases, DatabaseMap_RemoteLogical_AlwaysReturned) {
-  // Remote-mapped logicals can't be existence-checked locally — emit a
-  // bare `SELECT '<logical>' AS name` (no count() guard).
+TEST(ShowDatabases, DatabaseMap_RemoteAndLocal_BothBare) {
+  // Remote and local logicals are now indistinguishable in the output —
+  // both emit a bare `SELECT '<logical>' AS name`. We always return a
+  // declared+trusted logical DB; existence is not checked.
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant_remote", "testnet_remote"},
@@ -1842,46 +1848,48 @@ TEST(ShowDatabases, DatabaseMap_RemoteLogical_AlwaysReturned) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
 
   const auto &sql = r.sql_after_rewrite;
-  // Remote logical: bare SELECT, no count()/startsWith for that one.
   EXPECT_NE(sql.find("SELECT 'tenant_remote' AS name"), std::string::npos);
-  EXPECT_EQ(sql.find("startsWith(name, 'tenant_remote_')"), std::string::npos);
-  EXPECT_EQ(sql.find("database = 'testnet_remote'"),       std::string::npos);
-  // Local logical still has the full existence-check shape.
-  EXPECT_NE(sql.find("startsWith(name, 'tenant_local_')"), std::string::npos);
-  EXPECT_NE(sql.find("database = 'testnet_local'"),        std::string::npos);
-  // Both go into database_rewrites.
+  EXPECT_NE(sql.find("SELECT 'tenant_local' AS name"),  std::string::npos);
+  // Neither shape carries the existence check.
+  EXPECT_EQ(sql.find("count()"),         std::string::npos);
+  EXPECT_EQ(sql.find("startsWith"),      std::string::npos);
+  EXPECT_EQ(sql.find("system.tables"),   std::string::npos);
+  // Physical names never leak.
+  EXPECT_EQ(sql.find("testnet_remote"),  std::string::npos);
+  EXPECT_EQ(sql.find("testnet_local"),   std::string::npos);
+  // Remote upstream connection details belong to SHOW TABLES, not here.
+  EXPECT_EQ(sql.find("ch-remote:9000"),  std::string::npos);
+
   EXPECT_EQ(r.database_rewrites["tenant_remote"], "testnet_remote");
   EXPECT_EQ(r.database_rewrites["tenant_local"],  "testnet_local");
 }
 
-TEST(ShowDatabases, DatabaseMap_WithExtraArgs) {
-  // extra_arguments thread through buildDynamicTablePrefix.
-  auto r = RunDynamic(
+TEST(ShowDatabases, DatabaseMap_ExtraArgsAndDelim_NoEffect) {
+  // Prefix-related fields (`extra_arguments`, `delim`) are inputs to the
+  // dynamic *table-prefix* construction used by SHOW TABLES — they have
+  // nothing to do with SHOW DATABASES, since we no longer build a prefix
+  // here. Verify the output is identical with and without them.
+  auto plain = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
-     .known_physical_databases = {"testnet"},
-     .extra_arguments = {"v2", "shard0"}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1_v2_shard0_')"),
-            std::string::npos);
-}
-
-TEST(ShowDatabases, DatabaseMap_CustomDelim) {
-  auto r = RunDynamic(
+     .known_physical_databases = {"testnet"}});
+  auto with_extras = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
      .known_physical_databases = {"testnet"},
      .delim = "-",
-     .extra_arguments = {"v2"}});
-  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1-v2-')"),
-            std::string::npos);
+     .extra_arguments = {"v2", "shard0"}});
+  EXPECT_EQ(plain.code,        rewriter::RewriteCode::Success);
+  EXPECT_EQ(with_extras.code,  rewriter::RewriteCode::Success);
+  EXPECT_EQ(plain.sql_after_rewrite, with_extras.sql_after_rewrite);
+  EXPECT_EQ(with_extras.sql_after_rewrite.find("v2"),     std::string::npos);
+  EXPECT_EQ(with_extras.sql_after_rewrite.find("shard0"), std::string::npos);
 }
 
-TEST(ShowDatabases, KnownPhysicalOnly) {
-  // No database_map; only known_physical_databases. The output is a single
-  // subquery against system.databases filtered by the IN clause; nothing
-  // lands in database_rewrites because logical == physical.
+TEST(ShowDatabases, KnownPhysicalOnly_NeverSurfacesPhysicals) {
+  // No database_map; only known_physical_databases. Physical DB names are
+  // a trust anchor, not user-visible — the rewriter must NOT leak them
+  // through SHOW DATABASES. Output is the empty-body sentinel.
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.known_physical_databases = {"realdb2", "realdb1"}});
@@ -1889,11 +1897,13 @@ TEST(ShowDatabases, KnownPhysicalOnly) {
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_DATABASES);
 
   const auto &sql = r.sql_after_rewrite;
-  EXPECT_NE(sql.find("SELECT name FROM system.databases"), std::string::npos);
-  // Names sorted alphabetically inside the IN list.
-  EXPECT_NE(sql.find("name IN ('realdb1', 'realdb2')"), std::string::npos);
-  EXPECT_EQ(sql.find("system.tables"), std::string::npos);
+  // No system.databases / no IN-list; no physical names in the SQL.
+  EXPECT_EQ(sql.find("system.databases"), std::string::npos);
+  EXPECT_EQ(sql.find("realdb1"), std::string::npos);
+  EXPECT_EQ(sql.find("realdb2"), std::string::npos);
   EXPECT_EQ(sql.find("UNION ALL"), std::string::npos);
+  // Empty body sentinel + outer ORDER BY.
+  EXPECT_NE(sql.find("SELECT '' AS name WHERE 0"), std::string::npos);
   EXPECT_NE(sql.find("ORDER BY name"), std::string::npos);
 
   EXPECT_TRUE(r.database_rewrites.empty());
@@ -1901,21 +1911,27 @@ TEST(ShowDatabases, KnownPhysicalOnly) {
 }
 
 TEST(ShowDatabases, Mixed_DatabaseMapAndKnownPhysical) {
-  // testnet1 is both the value of a database_map entry AND a directly
-  // exposed physical via known_physical_databases (so the IN-clause
-  // subquery still emits). realdb1 is only directly exposed.
+  // testnet1 is both the value of a database_map entry AND a member of
+  // known_physical_databases (the trust anchor). realdb1 is only directly
+  // exposed as a physical — and must NOT show up in the result, since
+  // physical DB names are never surfaced. testnet1 also must not leak as
+  // a string literal (it's only ever in `database_rewrites`).
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet1"}},
      .known_physical_databases = {"testnet1", "realdb1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   const auto &sql = r.sql_after_rewrite;
-  // Both subquery groups present, joined by UNION ALL.
+  // Only the logical name is in the SQL.
   EXPECT_NE(sql.find("SELECT 'tenant1' AS name"), std::string::npos);
-  EXPECT_NE(sql.find("system.databases"), std::string::npos);
-  EXPECT_NE(sql.find("UNION ALL"), std::string::npos);
-  // Only the database_map entry is recorded — known_physical entries are
-  // logical == physical and recordDatabaseRewrite skips no-ops.
+  // No system.* references; no physical names leaked.
+  EXPECT_EQ(sql.find("system.databases"), std::string::npos);
+  EXPECT_EQ(sql.find("system.tables"),    std::string::npos);
+  EXPECT_EQ(sql.find("realdb1"),  std::string::npos);
+  EXPECT_EQ(sql.find("testnet1"), std::string::npos);
+  // Single per-tenant subquery: no UNION ALL.
+  EXPECT_EQ(sql.find("UNION ALL"), std::string::npos);
+  // Only the database_map entry is recorded.
   EXPECT_EQ(r.database_rewrites["tenant1"], "testnet1");
   EXPECT_EQ(r.database_rewrites.size(), 1u);
 }
