@@ -1777,11 +1777,13 @@ TEST(ShowDatabases, Passthrough_NoOptions) {
 }
 
 TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
-  // database_map -> one existence-check subquery per logical, alphabetical
-  // by logical name, joined with UNION ALL, wrapped with ORDER BY name.
+  // database_map -> one existence-check subquery per logical (whose
+  // physical is in known_physical_databases), alphabetical by logical
+  // name, joined with UNION ALL, wrapped with ORDER BY name.
   auto r = RunDynamic(
     "SHOW DATABASES",
-    {.database_map = {{"tenant2", "testnet2"}, {"tenant1", "testnet1"}}});
+    {.database_map = {{"tenant2", "testnet2"}, {"tenant1", "testnet1"}},
+     .known_physical_databases = {"testnet1", "testnet2"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_DATABASES);
 
@@ -1797,7 +1799,7 @@ TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
   EXPECT_LT(sql.find("'tenant1'"), sql.find("'tenant2'"));
   // Outer ORDER BY.
   EXPECT_NE(sql.find("ORDER BY name"), std::string::npos);
-  // UNION ALL joins the two per-tenant subqueries.
+  // UNION ALL joins the per-tenant subqueries plus the known_physical IN clause.
   EXPECT_NE(sql.find("UNION ALL"), std::string::npos);
 
   // database_rewrites contains all map entries (logical != physical).
@@ -1807,11 +1809,57 @@ TEST(ShowDatabases, DatabaseMap_AlphabeticalUnion) {
   EXPECT_EQ(r.database_rewrites.size(), 2u);
 }
 
+TEST(ShowDatabases, DatabaseMap_SkipsEntryWhosePhysicalIsNotKnown) {
+  // database_map entry whose physical is not in known_physical_databases
+  // is dropped — no subquery, no database_rewrites entry. The other entry
+  // is unaffected.
+  auto r = RunDynamic(
+    "SHOW DATABASES",
+    {.database_map = {{"tenant_drift", "ghost_phys"},
+                      {"tenant_ok",    "testnet_ok"}},
+     .known_physical_databases = {"testnet_ok"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+
+  const auto &sql = r.sql_after_rewrite;
+  EXPECT_EQ(sql.find("'tenant_drift'"), std::string::npos);
+  EXPECT_EQ(sql.find("ghost_phys"),     std::string::npos);
+  EXPECT_NE(sql.find("'tenant_ok' AS name"), std::string::npos);
+
+  EXPECT_EQ(r.database_rewrites.count("tenant_drift"), 0u);
+  EXPECT_EQ(r.database_rewrites["tenant_ok"], "testnet_ok");
+}
+
+TEST(ShowDatabases, DatabaseMap_RemoteLogical_AlwaysReturned) {
+  // Remote-mapped logicals can't be existence-checked locally — emit a
+  // bare `SELECT '<logical>' AS name` (no count() guard).
+  auto r = RunDynamic(
+    "SHOW DATABASES",
+    {.database_map = {{"tenant_remote", "testnet_remote"},
+                      {"tenant_local",  "testnet_local"}},
+     .known_physical_databases = {"testnet_remote", "testnet_local"},
+     .logical_database_to_remote_upstream_index = {{"tenant_remote", "us_east"}},
+     .remote_upstreams = {{"us_east", {"ch-remote:9000", "ro", "secret"}}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+
+  const auto &sql = r.sql_after_rewrite;
+  // Remote logical: bare SELECT, no count()/startsWith for that one.
+  EXPECT_NE(sql.find("SELECT 'tenant_remote' AS name"), std::string::npos);
+  EXPECT_EQ(sql.find("startsWith(name, 'tenant_remote_')"), std::string::npos);
+  EXPECT_EQ(sql.find("database = 'testnet_remote'"),       std::string::npos);
+  // Local logical still has the full existence-check shape.
+  EXPECT_NE(sql.find("startsWith(name, 'tenant_local_')"), std::string::npos);
+  EXPECT_NE(sql.find("database = 'testnet_local'"),        std::string::npos);
+  // Both go into database_rewrites.
+  EXPECT_EQ(r.database_rewrites["tenant_remote"], "testnet_remote");
+  EXPECT_EQ(r.database_rewrites["tenant_local"],  "testnet_local");
+}
+
 TEST(ShowDatabases, DatabaseMap_WithExtraArgs) {
   // extra_arguments thread through buildDynamicTablePrefix.
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
+     .known_physical_databases = {"testnet"},
      .extra_arguments = {"v2", "shard0"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1_v2_shard0_')"),
@@ -1822,6 +1870,7 @@ TEST(ShowDatabases, DatabaseMap_CustomDelim) {
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet"}},
+     .known_physical_databases = {"testnet"},
      .delim = "-",
      .extra_arguments = {"v2"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -1852,17 +1901,21 @@ TEST(ShowDatabases, KnownPhysicalOnly) {
 }
 
 TEST(ShowDatabases, Mixed_DatabaseMapAndKnownPhysical) {
+  // testnet1 is both the value of a database_map entry AND a directly
+  // exposed physical via known_physical_databases (so the IN-clause
+  // subquery still emits). realdb1 is only directly exposed.
   auto r = RunDynamic(
     "SHOW DATABASES",
     {.database_map = {{"tenant1", "testnet1"}},
-     .known_physical_databases = {"realdb1"}});
+     .known_physical_databases = {"testnet1", "realdb1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   const auto &sql = r.sql_after_rewrite;
   // Both subquery groups present, joined by UNION ALL.
   EXPECT_NE(sql.find("SELECT 'tenant1' AS name"), std::string::npos);
   EXPECT_NE(sql.find("system.databases"), std::string::npos);
   EXPECT_NE(sql.find("UNION ALL"), std::string::npos);
-  // Only the database_map entry is recorded.
+  // Only the database_map entry is recorded — known_physical entries are
+  // logical == physical and recordDatabaseRewrite skips no-ops.
   EXPECT_EQ(r.database_rewrites["tenant1"], "testnet1");
   EXPECT_EQ(r.database_rewrites.size(), 1u);
 }
@@ -1870,7 +1923,8 @@ TEST(ShowDatabases, Mixed_DatabaseMapAndKnownPhysical) {
 TEST(ShowDatabases, Like_Pattern) {
   auto r = RunDynamic(
     "SHOW DATABASES LIKE 'tenant%'",
-    {.database_map = {{"tenant1", "testnet1"}, {"sysdb", "physsys"}}});
+    {.database_map = {{"tenant1", "testnet1"}, {"sysdb", "physsys"}},
+     .known_physical_databases = {"testnet1", "physsys"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("WHERE name LIKE 'tenant%'"),
             std::string::npos);
@@ -1879,7 +1933,8 @@ TEST(ShowDatabases, Like_Pattern) {
 TEST(ShowDatabases, NotLike_Pattern) {
   auto r = RunDynamic(
     "SHOW DATABASES NOT LIKE 'sys%'",
-    {.database_map = {{"tenant1", "testnet1"}}});
+    {.database_map = {{"tenant1", "testnet1"}},
+     .known_physical_databases = {"testnet1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("WHERE name NOT LIKE 'sys%'"),
             std::string::npos);
@@ -1888,7 +1943,8 @@ TEST(ShowDatabases, NotLike_Pattern) {
 TEST(ShowDatabases, Ilike_Pattern) {
   auto r = RunDynamic(
     "SHOW DATABASES ILIKE 'TENANT%'",
-    {.database_map = {{"tenant1", "testnet1"}}});
+    {.database_map = {{"tenant1", "testnet1"}},
+     .known_physical_databases = {"testnet1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("WHERE name ILIKE 'TENANT%'"),
             std::string::npos);

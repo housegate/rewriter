@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "handlers/common.h"
@@ -27,8 +28,12 @@ std::string buildLikeClause(const DB::ASTShowTablesQuery &show_query) {
   return " WHERE name " + op + " '" + escapeSqlLiteral(show_query.like) + "'";
 }
 
-// Build "SELECT '<logical>' AS name WHERE (SELECT count() FROM system.tables
-//        WHERE database = '<physical>' AND startsWith(name, '<prefix>')) > 0"
+// Local logical: existence-check subquery against system.tables on the
+// physical DB, filtered by the dynamic prefix.
+//
+//   SELECT '<logical>' AS name
+//   WHERE (SELECT count() FROM system.tables
+//          WHERE database = '<physical>' AND startsWith(name, '<prefix>')) > 0
 std::string buildDatabaseMapSubquery(const std::string &logical,
                                      const std::string &physical,
                                      const std::string &prefix) {
@@ -39,6 +44,14 @@ std::string buildDatabaseMapSubquery(const std::string &logical,
          "WHERE (SELECT count() FROM system.tables "
                 "WHERE database = '" + esc_physical + "' "
                   "AND startsWith(name, '" + esc_prefix + "')) > 0";
+}
+
+// Remote logical: unconditionally surface the logical name. The local
+// physical never holds remote-mapped tables, so the existence check above
+// would always be false — emit a constant row instead so the caller still
+// sees the database in `SHOW DATABASES`.
+std::string buildRemoteDatabaseMapSubquery(const std::string &logical) {
+  return "SELECT '" + escapeSqlLiteral(logical) + "' AS name";
 }
 
 } // namespace
@@ -67,11 +80,30 @@ bool handleShowDatabasesQuery(DB::ASTPtr ast,
   std::sort(entries.begin(), entries.end(),
             [](const auto &a, const auto &b) { return a.first < b.first; });
 
+  // Trust-anchor: only surface a database_map entry when its physical DB is
+  // declared in known_physical_databases. Anything else is a config drift
+  // (or a DB the caller doesn't actually own a physical for) and gets
+  // skipped — no subquery, no `database_rewrites` entry.
+  const std::unordered_set<std::string> known_physical(
+      dynamic->known_physical_databases().begin(),
+      dynamic->known_physical_databases().end());
+
   std::vector<std::string> subqueries;
   subqueries.reserve(entries.size() + 1);
   for (const auto &[logical, physical] : entries) {
-    const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
-    subqueries.push_back(buildDatabaseMapSubquery(logical, physical, prefix));
+    if (!known_physical.count(physical)) continue;
+
+    // Remote-mapped logicals can't be existence-checked against the local
+    // cluster (the prefixed tables live on the upstream). Always include
+    // them. Local logicals keep the prefix-existence check.
+    const bool is_remote =
+      dynamic->logical_database_to_remote_upstream_index().count(logical) > 0;
+    if (is_remote) {
+      subqueries.push_back(buildRemoteDatabaseMapSubquery(logical));
+    } else {
+      const std::string prefix = buildDynamicTablePrefix(logical, *dynamic);
+      subqueries.push_back(buildDatabaseMapSubquery(logical, physical, prefix));
+    }
     recordDatabaseRewrite(response, logical, physical);
   }
 

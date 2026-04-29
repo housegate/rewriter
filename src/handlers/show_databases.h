@@ -1,14 +1,26 @@
 // src/handlers/show_databases.h
 //
-// SHOW DATABASES rewrite. Returns logical DBs from dynamic_args.database_map
-// (filtered by "does any table with the dynamic prefix exist in the
-// physical DB") plus known_physical_databases that are present in
-// system.databases. Honors SHOW DATABASES LIKE / NOT LIKE / ILIKE.
+// SHOW DATABASES rewrite. Surfaces logical DBs from dynamic_args.database_map
+// plus known_physical_databases. Honors SHOW DATABASES LIKE / NOT LIKE /
+// ILIKE.
+//
+// Per-entry handling for `database_map[logical] = physical`:
+//   1. If `physical` is NOT in `known_physical_databases` -> skip the entry
+//      entirely (no subquery, no `database_rewrites` record). The trusted
+//      physical-DB list is the source of truth; an entry pointing outside
+//      it is a config drift.
+//   2. Else if `logical` is in `logical_database_to_remote_upstream_index`
+//      -> emit `SELECT '<logical>' AS name` unconditionally. The local
+//      physical never holds the prefixed tables for a remote-mapped
+//      logical, so an existence check would always be false.
+//   3. Else -> emit the existence-check subquery against the local
+//      physical: `SELECT '<logical>' AS name WHERE (SELECT count() FROM
+//      system.tables WHERE database = '<physical>' AND startsWith(name,
+//      '<prefix>')) > 0`.
 //
 // Emits, with dynamic_args:
 //   SELECT name FROM (
-//     SELECT '<logical_a>' AS name WHERE (SELECT count() FROM system.tables
-//        WHERE database = '<phys_a>' AND startsWith(name, '<prefix_a>')) > 0
+//     <per-entry subquery from rule 2 or 3>
 //     UNION ALL ...
 //     UNION ALL
 //     SELECT name FROM system.databases WHERE name IN ('<known1>', ...)
