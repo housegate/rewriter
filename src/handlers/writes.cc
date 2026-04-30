@@ -511,10 +511,9 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     case DB::IAST::QueryKind::Undrop:
       rejectUnsupported(response, "UNDROP is not supported");
       return WriteDispatchResult::Rejected;
-    case DB::IAST::QueryKind::Grant:
-    case DB::IAST::QueryKind::Revoke:
-      rejectUnsupported(response, "GRANT/REVOKE is not supported");
-      return WriteDispatchResult::Rejected;
+    // GRANT / REVOKE are handled by handlers/grant.cc, which dispatches
+    // before handleWriteQuery in rewriter-server.cc. They never fall through
+    // to this switch.
     case DB::IAST::QueryKind::Move:
       rejectUnsupported(response, "MOVE is not supported");
       return WriteDispatchResult::Rejected;

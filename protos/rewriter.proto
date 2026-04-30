@@ -349,13 +349,34 @@ enum RewriteCode {
     //     VIEW/DATABASE/DICTIONARY, INSERT INTO FUNCTION,
     //     ALTER (non-TABLE), ALTER TABLE with cross-table partition refs
     //     (ATTACH/REPLACE/FETCH PARTITION FROM other,
-    //     MOVE PARTITION TO TABLE other), GRANT/REVOKE, MOVE,
+    //     MOVE PARTITION TO TABLE other), MOVE,
     //     BACKUP/RESTORE, KILL, COPY, external DDL, async insert flush.
     //   * CREATE DATABASE without a TableNameRewrite/dynamic_args option
     //     to validate against — without context the rewriter can't safely
     //     emit anything.
     //   * Static-mode `remote_table_map` hit on a non-SELECT table target —
     //     `remote()` is not a valid INSERT/UPDATE/DELETE/etc. target.
+    //   * GRANT/REVOKE variants the privilege-delta path doesn't model:
+    //       - global scope (`ON *.*`).
+    //       - role-membership grants (`GRANT role TO user`,
+    //         `REVOKE role FROM user`) — note: this only catches the
+    //         dedicated role-membership statement form. A privilege grant
+    //         whose grantee NAME happens to refer to a role
+    //         (`GRANT SELECT ON db.t TO some_role`) cannot be distinguished
+    //         from a user grant at parse time and passes through; the
+    //         downstream auth service is expected to reject unknown names.
+    //       - column-level grants (`GRANT SELECT(c1, c2) ON db.t TO u`) —
+    //         rejected rather than silently broadened to a table-wide
+    //         grant, since dropping the column list would expand privilege
+    //         scope in the audit trail.
+    //       - WITH REPLACE OPTION (destructive replace, not an additive
+    //         delta).
+    //       - REVOKE FROM ALL / REVOKE FROM ALL EXCEPT u1[, u2…]
+    //         (mass revokes don't fit the additive delta model).
+    //       - GRANT CURRENT GRANTS.
+    //   * GRANT/REVOKE without a TableNameRewrite/dynamic_args option to
+    //     validate against — without context the rewriter can't safely
+    //     emit anything (mirrors CREATE DATABASE / DROP DATABASE).
     UnsupportedStatement = 3;
     // The caller's RewriteOption cannot be applied to this statement —
     // their rewrite config is semantically incorrect for the SQL they sent.
@@ -378,6 +399,13 @@ enum RewriteCode {
     //     the SQL is not `IF NOT EXISTS`.
     //   * CREATE DATABASE where `upstream_physical_database_in_context` is
     //     set but is not a member of `known_physical_databases`.
+    //   * GRANT or REVOKE names a logical database that is neither in
+    //     `dynamic_args.database_map` nor in
+    //     `dynamic_args.known_physical_databases` — the user doesn't have
+    //     that database to grant on.
+    //   * GRANT or REVOKE has a bare table identifier (no qualifier) and
+    //     `dynamic_args.upstream_logical_database_in_context` is empty —
+    //     the rewriter has no way to pick a logical/physical database.
     InvalidRewriteRequest = 4;
 }
 
@@ -434,6 +462,19 @@ enum StatementType {
     // unsupported (would need to enumerate prefix-shared tables, same
     // problem as DROP DATABASE; not currently in scope).
     STATEMENT_TYPE_TRUNCATE_TABLE = 16;
+    // GRANT — the rewriter does NOT execute the GRANT on ClickHouse (a
+    // logical DB shares its physical DB with sibling tenants via
+    // prefix-sharing, so a CH-level grant scoped to the physical DB would
+    // leak across tenants). It validates the statement against
+    // dynamic_args, emits structured records into
+    // `response.privileges_deltas`, drops any `ON CLUSTER` clause, and
+    // rewrites the SQL to `SELECT '<original SQL minus ON CLUSTER>' AS
+    // gstmt` so the intent ends up in CH query_log. An external auth
+    // service is expected to consume the deltas. See PrivilegeDelta.
+    STATEMENT_TYPE_GRANT = 17;
+    // REVOKE — symmetric to GRANT. SQL rewritten to
+    // `SELECT '<original SQL minus ON CLUSTER>' AS rstmt`.
+    STATEMENT_TYPE_REVOKE = 18;
 }
 
 message RewriteSQLResponse {
@@ -521,6 +562,19 @@ message RewriteSQLResponse {
     // partial list — entries up to the target that triggered the reject.
     // Callers shouldn't act on it in that case.
     repeated AccessedTable original_accessed_tables = 12;
+
+    // Privilege changes extracted from a GRANT or REVOKE statement. Empty
+    // for every other statement_type. See PrivilegeDelta and
+    // STATEMENT_TYPE_GRANT / STATEMENT_TYPE_REVOKE for the full contract.
+    //
+    // GRANT/REVOKE does NOT populate `original_accessed_tables` —
+    // permission management is not a data access. All structured output
+    // for these statements goes through this field.
+    //
+    // On a rejected (non-Success) response, this field may carry a partial
+    // list (entries up to the AccessRightsElement that triggered the
+    // reject). Callers shouldn't act on it in that case.
+    repeated PrivilegeDelta privileges_deltas = 13;
 }
 
 // One table or database the SQL referenced before rewrite, with the
@@ -563,6 +617,123 @@ message AccessedTable {
     string logical_database = 3;
     string physical_database = 4;
     bool is_remote = 5;
+}
+
+// =============================================================================
+// GRANT/REVOKE: privilege deltas
+// =============================================================================
+//
+// Like CREATE DATABASE / DROP DATABASE, the rewriter does NOT execute GRANT
+// or REVOKE on ClickHouse — a logical DB shares its physical DB with sibling
+// tenants via prefix-sharing, so a CH-level grant scoped to the physical DB
+// would leak across tenants. The handler:
+//
+//   1. Validates the statement against `dynamic_args` (logical DB resolves
+//      to a known physical, etc.).
+//   2. Populates `response.privileges_deltas` with one structured entry per
+//      (scope, target). Privilege names and grantees are preserved verbatim.
+//   3. Drops any `ON CLUSTER` clause from the AST and rewrites the SQL to
+//      `SELECT '<original SQL minus ON CLUSTER>' AS gstmt` (GRANT) or
+//      `... AS rstmt` (REVOKE) so the intent ends up in CH query_log.
+//
+// An external auth service consumes `privileges_deltas` and reconciles the
+// per-tenant permission store. The rewriter never enforces permissions
+// itself.
+//
+// No new RewriteOp — GRANT/REVOKE handling activates automatically when a
+// TableNameRewrite option with `dynamic_args` is present and the SQL is
+// classified as GRANT or REVOKE.
+
+// One privilege change extracted from a GRANT or REVOKE statement.
+//
+// Fan-out: one entry per AccessRightsElement, which is the parser's
+// per-privilege unit. ClickHouse's GRANT parser splits comma-separated
+// privileges into separate elements (and does NOT accept comma-separated
+// ON targets — that's a syntax error, multiple targets need separate
+// statements). So:
+//   GRANT SELECT, INSERT ON db.t TO u1, u2
+//     -> 2 deltas: privileges=[SELECT] and privileges=[INSERT];
+//        each carries the same target and the same grantees=[u1,u2].
+// `privileges` is therefore typically a single-element list; `grantees`
+// stays aggregated.
+message PrivilegeDelta {
+    enum Action {
+        ACTION_UNSPECIFIED = 0;
+        ACTION_GRANT = 1;
+        ACTION_REVOKE = 2;
+    }
+
+    // Mirrors ClickHouse's AccessRightsElement{any_database, any_table}.
+    // No SCOPE_GLOBAL — `ON *.*` is rejected as UnsupportedStatement.
+    enum Scope {
+        SCOPE_UNSPECIFIED = 0;
+        SCOPE_TABLE = 1;     // ON db.table
+        SCOPE_DATABASE = 2;  // ON db.*
+    }
+
+    // Recipient of the privilege grant / target of the revoke.
+    //
+    // The rewriter does NOT distinguish a user from a role at parse time —
+    // ClickHouse's parser packs both into the same RolesOrUsersSet AST
+    // node without tagging, and the auth model the rewriter targets has
+    // no role concept. Callers are expected to ensure every grantee
+    // resolves to a real user; an unknown name passes through here and
+    // is rejected by the downstream auth service.
+    //
+    // The dedicated role-membership statement form (`GRANT role TO user`,
+    // `REVOKE role FROM user`) IS detected at the AST level (non-empty
+    // ASTGrantQuery::roles) and rejected as UnsupportedStatement before
+    // any deltas are emitted.
+    message Grantee {
+        // Name as written in the SQL — not mapped through any rewriter
+        // config. Empty when `is_current_user` is true.
+        string name = 1;
+        // The grantee was the literal CURRENT_USER syntax. Resolved by
+        // the downstream auth service at evaluation time; the rewriter
+        // does not expand it.
+        bool is_current_user = 2;
+    }
+
+    Action action = 1;
+    Scope scope = 2;
+
+    // Database identifier as written in the SQL. Empty when the statement
+    // used a bare table and the rewriter defaulted to
+    // `dynamic_args.upstream_logical_database_in_context`.
+    string original_database = 3;
+
+    // Resolved logical DB — SQL qualifier OR
+    // `upstream_logical_database_in_context`. Always set on Success.
+    string logical_database = 4;
+
+    // Resolved physical DB — `database_map[logical_database]`, or
+    // `logical_database` itself when it's in `known_physical_databases`.
+    // Always set on Success.
+    string physical_database = 5;
+
+    // SCOPE_TABLE only — table identifier as written in the SQL.
+    // Empty for SCOPE_DATABASE.
+    string original_table = 6;
+
+    // SCOPE_TABLE only — physical table name constructed via the same
+    // rule the table-targeting handlers use:
+    //   logical + delim + (extras + delim, iff non-empty) + original_table
+    // Empty for SCOPE_DATABASE.
+    string physical_table = 7;
+
+    // Privilege names exactly as ClickHouse's parser emits them:
+    //   "SELECT", "INSERT", "ALTER UPDATE", "ALTER DELETE",
+    //   "ALTER ADD COLUMN", "CREATE TABLE", "DROP TABLE", "TRUNCATE",
+    //   "OPTIMIZE", "SHOW TABLES", "dictGet", "ALL", ...
+    // Preserved verbatim — the rewriter does NOT collapse these into a
+    // smaller taxonomy. Downstream owns that mapping.
+    repeated string privileges = 8;
+
+    // GRANT TO list / REVOKE FROM list, in source order.
+    repeated Grantee grantees = 9;
+
+    // WITH GRANT OPTION (GRANT) / GRANT OPTION FOR (REVOKE).
+    bool grant_option = 10;
 }
 
 service RewriterService {

@@ -16,6 +16,7 @@
 #include <string>
 
 #include "handlers/exists.h"
+#include "handlers/grant.h"
 #include "handlers/select.h"
 #include "handlers/show_create.h"
 #include "handlers/show_databases.h"
@@ -183,6 +184,13 @@ void RewriterServiceImpl::doRewrite(
     if (rewriter_handlers::handleShowCreateQuery(ast, request, response)
         == rewriter_handlers::ShowCreateDispatchResult::Handled) {
       return;
+    }
+    switch (rewriter_handlers::handleGrantQuery(ast, request, response)) {
+      case rewriter_handlers::GrantDispatchResult::Handled:
+      case rewriter_handlers::GrantDispatchResult::Rejected:
+        return;
+      case rewriter_handlers::GrantDispatchResult::NotAGrant:
+        break;  // fall through to write/SELECT dispatch.
     }
     switch (rewriter_handlers::handleWriteQuery(ast, request, response)) {
       case rewriter_handlers::WriteDispatchResult::Handled:

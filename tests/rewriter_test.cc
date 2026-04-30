@@ -1,6 +1,7 @@
 #include "protos/rewriter.grpc.pb.h"
 #include "rewriter-server.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <string>
@@ -2798,6 +2799,344 @@ TEST(TableRewrite, Select_Passthrough_WhenNoOption) {
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
   EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SELECT);
   EXPECT_EQ(resp.table_rewrites_size(), 0);
+}
+
+// ============================================================================
+// GRANT / REVOKE tests
+// ============================================================================
+//
+// GRANT/REVOKE is fire-and-forget: the rewriter emits structured PrivilegeDelta
+// entries into `response.privileges_deltas`, drops any ON CLUSTER, and rewrites
+// the SQL to `SELECT '<original SQL minus ON CLUSTER>' AS gstmt` (GRANT) or
+// `... AS rstmt` (REVOKE) so the intent lands in CH query_log.
+
+namespace {
+
+struct GrantProbe {
+  rewriter::RewriteCode code;
+  rewriter::StatementType statement_type;
+  std::string sql_after_rewrite;
+  std::string message;
+  std::vector<rewriter::PrivilegeDelta> privileges_deltas;
+};
+
+static GrantProbe RunGrant(const std::string &sql, const DynamicArgs &g) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  applyDynamicArgs(opt->mutable_table_name_args()->mutable_dynamic_args(), g);
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
+
+  GrantProbe p;
+  p.code = resp.code();
+  p.statement_type = resp.statement_type();
+  p.sql_after_rewrite = resp.sql_after_rewrite();
+  p.message = resp.message();
+  for (const auto &d : resp.privileges_deltas()) {
+    p.privileges_deltas.push_back(d);
+  }
+  return p;
+}
+
+// Run a GRANT/REVOKE without ANY rewrite options. Used for the "no
+// dynamic_args -> UnsupportedStatement" reject path.
+static GrantProbe RunGrantNoOpts(const std::string &sql) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Rewrite(&ctx, &req, &resp);
+  EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
+
+  GrantProbe p;
+  p.code = resp.code();
+  p.statement_type = resp.statement_type();
+  p.sql_after_rewrite = resp.sql_after_rewrite();
+  p.message = resp.message();
+  return p;
+}
+
+} // namespace
+
+// --- GRANT happy paths ---
+
+TEST(Grant, TableScope_Qualified) {
+  // GRANT SELECT ON tenant1.t TO u with database_map -> structured delta
+  // with logical/physical resolved + physical_table = "tenant1_t".
+  auto r = RunGrant("GRANT SELECT ON tenant1.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_GRANT);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+
+  const auto &d = r.privileges_deltas[0];
+  EXPECT_EQ(d.action(), rewriter::PrivilegeDelta::ACTION_GRANT);
+  EXPECT_EQ(d.scope(), rewriter::PrivilegeDelta::SCOPE_TABLE);
+  EXPECT_EQ(d.original_database(), "tenant1");
+  EXPECT_EQ(d.logical_database(), "tenant1");
+  EXPECT_EQ(d.physical_database(), "testnet");
+  EXPECT_EQ(d.original_table(), "t");
+  EXPECT_EQ(d.physical_table(), "tenant1_t");
+  ASSERT_EQ(d.privileges_size(), 1);
+  EXPECT_EQ(d.privileges(0), "SELECT");
+  ASSERT_EQ(d.grantees_size(), 1);
+  EXPECT_EQ(d.grantees(0).name(), "u");
+  EXPECT_FALSE(d.grantees(0).is_current_user());
+  EXPECT_FALSE(d.grant_option());
+
+  // SQL is wrapped in SELECT '...' AS gstmt with GRANT verbatim.
+  EXPECT_NE(r.sql_after_rewrite.find("SELECT '"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("AS gstmt"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("GRANT"), std::string::npos);
+}
+
+TEST(Grant, TableScope_BareTable_UsesUpstreamContext) {
+  // GRANT SELECT ON t TO u with upstream_logical_database_in_context.
+  // original_database stays empty (bare in SQL); logical resolves from context.
+  auto r = RunGrant("GRANT SELECT ON t TO u",
+                    {.database_map = {{"tenant1", "testnet"}},
+                     .upstream_logical_database_in_context = "tenant1"});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  const auto &d = r.privileges_deltas[0];
+  EXPECT_EQ(d.original_database(), "");
+  EXPECT_EQ(d.logical_database(), "tenant1");
+  EXPECT_EQ(d.physical_database(), "testnet");
+  EXPECT_EQ(d.original_table(), "t");
+  EXPECT_EQ(d.physical_table(), "tenant1_t");
+}
+
+TEST(Grant, DatabaseScope) {
+  // GRANT SELECT ON tenant1.* TO u -> SCOPE_DATABASE; no table fields.
+  auto r = RunGrant("GRANT SELECT ON tenant1.* TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  const auto &d = r.privileges_deltas[0];
+  EXPECT_EQ(d.scope(), rewriter::PrivilegeDelta::SCOPE_DATABASE);
+  EXPECT_EQ(d.logical_database(), "tenant1");
+  EXPECT_EQ(d.physical_database(), "testnet");
+  EXPECT_TRUE(d.original_table().empty());
+  EXPECT_TRUE(d.physical_table().empty());
+}
+
+TEST(Grant, MultiplePrivileges_FanOutPerElement) {
+  // ClickHouse's parser splits `GRANT SELECT, INSERT ON db.t TO u` into
+  // TWO AccessRightsElement entries (one per privilege). We faithfully
+  // emit one PrivilegeDelta per element — same target, single-privilege
+  // each. Grantees fan out across both.
+  auto r = RunGrant("GRANT SELECT, INSERT ON tenant1.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 2u);
+
+  // Collect the per-delta single-privilege names; order isn't guaranteed.
+  std::vector<std::string> got;
+  for (const auto &d : r.privileges_deltas) {
+    ASSERT_EQ(d.privileges_size(), 1);
+    EXPECT_EQ(d.original_table(), "t");
+    EXPECT_EQ(d.physical_table(), "tenant1_t");
+    EXPECT_EQ(d.scope(), rewriter::PrivilegeDelta::SCOPE_TABLE);
+    got.push_back(d.privileges(0));
+  }
+  std::sort(got.begin(), got.end());
+  std::vector<std::string> want = {"INSERT", "SELECT"};
+  EXPECT_EQ(got, want);
+}
+
+TEST(Grant, MultipleGrantees_OneDelta) {
+  // Multiple grantees stay aggregated within a single delta.
+  auto r = RunGrant("GRANT SELECT ON tenant1.t TO u1, u2",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  ASSERT_EQ(r.privileges_deltas[0].grantees_size(), 2);
+  EXPECT_EQ(r.privileges_deltas[0].grantees(0).name(), "u1");
+  EXPECT_EQ(r.privileges_deltas[0].grantees(1).name(), "u2");
+}
+
+// (No multi-target test: ClickHouse's GRANT parser does not accept
+// comma-separated ON targets like `ON db.t1, db.t2`. Multiple targets
+// require separate GRANT statements, each handled independently.)
+
+TEST(Grant, WithGrantOption_FlagSet) {
+  auto r = RunGrant("GRANT SELECT ON tenant1.t TO u WITH GRANT OPTION",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  EXPECT_TRUE(r.privileges_deltas[0].grant_option());
+}
+
+TEST(Grant, CurrentUser_IsTagged) {
+  // CURRENT_USER doesn't get expanded — `is_current_user` is set instead.
+  auto r = RunGrant("GRANT SELECT ON tenant1.t TO CURRENT_USER",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  ASSERT_EQ(r.privileges_deltas[0].grantees_size(), 1);
+  EXPECT_TRUE(r.privileges_deltas[0].grantees(0).is_current_user());
+  EXPECT_TRUE(r.privileges_deltas[0].grantees(0).name().empty());
+}
+
+TEST(Grant, KnownPhysicalPassthrough) {
+  // logical name that's also a known physical (e.g. "system") resolves to
+  // itself and produces a delta. database_map empty, known_physical_databases
+  // covers it.
+  auto r = RunGrant("GRANT SELECT ON system.tables TO u",
+                    {.known_physical_databases = {"system"}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  EXPECT_EQ(r.privileges_deltas[0].logical_database(), "system");
+  EXPECT_EQ(r.privileges_deltas[0].physical_database(), "system");
+  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "system_tables");
+}
+
+// --- REVOKE happy paths ---
+
+TEST(Revoke, Basic) {
+  auto r = RunGrant("REVOKE SELECT ON tenant1.t FROM u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_REVOKE);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  EXPECT_EQ(r.privileges_deltas[0].action(),
+            rewriter::PrivilegeDelta::ACTION_REVOKE);
+  // Marker SELECT uses rstmt, not gstmt.
+  EXPECT_NE(r.sql_after_rewrite.find("AS rstmt"), std::string::npos);
+  EXPECT_EQ(r.sql_after_rewrite.find("AS gstmt"), std::string::npos);
+}
+
+TEST(Revoke, GrantOptionFor_FlagSet) {
+  // REVOKE GRANT OPTION FOR ... — the parser routes this through either
+  // grant_option or is_partial_revoke; the handler ORs them, so the flag
+  // surfaces in either case.
+  auto r = RunGrant("REVOKE GRANT OPTION FOR SELECT ON tenant1.t FROM u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  EXPECT_TRUE(r.privileges_deltas[0].grant_option());
+}
+
+// --- ON CLUSTER drop ---
+
+TEST(Grant, OnCluster_StrippedFromMarker) {
+  // ON CLUSTER fragment is dropped from the AST before formatting; the
+  // marker SELECT contains a clean GRANT without the ON CLUSTER clause.
+  auto r = RunGrant("GRANT ON CLUSTER my_cluster SELECT ON tenant1.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.sql_after_rewrite.find("ON CLUSTER"), std::string::npos)
+    << "marker SELECT still mentions ON CLUSTER: " << r.sql_after_rewrite;
+  EXPECT_EQ(r.sql_after_rewrite.find("my_cluster"), std::string::npos)
+    << "marker SELECT still mentions cluster name: " << r.sql_after_rewrite;
+  // Deltas still emitted unchanged — cluster doesn't affect routing.
+  ASSERT_EQ(r.privileges_deltas.size(), 1u);
+  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "tenant1_t");
+}
+
+TEST(Grant, MarkerEscapesQuotes) {
+  // A single quote in the original SQL round-trips into the marker SELECT
+  // with the quote doubled (CH single-quoted-literal escape).
+  auto r = RunGrant("GRANT SELECT ON tenant1.`weird'name` TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("''"), std::string::npos)
+    << "Expected doubled-quote escape; got: " << r.sql_after_rewrite;
+}
+
+// --- Reject: unsupported variants ---
+
+TEST(Grant, GlobalScope_Rejected) {
+  auto r = RunGrant("GRANT SELECT ON *.* TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("global"), std::string::npos);
+}
+
+TEST(Grant, RoleMembership_Rejected) {
+  // GRANT some_role TO some_user — distinct from privilege grants. The
+  // parser populates ASTGrantQuery::roles, which the handler short-circuits.
+  // To trigger this path the role must exist at parse time syntactically;
+  // ClickHouse's parser handles it without lookups.
+  auto r = RunGrant("GRANT some_role TO some_user",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("role-membership"), std::string::npos);
+}
+
+TEST(Grant, ReplaceOption_Rejected) {
+  auto r = RunGrant("GRANT SELECT ON tenant1.t TO u WITH REPLACE OPTION",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("REPLACE"), std::string::npos);
+}
+
+TEST(Revoke, FromAll_Rejected) {
+  auto r = RunGrant("REVOKE SELECT ON tenant1.t FROM ALL",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("ALL"), std::string::npos);
+}
+
+TEST(Revoke, FromAllExcept_Rejected) {
+  auto r = RunGrant("REVOKE SELECT ON tenant1.t FROM ALL EXCEPT u1",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+}
+
+TEST(Grant, CurrentGrants_Rejected) {
+  auto r = RunGrant("GRANT CURRENT GRANTS ON tenant1.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("CURRENT GRANTS"), std::string::npos);
+}
+
+TEST(Grant, ColumnLevel_Rejected) {
+  // Column-level grants are rejected (rather than silently broadened to a
+  // table-wide grant) so the audit trail doesn't show an expanded scope.
+  auto r = RunGrant("GRANT SELECT(c1, c2) ON tenant1.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_NE(r.message.find("column-level"), std::string::npos);
+}
+
+// --- Reject: invalid request ---
+
+TEST(Grant, UnknownLogical_InvalidRequest) {
+  auto r = RunGrant("GRANT SELECT ON ghost.t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("ghost"), std::string::npos);
+}
+
+TEST(Grant, BareTable_NoUpstreamContext_InvalidRequest) {
+  // No qualifier and no upstream_logical_database_in_context -> rewriter
+  // can't pick a logical DB.
+  auto r = RunGrant("GRANT SELECT ON t TO u",
+                    {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_NE(r.message.find("unqualified"), std::string::npos);
+}
+
+TEST(Grant, NoOptions_Unsupported) {
+  // Without a TableNameRewrite/dynamic_args option the rewriter can't
+  // validate or resolve, so it fails closed (mirrors CREATE/DROP DATABASE).
+  auto r = RunGrantNoOpts("GRANT SELECT ON tenant1.t TO u");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+}
+
+TEST(Revoke, NoOptions_Unsupported) {
+  auto r = RunGrantNoOpts("REVOKE SELECT ON tenant1.t FROM u");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
 #if !REWRITER_RELEASE_MAIN

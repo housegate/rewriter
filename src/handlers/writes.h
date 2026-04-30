@@ -1,9 +1,13 @@
 // src/handlers/writes.h
 //
 // Write-statement handler. Covers CREATE/DROP/ALTER TABLE, INSERT,
-// UPDATE, DELETE, RENAME TABLE, and rejects the unsupported variants
-// (CREATE VIEW, DROP DATABASE, TRUNCATE, OPTIMIZE, GRANT, KILL, BACKUP,
+// UPDATE, DELETE, RENAME TABLE, plus the special-cased CREATE/DROP DATABASE
+// and TRUNCATE TABLE paths. Rejects the unsupported variants (CREATE VIEW,
+// CREATE DICTIONARY, OPTIMIZE, DETACH, UNDROP, MOVE, KILL, BACKUP/RESTORE,
 // ATTACH/REPLACE/FETCH PARTITION FROM ..., ...).
+//
+// GRANT and REVOKE are handled by handlers/grant.cc, which dispatches
+// before this handler in rewriter-server.cc.
 //
 // Applies TableNameRewrite options from `request->options()` to each named
 // table slot before echoing the SQL. Other rewrite ops (Limit, Settings,

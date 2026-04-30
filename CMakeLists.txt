@@ -170,7 +170,8 @@ add_library(rewriter_core OBJECT
     src/handlers/select.cc
     src/handlers/name_rewrite.cc
     src/handlers/exists.cc
-    src/handlers/show_create.cc)
+    src/handlers/show_create.cc
+    src/handlers/grant.cc)
 target_include_directories(rewriter_core SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
