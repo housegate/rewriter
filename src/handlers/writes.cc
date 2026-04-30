@@ -434,7 +434,22 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
         [&](const std::string &s){ insert_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
     }
-    acceptWrite(ast, response, rewriter::STATEMENT_TYPE_INSERT);
+    // ASTInsertQuery::formatImpl only emits the prelude (`INSERT INTO ...
+    // [columns] [SETTINGS ...] [VALUES|FORMAT <fmt>]`); the inline payload
+    // for `VALUES (...)` / `FORMAT <fmt> <bytes>` lives off-AST as raw
+    // pointers into the original SQL buffer. ClickHouse's executor consumes
+    // those bytes via query->data/query->end at insert time, so the
+    // formatter intentionally drops them. We're shipping the rewritten SQL
+    // back as a single string for the proxy to forward — append the raw
+    // bytes verbatim so the downstream sees `... VALUES (1)` instead of a
+    // bare `... FORMAT Values` (which would put the upstream into "wait for
+    // wire-format data" mode and hang the client).
+    std::string sql = formatAst(ast);
+    if (insert_query->data && insert_query->end > insert_query->data) {
+      sql.append(insert_query->data,
+                 static_cast<size_t>(insert_query->end - insert_query->data));
+    }
+    setSuccessResponse(response, sql, rewriter::STATEMENT_TYPE_INSERT);
     return WriteDispatchResult::Handled;
   }
 

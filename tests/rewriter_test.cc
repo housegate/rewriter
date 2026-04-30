@@ -2186,6 +2186,40 @@ TEST(WriteOp, Insert_Values) {
   EXPECT_EQ(r.original_accessed_count, 1);
 }
 
+// ASTInsertQuery::formatImpl drops the inline `VALUES (...)` payload (it
+// lives off-AST as raw pointers into the request buffer); the writes
+// handler appends those bytes back so downstream sees the data inline
+// instead of a bare `... FORMAT Values` that would put the upstream into
+// "wait for wire-format data" mode.
+TEST(WriteOp, Insert_Values_PayloadRoundTrips) {
+  auto r = RunWriteOp("INSERT INTO t VALUES (1)");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("(1)"), std::string::npos)
+    << r.sql_after_rewrite;
+}
+
+TEST(WriteOp, Insert_Values_MultiRow_PayloadRoundTrips) {
+  auto r = RunWriteOp("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("(1, 'a')"), std::string::npos)
+    << r.sql_after_rewrite;
+  EXPECT_NE(r.sql_after_rewrite.find("(3, 'c')"), std::string::npos)
+    << r.sql_after_rewrite;
+}
+
+TEST(TableRewrite, Insert_Values_PayloadRoundTrips_AfterRewrite) {
+  // The original bug: with a TableNameRewrite option in play, the AST
+  // round-trip was producing `INSERT INTO <new>.<new> FORMAT Values` —
+  // the `(1)` payload got dropped and the upstream hung waiting for a
+  // wire-format data block. Pin the payload back into the rewritten SQL.
+  auto r = RunDynamic("INSERT INTO tenant1.t VALUES (1)",
+                      {.database_map = {{"tenant1", "testnet"}}});
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("(1)"), std::string::npos)
+    << r.sql_after_rewrite;
+}
+
 TEST(WriteOp, Insert_Select_ReturnsTargetOnly) {
   auto r = RunWriteOp("INSERT INTO db.t SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);

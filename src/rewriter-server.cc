@@ -162,7 +162,16 @@ void RewriterServiceImpl::doRewrite(
   DB::ParserQuery parser(end, false);
 
   try {
-    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, 0, 0, 0);
+    // NB: the 7-arg `parseQuery(IParser&, const char* begin, const char* end,
+    // const std::string& description, size_t, size_t, size_t)` is the one we
+    // want — it preserves the (begin, end) pointer pair so ASTInsertQuery's
+    // `data`/`end` keep referencing our own `query` buffer. Without the
+    // explicit empty description, overload resolution silently picks the
+    // (..., const std::string& query, const std::string& description, ...)
+    // form, which converts `pos` and `end` to temporary strings whose
+    // buffers die on return — leaving INSERT inline payload pointers
+    // dangling. See doRewriteErrorMessage below for the same pattern.
+    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
 
     if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
@@ -242,7 +251,8 @@ void RewriterServiceImpl::doRewriteErrorMessage(
 
   DB::ParserQuery parser(end, /*allow_alias_without_as*/ false);
   try {
-    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, 0, 0, 0);
+    // See doRewrite for why the explicit empty description matters.
+    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
 
     String origin_sql_without_space = ast->formatWithSecretsOneLine();
 
