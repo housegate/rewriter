@@ -1656,7 +1656,7 @@ TEST(ShowTables, Passthrough_NoOptions) {
 }
 
 TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
-  // No FROM clause; logical comes from upstream context. prefix = "coinbase_".
+  // No FROM clause; logical comes from upstream context. prefix = "coinbase.".
   auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"coinbase", "sentio_coinbase"}},
                        .upstream_logical_database_in_context = "coinbase"});
@@ -1664,8 +1664,8 @@ TEST(ShowTables, FromUpstreamContext_BuildsPrefix) {
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_TABLES);
   // Filter targets the physical DB.
   EXPECT_NE(r.sql_after_rewrite.find("database = 'sentio_coinbase'"), std::string::npos);
-  // Prefix = logical + default delim "_" (no extra_args).
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'coinbase_')"), std::string::npos);
+  // Prefix = logical + "." (no extra_args; final separator is always a literal dot).
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'coinbase.')"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("multiIf"), std::string::npos);
   // DB rewrite goes to database_rewrites, NOT table_rewrites.
   EXPECT_EQ(r.database_rewrites["coinbase"], "sentio_coinbase");
@@ -1679,28 +1679,32 @@ TEST(ShowTables, FromClauseOverridesUpstream) {
                        .upstream_logical_database_in_context = "coinbase"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("database = 'physdb'"), std::string::npos);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'mydb_')"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'mydb.')"), std::string::npos);
 }
 
 TEST(ShowTables, WithExtraArgs_PrefixIncludesThem) {
-  // prefix = logical + delim + extras.join(delim) + delim
+  // prefix = logical + delim + extras.join(delim) + "."
+  // (the trailing separator before the original table name is always a
+  //  literal dot — not the configurable delim).
   auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .extra_arguments = {"v2", "shard0"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1_v2_shard0_')"),
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1_v2_shard0.')"),
             std::string::npos);
 }
 
 TEST(ShowTables, CustomDelim) {
+  // The configurable delim joins logical + extras; the final separator
+  // before the table name is still a literal "." regardless of delim.
   auto r = RunDynamic("SHOW TABLES",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .delim = "-",
                        .extra_arguments = {"v2"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1-v2-')"),
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'tenant1-v2.')"),
             std::string::npos);
 }
 
@@ -1741,7 +1745,7 @@ TEST(ShowTables, RemoteUpstream_RewritesToRemoteSystemTables) {
   // Filter still uses the resolved physical name + prefix from the local
   // database_map (the upstream uses the same naming scheme).
   EXPECT_NE(r.sql_after_rewrite.find("database = 'testnet1'"), std::string::npos);
-  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'transfer_')"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("startsWith(name, 'transfer.')"), std::string::npos);
   EXPECT_EQ(r.database_rewrites["transfer"], "testnet1");
 }
 
@@ -2216,7 +2220,11 @@ TEST(TableRewrite, Insert_Values_PayloadRoundTrips_AfterRewrite) {
   auto r = RunDynamic("INSERT INTO tenant1.t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+  // New construction puts a literal "." before the original table, so the
+  // physical table name is `tenant1.t` (a CH identifier containing a dot,
+  // which the formatter backtick-quotes via WhenNecessary).
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1.t`"), std::string::npos)
+    << r.sql_after_rewrite;
   EXPECT_NE(r.sql_after_rewrite.find("(1)"), std::string::npos)
     << r.sql_after_rewrite;
 }
@@ -2291,14 +2299,15 @@ TEST(WriteOp, Optimize_Rejected) {
 
 TEST(TableRewrite, Insert_QualifiedDB_DynamicConstruction) {
   // `INSERT INTO tenant1.t` — SQL qualifier gives logical, database_map
-  // provides physical. No extra_args -> final name = tenant1_t.
+  // provides physical. No extra_args -> final name = `tenant1.t`.
   auto r = RunDynamic("INSERT INTO tenant1.t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
   EXPECT_NE(r.sql_after_rewrite.find("testnet"), std::string::npos);
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["tenant1.t"], "testnet.tenant1_t");
+  // Backticks because `tenant1.t` contains a dot.
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["tenant1.t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, Insert_UnqualifiedDB_FromUpstreamContext) {
@@ -2308,39 +2317,44 @@ TEST(TableRewrite, Insert_UnqualifiedDB_FromUpstreamContext) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_NE(r.sql_after_rewrite.find("testnet"), std::string::npos);
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, Insert_WithExtraArgs) {
-  // extra_args = ["v2", "shard1"] -> name = tenant1_v2_shard1_t.
+  // extra_args = ["v2", "shard1"] -> name = `tenant1_v2_shard1.t`.
+  // Extras are joined with the configurable delim ("_" by default); the
+  // final separator before `t` is always a literal ".".
   auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .extra_arguments = {"v2", "shard1"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1_v2_shard1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1_v2_shard1.t`"), std::string::npos);
 }
 
 TEST(TableRewrite, Insert_CustomDelim) {
+  // Custom delim joins logical+extras only; the final separator is still ".".
   auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1",
                        .delim = "-",
                        .extra_arguments = {"v2"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1-v2-t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1-v2.t`"), std::string::npos);
 }
 
-TEST(TableRewrite, Insert_EmptyExtraArgs_NoDoubleDelim) {
-  // Empty extra_args must NOT produce "tenant1__t".
+TEST(TableRewrite, Insert_EmptyExtraArgs_NoStrayDelim) {
+  // With extras=[], the prefix must NOT include a leading delim before the
+  // dot — i.e. the name is `tenant1.t`, NOT `tenant1_.t`. This pins the
+  // "extras block is optional" rule in buildDynamicTableName.
   auto r = RunDynamic("INSERT INTO t VALUES (1)",
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.sql_after_rewrite.find("tenant1__t"), std::string::npos)
+  EXPECT_EQ(r.sql_after_rewrite.find("tenant1_."), std::string::npos)
     << r.sql_after_rewrite;
-  EXPECT_NE(r.sql_after_rewrite.find("tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("`tenant1.t`"), std::string::npos);
 }
 
 TEST(TableRewrite, Insert_KnownPhysical_Passthrough) {
@@ -2349,9 +2363,9 @@ TEST(TableRewrite, Insert_KnownPhysical_Passthrough) {
   auto r = RunDynamic("INSERT INTO testnet.t VALUES (1)",
                       {.known_physical_databases = {"testnet"}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.testnet_t"), std::string::npos)
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`testnet.t`"), std::string::npos)
     << r.sql_after_rewrite;
-  EXPECT_EQ(r.table_rewrites["testnet.t"], "testnet.testnet_t");
+  EXPECT_EQ(r.table_rewrites["testnet.t"], "testnet.testnet.t");
 }
 
 TEST(TableRewrite, Insert_UnknownLogical_Rejected) {
@@ -2398,10 +2412,10 @@ TEST(TableRewrite, Insert_FormatNative) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
   // FORMAT clause must round-trip — the server uses it to pick the decoder.
   EXPECT_NE(r.sql_after_rewrite.find("FORMAT Native"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, Insert_WithColumnList_FormatNative) {
@@ -2415,12 +2429,12 @@ TEST(TableRewrite, Insert_WithColumnList_FormatNative) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("FORMAT Native"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("a"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("b"), std::string::npos);
   EXPECT_NE(r.sql_after_rewrite.find("c"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 // --- CREATE TABLE ---
@@ -2431,8 +2445,8 @@ TEST(TableRewrite, CreateTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
@@ -2441,8 +2455,8 @@ TEST(TableRewrite, CreateTable_AsSource_AlsoRewritten) {
                       {.database_map = {{"tenant1", "testnet"}},
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.table_rewrites["dst"], "testnet.tenant1_dst");
-  EXPECT_EQ(r.table_rewrites["src"], "testnet.tenant1_src");
+  EXPECT_EQ(r.table_rewrites["dst"], "testnet.tenant1.dst");
+  EXPECT_EQ(r.table_rewrites["src"], "testnet.tenant1.src");
 }
 
 // --- CREATE DATABASE ---
@@ -2593,8 +2607,8 @@ TEST(TableRewrite, DropTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, TruncateTable_Basic) {
@@ -2605,8 +2619,8 @@ TEST(TableRewrite, TruncateTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_TRUNCATE_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, AlterTable_Basic) {
@@ -2615,7 +2629,7 @@ TEST(TableRewrite, AlterTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_ALTER_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
 }
 
 TEST(TableRewrite, Update_Basic) {
@@ -2624,7 +2638,7 @@ TEST(TableRewrite, Update_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_UPDATE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
 }
 
 TEST(TableRewrite, Delete_Basic) {
@@ -2633,7 +2647,7 @@ TEST(TableRewrite, Delete_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DELETE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
 }
 
 // --- RENAME ---
@@ -2644,8 +2658,8 @@ TEST(TableRewrite, Rename_BothSidesRewritten) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_RENAME_TABLE);
-  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1_a");
-  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1_b");
+  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1.a");
+  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1.b");
 }
 
 TEST(TableRewrite, Rename_MultiplePairs) {
@@ -2654,10 +2668,10 @@ TEST(TableRewrite, Rename_MultiplePairs) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   ASSERT_EQ(r.table_rewrites.size(), 4u);
-  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1_a");
-  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1_b");
-  EXPECT_EQ(r.table_rewrites["c"], "testnet.tenant1_c");
-  EXPECT_EQ(r.table_rewrites["d"], "testnet.tenant1_d");
+  EXPECT_EQ(r.table_rewrites["a"], "testnet.tenant1.a");
+  EXPECT_EQ(r.table_rewrites["b"], "testnet.tenant1.b");
+  EXPECT_EQ(r.table_rewrites["c"], "testnet.tenant1.c");
+  EXPECT_EQ(r.table_rewrites["d"], "testnet.tenant1.d");
 }
 
 TEST(TableRewrite, Rename_QualifiedSidesUseTheirOwnLogical) {
@@ -2665,8 +2679,8 @@ TEST(TableRewrite, Rename_QualifiedSidesUseTheirOwnLogical) {
   auto r = RunDynamic("RENAME TABLE t1.a TO t2.b",
                       {.database_map = {{"t1", "phys1"}, {"t2", "phys2"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
-  EXPECT_EQ(r.table_rewrites["t1.a"], "phys1.t1_a");
-  EXPECT_EQ(r.table_rewrites["t2.b"], "phys2.t2_b");
+  EXPECT_EQ(r.table_rewrites["t1.a"], "phys1.t1.a");
+  EXPECT_EQ(r.table_rewrites["t2.b"], "phys2.t2.b");
 }
 
 // --- EXISTS TABLE ---
@@ -2677,8 +2691,8 @@ TEST(TableRewrite, ExistsTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_EXISTS_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
-  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1_t");
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
+  EXPECT_EQ(r.table_rewrites["t"], "testnet.tenant1.t");
 }
 
 TEST(TableRewrite, ExistsTable_UnknownLogical_Rejected) {
@@ -2700,7 +2714,7 @@ TEST(TableRewrite, ShowCreateTable_Basic) {
                        .upstream_logical_database_in_context = "tenant1"});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
   EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
-  EXPECT_NE(r.sql_after_rewrite.find("testnet.tenant1_t"), std::string::npos);
+  EXPECT_NE(r.sql_after_rewrite.find("testnet.`tenant1.t`"), std::string::npos);
 }
 
 TEST(TableRewrite, ShowCreateDatabase_Unsupported) {
@@ -2871,7 +2885,7 @@ static GrantProbe RunGrantNoOpts(const std::string &sql) {
 
 TEST(Grant, TableScope_Qualified) {
   // GRANT SELECT ON tenant1.t TO u with database_map -> structured delta
-  // with logical/physical resolved + physical_table = "tenant1_t".
+  // with logical/physical resolved + physical_table = "tenant1.t".
   auto r = RunGrant("GRANT SELECT ON tenant1.t TO u",
                     {.database_map = {{"tenant1", "testnet"}}});
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
@@ -2885,7 +2899,7 @@ TEST(Grant, TableScope_Qualified) {
   EXPECT_EQ(d.logical_database(), "tenant1");
   EXPECT_EQ(d.physical_database(), "testnet");
   EXPECT_EQ(d.original_table(), "t");
-  EXPECT_EQ(d.physical_table(), "tenant1_t");
+  EXPECT_EQ(d.physical_table(), "tenant1.t");
   ASSERT_EQ(d.privileges_size(), 1);
   EXPECT_EQ(d.privileges(0), "SELECT");
   ASSERT_EQ(d.grantees_size(), 1);
@@ -2912,7 +2926,7 @@ TEST(Grant, TableScope_BareTable_UsesUpstreamContext) {
   EXPECT_EQ(d.logical_database(), "tenant1");
   EXPECT_EQ(d.physical_database(), "testnet");
   EXPECT_EQ(d.original_table(), "t");
-  EXPECT_EQ(d.physical_table(), "tenant1_t");
+  EXPECT_EQ(d.physical_table(), "tenant1.t");
 }
 
 TEST(Grant, DatabaseScope) {
@@ -2944,7 +2958,7 @@ TEST(Grant, MultiplePrivileges_FanOutPerElement) {
   for (const auto &d : r.privileges_deltas) {
     ASSERT_EQ(d.privileges_size(), 1);
     EXPECT_EQ(d.original_table(), "t");
-    EXPECT_EQ(d.physical_table(), "tenant1_t");
+    EXPECT_EQ(d.physical_table(), "tenant1.t");
     EXPECT_EQ(d.scope(), rewriter::PrivilegeDelta::SCOPE_TABLE);
     got.push_back(d.privileges(0));
   }
@@ -2997,7 +3011,7 @@ TEST(Grant, KnownPhysicalPassthrough) {
   ASSERT_EQ(r.privileges_deltas.size(), 1u);
   EXPECT_EQ(r.privileges_deltas[0].logical_database(), "system");
   EXPECT_EQ(r.privileges_deltas[0].physical_database(), "system");
-  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "system_tables");
+  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "system.tables");
 }
 
 // --- REVOKE happy paths ---
@@ -3040,7 +3054,7 @@ TEST(Grant, OnCluster_StrippedFromMarker) {
     << "marker SELECT still mentions cluster name: " << r.sql_after_rewrite;
   // Deltas still emitted unchanged — cluster doesn't affect routing.
   ASSERT_EQ(r.privileges_deltas.size(), 1u);
-  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "tenant1_t");
+  EXPECT_EQ(r.privileges_deltas[0].physical_table(), "tenant1.t");
 }
 
 TEST(Grant, MarkerEscapesQuotes) {

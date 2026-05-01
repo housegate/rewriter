@@ -116,11 +116,19 @@ physical  := dynamic_args.database_map[logical]
              OR logical  (if logical ∈ dynamic_args.known_physical_databases)
              OR reject with InvalidRewriteRequest
 delim     := dynamic_args.delim ("_" by default)
-new_table := logical + delim + (extra_arguments joined by delim + delim, iff non-empty)
-                     + origin_table
+new_table := logical + (delim + extra_arguments joined by delim, iff extras non-empty)
+                     + "." + origin_table
 ```
 
-The "extras block is optional + its trailing delim is conditional" rule is what keeps an empty `extra_arguments` from producing a double delim (`tenant1__events`). `buildDynamicTablePrefix` (same file) is just `applyDynamicRewrite`'s construction with an empty `origin_table` — used by SHOW TABLES to filter / strip the prefix.
+The trailing separator between the prefix and `origin_table` is **always** a literal `.` — it is NOT the configurable `delim`. The CH formatter wraps the resulting table name in backticks via `IdentifierQuotingRule::WhenNecessary` because it contains a dot, so callers see SQL like `` physical_db_1.`tenant1.events` ``. Examples (`delim="_"`):
+
+| extras | original | result |
+|---|---|---|
+| `[]` | `tenant1.events` | `` physical_db_1.`tenant1.events` `` |
+| `[]` | `events` (USE tenant1) | `` physical_db_1.`tenant1.events` `` |
+| `["shard0"]` | `tenant1.events` | `` physical_db_1.`tenant1_shard0.events` `` |
+
+The "extras block is optional" rule keeps an empty `extra_arguments` from producing a stray leading delim before the dot. `buildDynamicTablePrefix` (same file) is just `applyDynamicRewrite`'s construction with an empty `origin_table`, i.e. `logical + (delim + extras.join(delim) iff non-empty) + "."` — used by SHOW TABLES to filter / strip the prefix.
 
 ### AST transformers ([src/ASTTransformers.cc](src/ASTTransformers.cc), [src/ASTTransformers.h](src/ASTTransformers.h))
 

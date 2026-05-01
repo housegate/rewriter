@@ -20,13 +20,21 @@
 //
 //        physical := database_map[logical]  (or logical itself if it's in
 //                                            known_physical_databases)
-//        new_table := logical + delim + (extra_args joined by delim + delim
-//                                        iff extra_args is non-empty)
-//                             + original_table
+//        new_table := logical + (delim + extras.join(delim) iff extras
+//                                non-empty) + "." + original_table
 //
 //      `logical` is the SQL's qualified db if present, else
-//      `upstream_logical_database_in_context`. SELECT applies this lenient
-//      (skip on InvalidRequest); non-SELECT applies it strict (reject).
+//      `upstream_logical_database_in_context`. The trailing separator
+//      between the prefix and `original_table` is always a literal "."
+//      (not the configurable `delim`) — see buildDynamicTableName for why.
+//      `delim` defaults to "_" when not set. Examples (delim="_"):
+//
+//        extras=[]           tenant1.events       -> phys.`tenant1.events`
+//        extras=[]           events (USE tenant1) -> phys.`tenant1.events`
+//        extras=["shard0"]   tenant1.events       -> phys.`tenant1_shard0.events`
+//
+//      SELECT applies this lenient (skip on InvalidRequest); non-SELECT
+//      applies it strict (reject).
 //   3. Else -> None (passthrough).
 //
 // Database-level handlers (USE, SHOW TABLES, SHOW DATABASES, CREATE
@@ -177,10 +185,21 @@ std::optional<std::string> resolvePhysicalDatabase(
   const rewriter::RewriteTableDynamicArgs &args);
 
 // Build the dynamic table name:
-//   logical + delim + (extra_args joined by delim + delim if non-empty)
-//                   + original_table
-// With empty extra_args: logical + delim + original_table (no double delim).
-// `delim` defaults to "_" when `args.delim()` is empty.
+//   logical + (delim + extras.join(delim) iff extras non-empty)
+//           + "." + original_table
+//
+// Examples (delim="_", extra_arguments=[]):
+//   tenant1.events       -> physical_db_1.`tenant1.events`
+//   events (USE tenant1) -> physical_db_1.`tenant1.events`
+//
+// Example (delim="_", extra_arguments=["shard0"]):
+//   tenant1.events       -> physical_db_1.`tenant1_shard0.events`
+//
+// `delim` defaults to "_" when `args.delim()` is empty. The trailing
+// separator before `original_table` is always a literal "." — it is NOT
+// configurable. The CH formatter wraps the resulting table name in
+// backticks via IdentifierQuotingRule::WhenNecessary because it now
+// contains a dot, so the SQL output above is what callers actually see.
 std::string buildDynamicTableName(
   const std::string &logical_db,
   const std::string &original_table,

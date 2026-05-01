@@ -113,21 +113,34 @@ std::string buildDynamicTableName(
   const std::string &logical_db,
   const std::string &original_table,
   const rewriter::RewriteTableDynamicArgs &args) {
+  // Construction:
+  //
+  //   logical + (delim + extras.join(delim) iff extras non-empty)
+  //           + "." + original_table
+  //
+  // The trailing separator is always a literal "." — NOT the configurable
+  // `delim`. With `delim = "_"` and `extras = []`, this gives e.g.
+  // `tenant1.events` (a CH identifier containing a dot, which the formatter
+  // backtick-quotes via IdentifierQuotingRule::WhenNecessary). With
+  // `extras = ["shard0"]` it gives `tenant1_shard0.events`.
+  //
+  // The `.` is hard-coded so the prefix and the original table name are
+  // always cleanly separable by callers walking the physical schema (e.g.
+  // SHOW TABLES strips `<prefix>.` to surface the original table). Making
+  // it configurable risked collisions with characters legal in CH
+  // identifiers.
   const std::string delim = resolvedDelim(args);
   std::string out = logical_db;
-  out += delim;
-  // Insert the extra_arguments block + its trailing delim ONLY when the
-  // block is non-empty — otherwise we'd emit a double delim between
-  // `logical_db` and `original_table`.
   if (args.extra_arguments_size() > 0) {
+    out += delim;
     bool first = true;
     for (const auto &a : args.extra_arguments()) {
       if (!first) out += delim;
       out += a;
       first = false;
     }
-    out += delim;
   }
+  out += '.';
   out += original_table;
   return out;
 }
