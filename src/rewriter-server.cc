@@ -125,6 +125,148 @@ inline std::regex makeIdentRegex(const std::string &ident) {
   return std::regex(pat, std::regex::ECMAScript | std::regex::icase);
 }
 
+// Forward Myers' O(ND) diff between `rewritten` and `original`, returning a
+// position map: result[i] (for i in [0, rewritten.size()]) is the byte offset
+// in `original` corresponding to byte offset i in `rewritten`. Positions
+// inside a deleted span (chars present in rewritten but not in original)
+// collapse to the boundary of the surrounding equal range — best effort, but
+// stable enough that "position N" inside a rewritten table identifier remaps
+// to the start of the user's original identifier.
+//
+// Caller is responsible for bounding input size if the diff distance D could
+// blow up — runtime is O((N+M)*D), memory O((N+M)*D). For SQL-style edits
+// (a handful of identifier swaps) D is small and this finishes in ms.
+inline std::vector<size_t> buildOffsetMap(std::string_view rewritten,
+                                          std::string_view original) {
+  const size_t N = rewritten.size(), M = original.size();
+  std::vector<size_t> pos_map(N + 1);
+  pos_map[N] = M;
+  if (N == 0) return pos_map;
+  if (M == 0) {
+    for (size_t i = 0; i < N; i++) pos_map[i] = 0;
+    return pos_map;
+  }
+
+  const int MAX = static_cast<int>(N + M);
+  auto kIdx = [MAX](int k) { return k + MAX; };
+  std::vector<int> V(2 * static_cast<size_t>(MAX) + 1, 0);
+  std::vector<std::vector<int>> trace;
+  trace.reserve(static_cast<size_t>(MAX) + 1);
+
+  int found_d = -1;
+  for (int d = 0; d <= MAX; d++) {
+    trace.push_back(V);
+    bool done = false;
+    for (int k = -d; k <= d && !done; k += 2) {
+      int x;
+      const bool down = (k == -d) || (k != d && V[kIdx(k - 1)] < V[kIdx(k + 1)]);
+      if (down) {
+        x = V[kIdx(k + 1)];
+      } else {
+        x = V[kIdx(k - 1)] + 1;
+      }
+      int y = x - k;
+      while (x < static_cast<int>(N) && y < static_cast<int>(M) && rewritten[x] == original[y]) {
+        x++; y++;
+      }
+      V[kIdx(k)] = x;
+      if (x >= static_cast<int>(N) && y >= static_cast<int>(M)) {
+        found_d = d;
+        done = true;
+      }
+    }
+    if (done) break;
+  }
+
+  if (found_d < 0) {
+    for (size_t i = 0; i < N; i++) pos_map[i] = M;
+    return pos_map;
+  }
+
+  int x = static_cast<int>(N), y = static_cast<int>(M);
+  for (int d = found_d; d > 0; d--) {
+    const auto &Vp = trace[d];
+    const int k = x - y;
+    bool down;
+    if (k == -d) {
+      down = true;
+    } else if (k == d) {
+      down = false;
+    } else {
+      down = Vp[kIdx(k - 1)] < Vp[kIdx(k + 1)];
+    }
+    const int prev_k = down ? k + 1 : k - 1;
+    const int prev_x = Vp[kIdx(prev_k)];
+    const int prev_y = prev_x - prev_k;
+    const int slide_start_x = down ? prev_x : prev_x + 1;
+    const int slide_start_y = down ? prev_y + 1 : prev_y;
+
+    while (x > slide_start_x && y > slide_start_y) {
+      x--; y--;
+      if (x < static_cast<int>(N)) pos_map[x] = static_cast<size_t>(y);
+    }
+    if (down) {
+      y = prev_y;
+    } else {
+      if (prev_x < static_cast<int>(N)) pos_map[prev_x] = static_cast<size_t>(prev_y);
+      x = prev_x;
+    }
+  }
+  while (x > 0 && y > 0) {
+    x--; y--;
+    if (x < static_cast<int>(N)) pos_map[x] = static_cast<size_t>(y);
+  }
+  while (x > 0) {
+    x--;
+    pos_map[x] = 0;
+  }
+  return pos_map;
+}
+
+// Patch byte-position references in `err` so they point into the original
+// SQL coordinates instead of the rewritten ones. CH parse errors emit
+// "Syntax error[: ...]: failed at position N (...)" with N being a 1-based
+// byte offset (clickHouse/src/Parsers/parseQuery.cpp). We only see errors on
+// SQL the rewriter parsed successfully, so practically this fires when CH's
+// own parser is stricter than ours and rejects the rewritten output — rare
+// but it does happen, and the position is unhelpful when the user reads it
+// against their original SQL.
+//
+// Line/col `(line L, col C)` is intentionally NOT remapped: the rewriter
+// always emits one-line SQL (formatWithPossiblyHidingSensitiveData,
+// one_line=true), so CH's getLineAndCol guard `nl + 1 < end` is false and
+// CH never prints line/col for our queries.
+inline std::string remapErrorPositions(const std::string &err,
+                                       const std::vector<size_t> &pos_map) {
+  // pos_map.size() - 1 is the rewritten SQL byte length.
+  if (pos_map.size() <= 1) return err;
+  static const std::regex re(R"(([Pp]osition[\s]+)(\d+))");
+  std::string out;
+  out.reserve(err.size());
+  size_t last = 0;
+  for (auto it = std::sregex_iterator(err.begin(), err.end(), re),
+            end = std::sregex_iterator();
+       it != end; ++it) {
+    const auto &m = *it;
+    const size_t mp = static_cast<size_t>(m.position(0));
+    out.append(err, last, mp - last);
+    out.append(m[1].str());
+    size_t pos1 = 0;  // 1-based as printed.
+    bool ok = true;
+    try { pos1 = std::stoull(m[2].str()); } catch (...) { ok = false; }
+    // CH uses 1-based; subtract 1 to index pos_map. Out-of-range stays put
+    // (probably not a SQL position — could be a version digit run).
+    if (!ok || pos1 == 0 || pos1 > pos_map.size() - 1) {
+      out.append(m[2].str());
+    } else {
+      out.append(std::to_string(pos_map[pos1 - 1] + 1));
+    }
+    last = mp + static_cast<size_t>(m.length(0));
+  }
+  out.append(err, last, err.size() - last);
+  return out;
+}
+
 // Boundary-aware regex matching a qualified table reference, allowing each
 // component to be optionally backtick-quoted. Splits on the first dot — that
 // matches how recordTableRewrite encodes "<db>.<table>" (and how the dynamic
@@ -304,6 +446,14 @@ void RewriterServiceImpl::doRewriteErrorMessage(
   const std::string &rewritten_sql = rewrite_resp.sql_after_rewrite();
   const std::string &original_sql = request->sql();
   if (!rewritten_sql.empty() && rewritten_sql != original_sql) {
+    // Remap byte-position references ("failed at position N") FIRST, while
+    // they still match the rewritten SQL we're about to swap out. Without
+    // this the user reads "position N" against their original SQL and ends
+    // up at a totally wrong token (the rewritten table prefix shifts every
+    // position past its insertion point).
+    const auto pos_map = buildOffsetMap(rewritten_sql, original_sql);
+    err = remapErrorPositions(err, pos_map);
+
     // Whole-SQL replacement: when the error embeds the rewritten SQL (the
     // common "In scope SELECT ..." form), swap the whole block back to the
     // user's original SQL. Catches the remote() case too — its full

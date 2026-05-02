@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -1245,6 +1247,80 @@ TEST(ERROR_MESSAGE_REWRITE, DynamicArgs_PhysicalNameInvertedToLogical) {
   EXPECT_NE(response.error_after_rewrite().find("tenant1.events"), std::string::npos);
   EXPECT_EQ(response.error_after_rewrite().find("physical_db_1"), std::string::npos);
   EXPECT_EQ(response.error_after_rewrite().find("`tenant1.events`"), std::string::npos);
+}
+
+TEST(ERROR_MESSAGE_REWRITE, PositionRemappedAfterSQLSwap) {
+  // Verify CH-style "failed at position N" gets remapped to the equivalent
+  // position in the user's original SQL. The rewriter inserts a long prefix
+  // ("physical_db_1.`tenant1.") in front of the table identifier; without
+  // the alignment table, "position N" in the rewritten coords would point
+  // somewhere meaningless after the substring swap.
+  const std::string kSQL = "SELECT * FROM events";
+
+  // First do a Rewrite to learn the exact rewritten SQL the rewriter
+  // produces (formatter quirks: hilite, casing, whitespace) so the test
+  // doesn't depend on the formatter implementation.
+  ServerContext server_context;
+  RewriteSQLRequest rw_req;
+  rw_req.set_sql(kSQL);
+  {
+    auto *opt = rw_req.add_options();
+    opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+    auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["tenant1"] = "physical_db_1";
+    dyn->set_upstream_logical_database_in_context("tenant1");
+  }
+  RewriteSQLResponse rw_resp;
+  RewriterServiceImpl service;
+  ASSERT_TRUE(service.Rewrite(&server_context, &rw_req, &rw_resp).ok());
+  ASSERT_EQ(rw_resp.code(), rewriter::RewriteCode::Success);
+  const std::string &rewritten = rw_resp.sql_after_rewrite();
+
+  // Find a recognizable token in rewritten — "events" appears inside the
+  // backticked dynamic-rewrite form `physical_db_1.\`tenant1.events\`` and
+  // also as the alias the SELECT path appends (AS events). Pick the FIRST
+  // occurrence: it's the actual rewritten table reference and Myers will
+  // align it to the original "events". The alias is rewriter-added and has
+  // no original counterpart — Myers correctly maps it to end-of-original.
+  const auto rewritten_off = rewritten.find("events");
+  ASSERT_NE(rewritten_off, std::string::npos);
+  const auto original_off = kSQL.find("events");
+  ASSERT_NE(original_off, std::string::npos);
+  const size_t rewritten_pos1 = rewritten_off + 1;  // CH is 1-based.
+  const size_t expected_pos1 = original_off + 1;
+
+  // CH's actual error format: see clickHouse/src/Parsers/parseQuery.cpp.
+  std::ostringstream err_oss;
+  err_oss << "Code: 62. DB::Exception: Syntax error: failed at position "
+          << rewritten_pos1 << " (events) (something something).";
+  const std::string kErr = err_oss.str();
+
+  RewriteErrorMessageRequest req;
+  RewriteErrorMessageResponse resp;
+  req.set_sql(kSQL);
+  req.set_error_message(kErr);
+  *req.mutable_options() = rw_req.options();
+
+  ASSERT_TRUE(service.RewriteErrorMessage(&server_context, &req, &resp).ok());
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  // Stale rewritten-coord position must not survive (would mislead a user
+  // reading the message against their original SQL).
+  std::ostringstream stale_oss;
+  stale_oss << "position " << rewritten_pos1;
+  EXPECT_EQ(resp.error_after_rewrite().find(stale_oss.str()), std::string::npos)
+      << "stale '" << stale_oss.str() << "' should be gone: "
+      << resp.error_after_rewrite();
+  // Remapped position must land somewhere inside the original 'events'
+  // token. Myers can pick any alignment with the same LCS length, so we
+  // accept any byte offset within [original_off, original_off+len("events")]
+  // (1-based) — both 15 (start) and 20 (end) are valid alignments.
+  std::regex pos_re(R"(position\s+(\d+))");
+  std::smatch m;
+  ASSERT_TRUE(std::regex_search(resp.error_after_rewrite(), m, pos_re))
+      << "no position remained in: " << resp.error_after_rewrite();
+  const size_t got_pos1 = std::stoull(m[1].str());
+  EXPECT_GE(got_pos1, original_off + 1);
+  EXPECT_LE(got_pos1, original_off + std::string("events").size() + 1);
 }
 
 TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
