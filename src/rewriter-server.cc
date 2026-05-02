@@ -125,6 +125,31 @@ inline std::regex makeIdentRegex(const std::string &ident) {
   return std::regex(pat, std::regex::ECMAScript | std::regex::icase);
 }
 
+// Boundary-aware regex matching a qualified table reference, allowing each
+// component to be optionally backtick-quoted. Splits on the first dot — that
+// matches how recordTableRewrite encodes "<db>.<table>" (and how the dynamic
+// rewriter packs the prefix-prefixed table into the table half, so its dot is
+// always inside the backticks ClickHouse's WhenNecessary formatter emits).
+inline std::regex makeQualifiedIdentRegex(const std::string &qualified) {
+  const auto dot = qualified.find('.');
+  if (dot == std::string::npos) {
+    return makeIdentRegex(qualified);
+  }
+  const std::string db = qualified.substr(0, dot);
+  const std::string table = qualified.substr(dot + 1);
+  const std::string esc_db = regexEscape(db);
+  const std::string esc_table = regexEscape(table);
+  // If the table half itself contains a dot, ClickHouse's formatter will have
+  // wrapped it in backticks (the dot is illegal bare). Require them so we
+  // don't greedy-match across an unrelated `.foo` suffix.
+  const bool table_has_dot = table.find('.') != std::string::npos;
+  const std::string table_pat =
+    table_has_dot ? ("`" + esc_table + "`") : ("`?" + esc_table + "`?");
+  const std::string pat =
+    "(^|[^A-Za-z0-9_])`?" + esc_db + "`?\\." + table_pat + "(?=[^A-Za-z0-9_]|$)";
+  return std::regex(pat, std::regex::ECMAScript | std::regex::icase);
+}
+
 } // namespace
 
 void RewriterServiceImpl::doRewrite(
@@ -245,81 +270,80 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     }
   } _access_log{sql_id, response, t0, sql_len, err_len};
 
-  auto error_message = request->error_message();
-  if (error_message.empty()) {
+  if (request->error_message().empty()) {
     response->set_message("Error message is empty");
     response->set_code(rewriter::Success);
     return;
   }
 
-  // Step 1: parse original SQL to AST.
-  String query = request->sql();
-  const char *pos = query.data();
-  const char *end = pos + query.size();
+  // Re-run the full rewrite path on (sql, options) so we have the exact
+  // origin->rewritten map this query went through. This covers every
+  // statement kind the rewriter knows about (SELECT/USE/SHOW/EXISTS/
+  // SHOW CREATE/writes/GRANT/...) and every TableNameRewrite variant
+  // (static three-map + dynamic_args), since they all funnel into
+  // response.table_rewrites / response.database_rewrites with deterministic
+  // entries scoped to *this* query — so a name that's ambiguous in the
+  // physical DB at large is unambiguous here.
+  RewriteSQLRequest rewrite_req;
+  rewrite_req.set_sql(request->sql());
+  *rewrite_req.mutable_options() = request->options();
+  RewriteSQLResponse rewrite_resp;
+  doRewrite(&rewrite_req, &rewrite_resp);
 
-  DB::ParserQuery parser(end, /*allow_alias_without_as*/ false);
-  try {
-    // See doRewrite for why the explicit empty description matters.
-    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
-
-    String origin_sql_without_space = ast->formatWithSecretsOneLine();
-
-    // Step 2: rewrite the AST.
-    ast = rewriter_handlers::applyRewriteOptions(request->options(), ast);
-
-    // Step 3: format the AST back to SQL.
-    String rewritten_sql = ast->formatForErrorMessage();
-
-    // Step 4: perform replacements in error_message.
-    // Use the raw `error_message` and `sql` without stripping ANSI or normalizing whitespace.
-    std::string err = error_message;
-
-    // 4.1 Replace the entire SQL if present (exact first, then flexible
-    // whitespace-insensitive).
-    {
-      auto p = err.find(rewritten_sql);
-      if (p != std::string::npos) {
-        err.replace(p, rewritten_sql.size(), origin_sql_without_space);
-      } else {
-        std::regex flex = makeFlexibleSqlRegex(rewritten_sql);
-        err = std::regex_replace(err, flex, origin_sql_without_space);
-      }
-    }
-
-    // 4.2 Replace rewritten table names back to original names (boundary-aware).
-    // Only the SELECT-path table_map produces deterministic rewritten->original
-    // pairs suitable for inverse substitution; the dynamic construction in
-    // dynamic_args doesn't give us a stable inverse (the rewritten name can
-    // collide with other tables in the physical DB), so we don't invert it
-    // here — the caller already has the table_rewrites map on the rewrite
-    // response and can do a smarter substitution if it wants.
-    for (const auto &opt : request->options()) {
-      if (opt.op() != rewriter::RewriteOp::TableNameRewrite) continue;
-      if (!opt.table_name_args().has_static_args()) continue;
-      const auto &m = opt.table_name_args().static_args().table_map();
-      for (const auto &kv : m) {
-        const std::string &original = kv.first;
-        const std::string &rewritten = kv.second;
-        if (rewritten.empty() || original.empty()) continue;
-
-        // Replace with boundary-aware regex, allow optional backticks.
-        std::regex re_ident = makeIdentRegex(rewritten);
-        err = std::regex_replace(err, re_ident, std::string("$1") + original);
-      }
-    }
-
-    response->set_error_after_rewrite(err);
-    response->set_message("success");
-    response->set_code(rewriter::Success);
-
-  } catch (const DB::Exception &e) {
-    std::cerr << "[parse-fail] method=RewriteErrorMessage sql=" << sql_id
-              << " len=" << sql_len
-              << " err=\"" << e.displayText() << "\"" << std::endl;
-    response->set_error_after_rewrite("Error when fine tune error message");
-    response->set_message(e.displayText());
-    response->set_code(rewriter::SyntaxError);
+  if (rewrite_resp.code() != rewriter::Success) {
+    // We don't know what to invert. Surface the rewrite-side reason and
+    // pass the error message through so the caller can still see it.
+    response->set_error_after_rewrite(request->error_message());
+    response->set_message(rewrite_resp.message());
+    response->set_code(rewrite_resp.code());
+    return;
   }
+
+  std::string err = request->error_message();
+
+  const std::string &rewritten_sql = rewrite_resp.sql_after_rewrite();
+  const std::string &original_sql = request->sql();
+  if (!rewritten_sql.empty() && rewritten_sql != original_sql) {
+    // Whole-SQL replacement: when the error embeds the rewritten SQL (the
+    // common "In scope SELECT ..." form), swap the whole block back to the
+    // user's original SQL. Catches the remote() case too — its full
+    // remote('addr', 'db', 'table', 'user', '[HIDDEN]') call lives only in
+    // sql_after_rewrite, not in table_rewrites.
+    auto p = err.find(rewritten_sql);
+    if (p != std::string::npos) {
+      err.replace(p, rewritten_sql.size(), original_sql);
+    } else {
+      std::regex flex = makeFlexibleSqlRegex(rewritten_sql);
+      err = std::regex_replace(err, flex, original_sql);
+    }
+  }
+
+  // Per-table substitution: rewritten qualified name -> origin. Picks up
+  // out-of-SQL-block mentions like "Table physical_db.`tenant1.events`
+  // does not exist".
+  for (const auto &kv : rewrite_resp.table_rewrites()) {
+    const std::string &origin = kv.first;
+    const std::string &rewritten = kv.second;
+    if (origin == rewritten || rewritten.empty()) continue;
+    std::regex re = makeQualifiedIdentRegex(rewritten);
+    err = std::regex_replace(err, re, std::string("$1") + origin);
+  }
+
+  // Per-database substitution: physical -> logical. Runs after table-level
+  // replacement so dotted physical_db.`tenant1.events` references are
+  // resolved as a unit first; only standalone physical_db tokens (e.g.
+  // "Database physical_db_1 does not exist") remain to match here.
+  for (const auto &kv : rewrite_resp.database_rewrites()) {
+    const std::string &origin = kv.first;
+    const std::string &physical = kv.second;
+    if (origin == physical || physical.empty()) continue;
+    std::regex re = makeIdentRegex(physical);
+    err = std::regex_replace(err, re, std::string("$1") + origin);
+  }
+
+  response->set_error_after_rewrite(err);
+  response->set_message("success");
+  response->set_code(rewriter::Success);
 }
 
 // gRPC thin wrapper — delegates to doRewriteErrorMessage.

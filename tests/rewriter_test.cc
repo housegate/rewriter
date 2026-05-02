@@ -1215,6 +1215,38 @@ TEST(AccessedTable, DropDatabase_IfExists_Miss_RecordsAccessOnly) {
   EXPECT_TRUE(e.physical_database().empty());
 }
 
+TEST(ERROR_MESSAGE_REWRITE, DynamicArgs_PhysicalNameInvertedToLogical) {
+  // CH error with the dynamic-rewriter's `<physical_db>.`<logical>.<table>``
+  // form (table half is dot-quoted because it contains a dot).
+  const std::string kErr =
+    "Code: 60. DB::Exception: Table physical_db_1.`tenant1.events` does not exist. "
+    "(UNKNOWN_TABLE) (version 25.6.4.12 (official build))";
+  // User's original SQL — bare logical table.
+  const std::string kSQL = "SELECT count(*) FROM tenant1.events";
+
+  ServerContext server_context;
+  RewriteErrorMessageRequest request;
+  RewriteErrorMessageResponse response;
+  request.set_sql(kSQL);
+  request.set_error_message(kErr);
+  {
+    auto *opt = request.add_options();
+    opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+    auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["tenant1"] = "physical_db_1";
+  }
+
+  RewriterServiceImpl service;
+  auto status = service.RewriteErrorMessage(&server_context, &request, &response);
+  ASSERT_TRUE(status.ok());
+  ASSERT_EQ(response.code(), rewriter::RewriteCode::Success);
+  // Every physical mention of the table should be back to its logical form,
+  // and no physical_db.`tenant1.events` artefact should remain.
+  EXPECT_NE(response.error_after_rewrite().find("tenant1.events"), std::string::npos);
+  EXPECT_EQ(response.error_after_rewrite().find("physical_db_1"), std::string::npos);
+  EXPECT_EQ(response.error_after_rewrite().find("`tenant1.events`"), std::string::npos);
+}
+
 TEST(ERROR_MESSAGE_REWRITE, ManualCase_CannotParseDateTime) {
   // ---------- Full original error (as returned by ClickHouse) ----------
   const std::string kErr =
