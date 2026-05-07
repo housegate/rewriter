@@ -937,6 +937,68 @@ TEST(AccessedTable, Dynamic_RemoteMappedLogical_FlagsRemote) {
   EXPECT_TRUE(e->is_remote());
 }
 
+TEST(SelectDynamic, InlineCTE_AliasIsNotRewritten) {
+  // `WITH main AS (SELECT * FROM xxx) SELECT * FROM main` — the bare `main`
+  // in the outer FROM is a CTE alias, not a real table, and must pass through
+  // the rewrite untouched even though it would otherwise resolve via the
+  // upstream-logical-in-context. The CTE body's real table (`xxx`) still
+  // gets rewritten.
+  auto resp = RunSelectWithDynamicArgs(
+    "WITH main AS (SELECT * FROM xxx) SELECT * FROM main",
+    /*database_map*/ {{"testnet", "physical_testnet"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "testnet");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const std::string &out = resp.sql_after_rewrite();
+  EXPECT_EQ(out.find("testnet.main"), std::string::npos)
+    << "CTE alias `main` was rewritten as if it were a table: " << out;
+  EXPECT_EQ(out.find("physical_testnet.main"), std::string::npos)
+    << "CTE alias `main` was rewritten as if it were a table: " << out;
+  // The CTE body's real table reference still gets rewritten.
+  EXPECT_NE(out.find("`testnet.xxx`"), std::string::npos)
+    << "CTE body table `xxx` should have been rewritten: " << out;
+
+  // CTE alias should not appear in original_accessed_tables either.
+  EXPECT_EQ(FindAccessed(resp, "", "main"), nullptr)
+    << "CTE alias `main` leaked into original_accessed_tables";
+  const auto *xxx = FindAccessed(resp, "", "xxx");
+  ASSERT_NE(xxx, nullptr);
+  EXPECT_EQ(xxx->logical_database(), "testnet");
+  EXPECT_EQ(xxx->physical_database(), "physical_testnet");
+
+  // table_rewrites must not contain the CTE alias as a key.
+  EXPECT_EQ(resp.table_rewrites().count("main"), 0u);
+}
+
+TEST(SelectDynamic, InlineCTE_QualifiedAliasNameIsStillRewritten) {
+  // Qualifying with a db turns it back into a real table reference — the
+  // CTE-skip should only apply to bare references.
+  auto resp = RunSelectWithDynamicArgs(
+    "WITH main AS (SELECT 1) SELECT * FROM testnet.main",
+    /*database_map*/ {{"testnet", "physical_testnet"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(resp.sql_after_rewrite().find("`testnet.main`"), std::string::npos)
+    << "qualified `testnet.main` should be rewritten: "
+    << resp.sql_after_rewrite();
+}
+
+TEST(SelectDynamic, InlineCTE_NestedSelectAliasShadowsScope) {
+  // CTE aliases declared inside a subquery must NOT leak to outer scope —
+  // the outer `FROM x` should still be rewritten as a real table.
+  auto resp = RunSelectWithDynamicArgs(
+    "SELECT * FROM x WHERE id IN (WITH x AS (SELECT 1) SELECT * FROM x)",
+    /*database_map*/ {{"testnet", "physical_testnet"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "testnet");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  // Outer `FROM x` should be rewritten (it's a real table in scope), but the
+  // inner subquery's `FROM x` references the local CTE and must not be.
+  EXPECT_NE(resp.sql_after_rewrite().find("`testnet.x`"), std::string::npos)
+    << "outer `x` should have been rewritten: " << resp.sql_after_rewrite();
+}
+
 TEST(AccessedTable, NoTableNameRewriteOption_AllResolvedFieldsEmpty) {
   // No TableNameRewrite option at all — original_database/original_table are
   // still populated, but the resolved fields stay empty.

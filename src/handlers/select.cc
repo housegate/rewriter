@@ -8,6 +8,7 @@
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
+#include <Parsers/ASTWithElement.h>
 
 #include <cstdlib>
 #include <iostream>
@@ -31,35 +32,82 @@ struct AccessedTablePair {
   std::string original_table;
 };
 
+// Collect bare CTE aliases declared by the WITH clause of a SELECT into
+// `out_aliases`. Returns true when at least one alias was added — the caller
+// uses this to decide whether to fork a new scope set on the recursion.
+bool collectInlineCTEAliases(
+  const DB::ASTSelectQuery *select,
+  std::unordered_set<std::string> &out_aliases) {
+  if (!select) return false;
+  const auto with_expr = const_cast<DB::ASTSelectQuery *>(select)->with();
+  if (!with_expr) return false;
+  bool added = false;
+  for (const auto &ch : with_expr->children) {
+    if (const auto *we = ch->as<DB::ASTWithElement>()) {
+      if (!we->name.empty()) {
+        out_aliases.insert(we->name);
+        added = true;
+      }
+    }
+  }
+  return added;
+}
+
 // Walk every ASTTableExpression and collect its (db, table) split. Keyed by
 // the SQL-shaped name ("db.table" / bare "table") so we can dedup and so
 // CTE-alias entries can be erased by alias when their bodies inline. Replaces
 // the prior set-of-string collector — same dedup behavior, but carries the
 // db/table split forward to the response without the caller having to re-split.
+//
+// `cte_scope` carries CTE-alias names declared by enclosing WITH clauses;
+// bare references to those aliases aren't real tables and must be skipped.
+// Qualified `db.alias` references stay collected — those are real tables.
 void collectAccessedTablePairsFromAST(
   const DB::ASTPtr &node,
-  std::map<std::string, AccessedTablePair> &out) {
+  std::map<std::string, AccessedTablePair> &out,
+  const std::unordered_set<std::string> &cte_scope) {
   if (!node) return;
+
+  std::unordered_set<std::string> extended;
+  const std::unordered_set<std::string> *scope = &cte_scope;
+  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
+    extended = cte_scope;
+    if (collectInlineCTEAliases(select, extended)) {
+      scope = &extended;
+    }
+  }
+
   if (auto *te = node->as<DB::ASTTableExpression>()) {
     if (te->database_and_table_name) {
       if (auto *id = te->database_and_table_name->as<DB::ASTTableIdentifier>()) {
         const auto full = id->name();  // "db.table" or bare "table"
         if (!full.empty()) {
-          AccessedTablePair p;
-          // Match the split that dynamicRewriteWalk and the table_rewrites
-          // map keys use — first-dot split, with everything before as db.
-          if (const auto dot = full.find('.'); dot != std::string::npos) {
-            p.original_db = full.substr(0, dot);
-            p.original_table = full.substr(dot + 1);
-          } else {
-            p.original_table = full;
+          const bool is_cte_ref =
+            full.find('.') == std::string::npos && scope->count(full) > 0;
+          if (!is_cte_ref) {
+            AccessedTablePair p;
+            // Match the split that dynamicRewriteWalk and the table_rewrites
+            // map keys use — first-dot split, with everything before as db.
+            if (const auto dot = full.find('.'); dot != std::string::npos) {
+              p.original_db = full.substr(0, dot);
+              p.original_table = full.substr(dot + 1);
+            } else {
+              p.original_table = full;
+            }
+            out.emplace(full, std::move(p));
           }
-          out.emplace(full, std::move(p));
         }
       }
     }
   }
-  for (auto &ch : node->children) { collectAccessedTablePairsFromAST(ch, out); }
+  for (auto &ch : node->children) { collectAccessedTablePairsFromAST(ch, out, *scope); }
+}
+
+void collectAccessedTablePairsFromAST(
+  const DB::ASTPtr &node,
+  std::map<std::string, AccessedTablePair> &out) {
+  static const std::unordered_set<std::string> kEmpty;
+  collectAccessedTablePairsFromAST(node, out, kEmpty);
 }
 
 // Per-transformer AST dumps are only useful when debugging the rewrite
@@ -98,8 +146,23 @@ void doTableNameRewrite(
 void dynamicRewriteWalk(
   DB::ASTPtr ast,
   const rewriter::RewriteTableDynamicArgs &args,
-  std::map<std::string, std::string> *out_table_rewrites) {
+  std::map<std::string, std::string> *out_table_rewrites,
+  const std::unordered_set<std::string> &cte_scope) {
   if (!ast) return;
+
+  // Extend the CTE scope when entering a SELECT with a WITH clause so that
+  // bare references to those aliases inside the SELECT body aren't rewritten
+  // as if they were real tables. We fork a local copy (rather than mutate the
+  // caller's set) so siblings of this SELECT don't see aliases that only
+  // belong to this subtree.
+  std::unordered_set<std::string> extended;
+  const std::unordered_set<std::string> *scope = &cte_scope;
+  if (const auto *select = ast->as<DB::ASTSelectQuery>()) {
+    extended = cte_scope;
+    if (collectInlineCTEAliases(select, extended)) {
+      scope = &extended;
+    }
+  }
 
   if (auto *table_expression = ast->as<DB::ASTTableExpression>()) {
     if (table_expression->database_and_table_name) {
@@ -107,6 +170,13 @@ void dynamicRewriteWalk(
       if (identifier) {
         const std::string origin_full_name = identifier->name();
         const std::string origin_alias = identifier->tryGetAlias();
+
+        // Bare reference to a CTE alias — leave it alone. Qualified
+        // `db.alias` is a real table and falls through to the rewrite path.
+        if (origin_full_name.find('.') == std::string::npos &&
+            scope->count(origin_full_name) > 0) {
+          return;
+        }
 
         // Split "db.table" → (db, table); bare "table" → ("", table). Matches
         // the key shape that recordTableRewrite / table_rewrites use.
@@ -167,15 +237,23 @@ void dynamicRewriteWalk(
       }
     } else if (table_expression->subquery) {
       for (auto &child : ast->children) {
-        dynamicRewriteWalk(child, args, out_table_rewrites);
+        dynamicRewriteWalk(child, args, out_table_rewrites, *scope);
       }
     }
     return;
   }
 
   for (auto &child : ast->children) {
-    dynamicRewriteWalk(child, args, out_table_rewrites);
+    dynamicRewriteWalk(child, args, out_table_rewrites, *scope);
   }
+}
+
+void dynamicRewriteWalk(
+  DB::ASTPtr ast,
+  const rewriter::RewriteTableDynamicArgs &args,
+  std::map<std::string, std::string> *out_table_rewrites) {
+  static const std::unordered_set<std::string> kEmpty;
+  dynamicRewriteWalk(ast, args, out_table_rewrites, kEmpty);
 }
 
 // SELECT-path fallback when the caller set `dynamic_args` but no
