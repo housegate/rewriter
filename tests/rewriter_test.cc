@@ -2986,6 +2986,181 @@ TEST(TableRewrite, Select_Passthrough_WhenNoOption) {
 }
 
 // ============================================================================
+// Cross-shard correctness: forceGlobalForRemoteAsymmetry
+//
+// When a SELECT mixes a remote() / cluster() table function with a plain
+// local table identifier inside a JOIN or an IN subquery, ClickHouse will
+// ship the outer plan to the remote shard and fail to resolve the local
+// reference there (UNKNOWN_TABLE). The rewriter's post-pass detects this
+// asymmetry and bumps the JOIN to GLOBAL JOIN / IN to globalIn so the
+// initiator broadcasts the local side as a temp table.
+//
+// All-remote and all-local stay untouched by design — GLOBAL costs an extra
+// broadcast and the symmetric cases work without it.
+// ============================================================================
+
+namespace {
+
+rewriter::RewriteSQLResponse RunSelectNoOpts(const std::string &sql) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  service.Rewrite(&ctx, &req, &resp);
+  return resp;
+}
+
+} // namespace
+
+TEST(GlobalForRemote, Join_RemoteLeftLocalRight_BecomesGlobal) {
+  // The user's repro: outer FROM is remote(), JOIN with a plain local table.
+  // Plain LEFT JOIN -> LEFT GLOBAL JOIN.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "LEFT JOIN swap AS l ON r.value = l.value");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(resp.sql_after_rewrite());
+  EXPECT_NE(sql.find("GLOBAL"), std::string::npos) << sql;
+  EXPECT_EQ(sql.find(" GLOBAL "), sql.rfind(" GLOBAL ")) << "exactly one GLOBAL: " << sql;
+}
+
+TEST(GlobalForRemote, Join_LocalLeftRemoteRight_BecomesGlobal) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM swap AS l "
+    "LEFT JOIN remote('h:9000','db','t','u','p') AS r ON r.value = l.value");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(NormalizeWS(resp.sql_after_rewrite()).find("GLOBAL"), std::string::npos);
+}
+
+TEST(GlobalForRemote, Join_BothRemote_StaysPlain) {
+  // Per design — symmetric remote-vs-remote works without GLOBAL.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h1:9000','d','t1','u','p') AS a "
+    "JOIN remote('h2:9000','d','t2','u','p') AS b ON a.x = b.x");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(resp.sql_after_rewrite());
+  EXPECT_EQ(sql.find(" GLOBAL "), std::string::npos) << sql;
+}
+
+TEST(GlobalForRemote, Join_BothLocal_StaysPlain) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM a JOIN b ON a.x = b.x");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(resp.sql_after_rewrite());
+  EXPECT_EQ(sql.find(" GLOBAL "), std::string::npos) << sql;
+}
+
+TEST(GlobalForRemote, Join_ExplicitGlobal_Preserved) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "GLOBAL LEFT JOIN swap AS l ON r.value = l.value");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(resp.sql_after_rewrite());
+  // Still has exactly one GLOBAL — no double-promotion.
+  EXPECT_NE(sql.find("GLOBAL"), std::string::npos);
+  EXPECT_EQ(sql.find(" GLOBAL "), sql.rfind(" GLOBAL ")) << sql;
+}
+
+TEST(GlobalForRemote, Join_ExplicitLocal_Preserved) {
+  // User explicitly pinned LOCAL — we don't override their intent.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "LOCAL LEFT JOIN swap AS l ON r.value = l.value");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(resp.sql_after_rewrite());
+  EXPECT_EQ(sql.find(" GLOBAL "), std::string::npos) << sql;
+}
+
+TEST(GlobalForRemote, Join_RemoteMapMakesAsymmetric_BecomesGlobal) {
+  // Static-mode rewrite turns `swap` into a remote() call AFTER which the
+  // JOIN becomes remote-vs-local relative to `local_t`.
+  auto r = RunSelect(
+    "SELECT * FROM swap JOIN local_t ON swap.x = local_t.x",
+    {.remote_map = {{"swap", {"h:9000", "db.swap_v2"}}}});
+  ASSERT_EQ(r.code, rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(r.sql_after_rewrite);
+  EXPECT_NE(sql.find("remote("), std::string::npos);
+  EXPECT_NE(sql.find("GLOBAL"), std::string::npos) << sql;
+}
+
+TEST(GlobalForRemote, Join_RemoteMapBothSides_StaysPlain) {
+  // After rewrite both sides are remote() — symmetric, no GLOBAL.
+  auto r = RunSelect(
+    "SELECT * FROM t1 JOIN t2 ON t1.x = t2.x",
+    {.remote_map = {{"t1", {"h:9000", "db.t1_v2"}},
+                    {"t2", {"h:9000", "db.t2_v2"}}}});
+  ASSERT_EQ(r.code, rewriter::RewriteCode::Success);
+  const auto sql = NormalizeWS(r.sql_after_rewrite);
+  EXPECT_EQ(sql.find(" GLOBAL "), std::string::npos) << sql;
+}
+
+TEST(GlobalForRemote, Join_SubqueryRightWithLocalInside_BecomesGlobal) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "JOIN (SELECT * FROM swap WHERE x > 0) AS s ON r.x = s.x");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(NormalizeWS(resp.sql_after_rewrite()).find("GLOBAL"), std::string::npos);
+}
+
+TEST(GlobalForRemote, In_RemoteOuter_LocalSubquery_BecomesGlobalIn) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "WHERE r.value IN (SELECT y FROM swap)");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(resp.sql_after_rewrite().find("GLOBAL IN"), std::string::npos)
+    << resp.sql_after_rewrite();
+}
+
+TEST(GlobalForRemote, NotIn_RemoteOuter_LocalSubquery_BecomesGlobalNotIn) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "WHERE r.value NOT IN (SELECT y FROM swap)");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(resp.sql_after_rewrite().find("GLOBAL NOT IN"), std::string::npos)
+    << resp.sql_after_rewrite();
+}
+
+TEST(GlobalForRemote, In_LiteralTuple_NoRewrite) {
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "WHERE r.value IN (1, 2, 3)");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.sql_after_rewrite().find("GLOBAL IN"), std::string::npos);
+}
+
+TEST(GlobalForRemote, In_LocalOuter_NoRewrite) {
+  // Outer is local — IN's right side referencing remote works without GLOBAL,
+  // and IN with a local subquery is fine too. Just verify no spurious rewrite.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM swap WHERE value IN (SELECT y FROM other_local)");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.sql_after_rewrite().find("globalIn"), std::string::npos);
+  EXPECT_EQ(resp.sql_after_rewrite().find("GLOBAL IN"), std::string::npos);
+}
+
+TEST(GlobalForRemote, In_RemoteOuter_RemoteSubquery_NoRewrite) {
+  // Symmetric remote — subquery dispatches to its own remote, no broadcast needed.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM remote('h1:9000','db','t','u','p') AS r "
+    "WHERE r.value IN (SELECT y FROM remote('h2:9000','db','t2','u','p'))");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.sql_after_rewrite().find("GLOBAL IN"), std::string::npos)
+    << resp.sql_after_rewrite();
+}
+
+TEST(GlobalForRemote, NestedSubquery_InnerHandledIndependently) {
+  // Outer is local, but the FROM-subquery is itself a remote-shipped
+  // SELECT joining a local table. Inner JOIN must become GLOBAL; outer is
+  // unaffected.
+  const auto resp = RunSelectNoOpts(
+    "SELECT * FROM (SELECT * FROM remote('h:9000','db','t','u','p') AS r "
+    "JOIN swap AS l ON r.x = l.x) AS sub");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_NE(NormalizeWS(resp.sql_after_rewrite()).find("GLOBAL"), std::string::npos);
+}
+
+// ============================================================================
 // GRANT / REVOKE tests
 // ============================================================================
 //

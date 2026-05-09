@@ -2,11 +2,13 @@
 #include "handlers/select.h"
 
 #include <Core/Field.h>
+#include <Core/Joins.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSetQuery.h>
+#include <Parsers/ASTSubquery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/ASTWithElement.h>
 
@@ -384,6 +386,187 @@ void applyPendingSelectTransforms(DB::ASTPtr ast, PendingSelectTransforms &pendi
   }
 }
 
+// ---- GLOBAL JOIN / GLOBAL IN rewrite for cross-shard queries ------------
+//
+// ClickHouse ships an outer query plan to a remote shard whenever its FROM
+// references a remote() / cluster() table function (or anything we expanded
+// into one via `remote_table_map` / `logical_database_to_remote_upstream_index`).
+// Anything *else* the query references — the other side of a JOIN, the
+// right operand of an IN — must then be resolvable on that shard. Plain
+// table identifiers aren't, since they only exist on the initiator. The
+// canonical fix is GLOBAL JOIN / GLOBAL IN, which evaluates the local side
+// once on the initiator and broadcasts the result as a temp table.
+//
+// Symmetric remote-vs-remote joins are left alone (per request) — the
+// initiator's plan still works without a broadcast in that case, and
+// forcing GLOBAL would cost an unnecessary temp-table round-trip.
+//
+// Runs *after* table-name rewrite, since `remote_table_map` /
+// `logical_database_to_remote_upstream_index` rewrites can introduce new
+// remote() calls the user didn't write themselves.
+
+constexpr std::string_view kRemoteFunctionNames[] = {
+  "remote", "remoteSecure", "cluster", "clusterAllReplicas",
+};
+
+bool isRemoteFunctionName(const std::string &name) {
+  for (auto candidate : kRemoteFunctionNames) {
+    if (candidate == name) return true;
+  }
+  return false;
+}
+
+// Any descendant ASTFunction with a remote-style name. We don't restrict to
+// table-position ASTFunctions because `WHERE x IN remote(...)` parses as a
+// free-standing function call on the IN operand, not wrapped in an
+// ASTTableExpression — and we want that to count as a remote source too.
+// Collisions with user-defined functions named exactly `remote` / `cluster`
+// are theoretically possible but vanishingly rare in practice.
+bool subtreeHasRemoteSource(const DB::IAST *node) {
+  if (!node) return false;
+  if (const auto *fn = node->as<DB::ASTFunction>()) {
+    if (isRemoteFunctionName(fn->name)) return true;
+  }
+  for (const auto &ch : node->children) {
+    if (subtreeHasRemoteSource(ch.get())) return true;
+  }
+  return false;
+}
+
+// Any descendant ASTTableExpression that names a real persistent table —
+// i.e., a database_and_table_name that isn't a bare CTE-alias reference.
+// Bare table-function calls like `numbers(10)` and `generateRandom()` are
+// node-agnostic (available on any shard) and intentionally don't count.
+bool subtreeHasLocalSource(const DB::IAST *node,
+                           const std::unordered_set<std::string> &cte_scope) {
+  if (!node) return false;
+  std::unordered_set<std::string> extended;
+  const std::unordered_set<std::string> *scope = &cte_scope;
+  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
+    extended = cte_scope;
+    if (collectInlineCTEAliases(select, extended)) {
+      scope = &extended;
+    }
+  }
+  if (const auto *te = node->as<DB::ASTTableExpression>()) {
+    if (te->database_and_table_name) {
+      if (const auto *id = te->database_and_table_name->as<DB::ASTTableIdentifier>()) {
+        const auto full = id->name();
+        const bool is_cte_ref =
+          full.find('.') == std::string::npos && scope->count(full) > 0;
+        if (!is_cte_ref) return true;
+      }
+    }
+  }
+  for (const auto &ch : node->children) {
+    if (subtreeHasLocalSource(ch.get(), *scope)) return true;
+  }
+  return false;
+}
+
+// Walk this select's body looking for IN-family functions whose right
+// operand contains a local source; rename them to their `globalIn` /
+// `globalNotIn` / etc. counterparts so the right side is broadcast from
+// the initiator instead of resolved on each remote shard.
+//
+// Stops at ASTSubquery boundaries — nested SELECT bodies are processed by
+// the outer bottom-up recursion at their own scope.
+void forceGlobalInWalk(DB::IAST *node,
+                       const std::unordered_set<std::string> &cte_scope) {
+  if (!node) return;
+  if (auto *fn = node->as<DB::ASTFunction>()) {
+    static const std::unordered_map<std::string, std::string> kInToGlobal = {
+      {"in",        "globalIn"},
+      {"notIn",     "globalNotIn"},
+      {"nullIn",    "globalNullIn"},
+      {"notNullIn", "globalNotNullIn"},
+    };
+    auto it = kInToGlobal.find(fn->name);
+    if (it != kInToGlobal.end() && fn->arguments &&
+        fn->arguments->children.size() == 2) {
+      const auto &right = fn->arguments->children[1];
+      if (subtreeHasLocalSource(right.get(), cte_scope)) {
+        fn->name = it->second;
+      }
+    }
+  }
+  for (auto &ch : node->children) {
+    if (ch->as<DB::ASTSubquery>()) continue;
+    forceGlobalInWalk(ch.get(), cte_scope);
+  }
+}
+
+// Bottom-up walker. For each ASTSelectQuery encountered:
+//   1. Scan its tables() left-to-right. If a JOIN element introduces a
+//      remote/local mismatch with what's accumulated to its left and the
+//      user didn't already pin locality (Unspecified), set Global.
+//   2. If the select's FROM ships out (any remote source), rewrite IN-family
+//      functions in the rest of its body that have a local right operand.
+void forceGlobalForRemoteAsymmetryImpl(
+  DB::IAST *node,
+  const std::unordered_set<std::string> &cte_scope) {
+  if (!node) return;
+
+  std::unordered_set<std::string> extended;
+  const std::unordered_set<std::string> *scope = &cte_scope;
+  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
+    extended = cte_scope;
+    if (collectInlineCTEAliases(select, extended)) {
+      scope = &extended;
+    }
+  }
+
+  for (auto &ch : node->children) {
+    forceGlobalForRemoteAsymmetryImpl(ch.get(), *scope);
+  }
+
+  auto *select = node->as<DB::ASTSelectQuery>();
+  if (!select) return;
+
+  if (auto tables = select->tables()) {
+    bool acc_remote = false;
+    bool acc_local  = false;
+    for (auto &el_ast : tables->children) {
+      auto *el = el_ast->as<DB::ASTTablesInSelectQueryElement>();
+      if (!el || !el->table_expression) continue;
+      const bool this_remote =
+        subtreeHasRemoteSource(el->table_expression.get());
+      const bool this_local =
+        subtreeHasLocalSource(el->table_expression.get(), *scope);
+      if (el->table_join) {
+        if (auto *tj = el->table_join->as<DB::ASTTableJoin>()) {
+          if (tj->locality == DB::JoinLocality::Unspecified) {
+            const bool mixed =
+              (acc_remote && this_local) || (acc_local && this_remote);
+            if (mixed) tj->locality = DB::JoinLocality::Global;
+          }
+        }
+      }
+      acc_remote = acc_remote || this_remote;
+      acc_local  = acc_local  || this_local;
+    }
+  }
+
+  bool from_has_remote = false;
+  if (auto tables = select->tables()) {
+    from_has_remote = subtreeHasRemoteSource(tables.get());
+  }
+  if (from_has_remote) {
+    auto tables_ptr = select->tables();
+    auto with_ptr   = select->with();
+    for (auto &child : select->children) {
+      if (child.get() == tables_ptr.get()) continue;
+      if (child.get() == with_ptr.get())   continue;
+      forceGlobalInWalk(child.get(), *scope);
+    }
+  }
+}
+
+void forceGlobalForRemoteAsymmetry(DB::ASTPtr ast) {
+  static const std::unordered_set<std::string> kEmpty;
+  forceGlobalForRemoteAsymmetryImpl(ast.get(), kEmpty);
+}
+
 } // namespace
 
 DB::ASTPtr applyRewriteOptions(
@@ -609,6 +792,15 @@ void handleSelectQuery(DB::ASTPtr ast,
 
   std::map<std::string, std::string> table_rewrites;
   ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps, &table_rewrites);
+
+  // Cross-shard correctness pass: any JOIN/IN that mixes a remote() source
+  // with a local-table reference would otherwise fail on the remote shard
+  // with UNKNOWN_TABLE. Done after option application so static- and
+  // dynamic-mode rewrites that *introduce* remote() calls are visible.
+  forceGlobalForRemoteAsymmetry(ast);
+  if (shouldDumpAst()) {
+    std::cout << "after forceGlobalForRemoteAsymmetry " << ast->dumpTree() << std::endl;
+  }
 
   for (const auto &[_, pair] : originals) {
     auto *entry = response->add_original_accessed_tables();
