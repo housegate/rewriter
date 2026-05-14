@@ -21,6 +21,8 @@ using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
+using rewriter::OptimizeRequest;
+using rewriter::OptimizeResponse;
 using rewriter::RewriteErrorMessageRequest;
 using rewriter::RewriteErrorMessageResponse;
 using rewriter::RewriterService;
@@ -38,14 +40,20 @@ public:
     const RewriteErrorMessageRequest *request,
     RewriteErrorMessageResponse *response) override;
 
+  Status Optimize(ServerContext *context,
+    const OptimizeRequest *request,
+    OptimizeResponse *response) override;
+
   // Protocol-agnostic dispatch. The HTTP façade (rewriter-http-server.cc)
   // delegates straight to these; the gRPC wrappers above do the same and just
   // synthesize a Status::OK. No failure paths — errors are reported inside
-  // `response` via the `RewriteCode` field.
+  // `response` via the `RewriteCode` / `OptimizeCode` field.
   void doRewrite(
     const RewriteSQLRequest *request, RewriteSQLResponse *response);
   void doRewriteErrorMessage(
     const RewriteErrorMessageRequest *request, RewriteErrorMessageResponse *response);
+  void doOptimize(
+    const OptimizeRequest *request, OptimizeResponse *response);
 
   Status RewriteForTest(
     ServerContext *context, const RewriteSQLRequest *request, RewriteSQLResponse *response) {

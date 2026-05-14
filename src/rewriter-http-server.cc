@@ -120,6 +120,21 @@ private:
   RewriterServiceImpl *core_;
 };
 
+class OptimizeHandler : public HTTPRequestHandler {
+public:
+  explicit OptimizeHandler(RewriterServiceImpl *core) : core_(core) {}
+  void handleRequest(HTTPServerRequest &request, HTTPServerResponse &response) override {
+    handleProtoEndpoint<rewriter::OptimizeRequest, rewriter::OptimizeResponse>(
+      request, response,
+      [this](const rewriter::OptimizeRequest *req, rewriter::OptimizeResponse *resp) {
+        core_->doOptimize(req, resp);
+      });
+  }
+
+private:
+  RewriterServiceImpl *core_;
+};
+
 class HealthHandler : public HTTPRequestHandler {
 public:
   void handleRequest(HTTPServerRequest &, HTTPServerResponse &response) override {
@@ -150,6 +165,9 @@ public:
         || path == "/rewriter.RewriterService/RewriteErrorMessage") {
       return new RewriteErrorMessageHandler(core_);
     }
+    if (path == "/optimize" || path == "/rewriter.RewriterService/Optimize") {
+      return new OptimizeHandler(core_);
+    }
     if (path == "/healthz" || path == "/health" || path == "/") {
       return new HealthHandler();
     }
@@ -178,7 +196,7 @@ void RunHttpServer(uint16_t port, RewriterServiceImpl &core) {
   server->start();
 
   std::cout << "[http] RewriterService listening on 0.0.0.0:" << port
-            << " (POST /rewrite, /rewriteerrormessage; GET /healthz)" << std::endl;
+            << " (POST /rewrite, /rewriteerrormessage, /optimize; GET /healthz)" << std::endl;
 }
 
 } // namespace rewriter_http

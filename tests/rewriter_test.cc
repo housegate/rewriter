@@ -3498,6 +3498,361 @@ TEST(Revoke, NoOptions_Unsupported) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
+// ============================================================================
+// Optimize RPC: swap left-right JOIN sides based on caller-supplied physical
+// table sizes.
+//
+// When the right table is larger than the left, the optimizer swaps them and
+// adjusts the JOIN kind (Left↔Right) to preserve semantics. The goal is to
+// keep the bigger table on the left (the streamed side in ClickHouse's
+// hash-join execution).
+//
+// Test taxonomy:
+//   * Optimize.* — tests for the RPC surface (codes, fallback contract).
+//   * JoinSwap.*  — tests for the swap policy proper (kinds, sizes,
+//                   skip rules). They go through the Optimize RPC too,
+//                   but assert on swap behaviour rather than codes.
+// ============================================================================
+
+namespace {
+
+rewriter::OptimizeResponse RunOptimize(
+    const std::string &sql,
+    const std::map<std::string, uint64_t> &table_sizes,
+    uint64_t default_size = 0,
+    double swap_threshold = 1.0) {
+  RewriterServiceImpl service;
+  rewriter::OptimizeRequest req;
+  req.set_sql(sql);
+  for (const auto &kv : table_sizes) {
+    (*req.mutable_table_sizes())[kv.first] = kv.second;
+  }
+  if (default_size != 0) req.set_default_size(default_size);
+  if (swap_threshold != 1.0) req.set_swap_threshold(swap_threshold);
+
+  rewriter::OptimizeResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.Optimize(&ctx, &req, &resp);
+  EXPECT_TRUE(status.ok()) << "gRPC status not OK for: " << sql;
+  return resp;
+}
+
+} // namespace
+
+// ----- RPC contract -----
+
+TEST(Optimize, SyntaxError_FallbackToOriginal) {
+  // Invalid SQL — Optimize must return OptimizeSyntaxError and echo the
+  // original SQL back unchanged, so the caller can fall back to running it
+  // (or surfacing the error) without parsing the message.
+  const std::string sql = "this is not SQL at all";
+  const auto resp = RunOptimize(sql, {});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeSyntaxError);
+  EXPECT_EQ(resp.sql_after_optimize(), sql);
+  EXPECT_FALSE(resp.swap_applied());
+  EXPECT_FALSE(resp.message().empty()) << "expected a parser error message";
+}
+
+TEST(Optimize, SingleTable_Unoptimizable) {
+  // Valid SQL with no JOIN — Optimize is a no-op. Returns Unoptimizable
+  // (not OK) so callers can distinguish "I optimized something" from "I
+  // had nothing to optimize." sql_after_optimize is the original SQL.
+  const std::string sql = "SELECT * FROM a";
+  const auto resp = RunOptimize(sql, {{"a", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_EQ(resp.sql_after_optimize(), sql);
+  EXPECT_FALSE(resp.swap_applied());
+}
+
+TEST(Optimize, NonSelect_Unoptimizable) {
+  // Non-SELECT (write / DDL) — currently out of scope, returns Unoptimizable.
+  const std::string sql = "INSERT INTO a VALUES (1, 2)";
+  const auto resp = RunOptimize(sql, {{"a", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_EQ(resp.sql_after_optimize(), sql);
+  EXPECT_FALSE(resp.swap_applied());
+}
+
+// ----- Swap-policy tests -----
+
+TEST(JoinSwap, NoSwap_RightSmaller) {
+  // Right table (b) is smaller — no swap needed. Code is Unoptimizable
+  // (nothing to do); sql_after_optimize echoes the input.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN b ON a.x = b.x",
+    {{"a", 1000}, {"b", 100}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, InnerJoin_RightLarger) {
+  // Right table (b) is larger — swap so a moves to the right.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  // After swap the FROM is b and JOIN target is a; INNER stays INNER.
+  EXPECT_NE(sql.find("b"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("a"), std::string::npos) << sql;
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, LeftJoin_RightLarger_BecomesRightJoin) {
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("RIGHT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, RightJoin_RightLarger_BecomesLeftJoin) {
+  const auto resp = RunOptimize(
+    "SELECT * FROM a RIGHT JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, NoSwap_EqualSizes) {
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN b ON a.x = b.x",
+    {{"a", 500}, {"b", 500}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, NoSwap_ThresholdPrevents) {
+  // Ratio 150/100 = 1.5 < threshold 2.0 → no swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 150}},
+    0,      // default_size
+    2.0);   // swap_threshold
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, CrossJoin_RightLarger) {
+  // CROSS JOIN — symmetric, swap table positions, kind unchanged.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a CROSS JOIN b",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("CROSS JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, SubqueryRight_Skip) {
+  // Right side is a subquery — skip, no swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN (SELECT * FROM b) AS s ON a.x = s.x",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, TableFunctionRight_Skip) {
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN numbers(10) AS n ON a.x = n.x",
+    {{"a", 100}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, DefaultSize_UnknownTable_Swap) {
+  // a not in table_sizes → defaults to 0 → treated as smaller than b=1000 → swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN b ON a.x = b.x",
+    {{"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, DefaultSizeNonZero_UnknownIsLarge) {
+  // a not in table_sizes but default_size=2000 > b=100 → a "appears large" → no swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN b ON a.x = b.x",
+    {{"b", 100}},
+    2000);  // default_size
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, MultipleJoins_OnlyFirstSwapped) {
+  // First JOIN (a JOIN b) is the only swap candidate; second JOIN (c) is
+  // untouched because its left side is the compound (a JOIN b).
+  const auto resp = RunOptimize(
+    "SELECT * FROM a JOIN b ON a.x = b.x JOIN c ON b.y = c.y",
+    {{"a", 100}, {"b", 1000}, {"c", 500}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("c"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, FullJoin_RightLarger) {
+  // FULL JOIN — symmetric, swap table positions, kind unchanged.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a FULL JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("LEFT"), std::string::npos) << sql;
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("FULL"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, EmptyTableSizes_NoSwap) {
+  // Empty map — all tables default to 0, so right == left == 0, no swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN b ON a.x = b.x",
+    {});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, WithAlias_RightLarger) {
+  // Aliases must travel with their table_expression after a swap.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a AS t1 JOIN b AS t2 ON t1.x = t2.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  const auto join_pos = sql.find("JOIN");
+  ASSERT_NE(join_pos, std::string::npos);
+  const auto before_join = sql.substr(0, join_pos);
+  const auto after_join = sql.substr(join_pos);
+  EXPECT_NE(before_join.find("b"), std::string::npos) << sql;
+  EXPECT_NE(after_join.find("a"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, WithUsing_NotSwapped) {
+  // USING is handled specially by CH's join algorithm — swap could break
+  // it. Verify we leave USING joins alone even when right is larger.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT JOIN b USING (x)",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("LEFT JOIN"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("USING"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, SemiJoin_NotSwapped) {
+  // SEMI strictness — CH treats this as not-yet-validated for swap; we follow.
+  // On Unoptimizable, sql_after_optimize echoes the input verbatim (no
+  // re-formatting), so the assertion uses the user-written `LEFT SEMI JOIN`
+  // form rather than CH formatter's canonical `SEMI LEFT JOIN`.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT SEMI JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("LEFT SEMI JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, AntiJoin_NotSwapped) {
+  // Same echo-vs-format note as SemiJoin_NotSwapped above.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT ANTI JOIN b ON a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("LEFT ANTI JOIN"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, CommaJoin) {
+  // Comma (implicit cross) join: FROM a, b is symmetric — swap is allowed.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a, b WHERE a.x = b.x",
+    {{"a", 100}, {"b", 1000}});
+  ASSERT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeOK);
+  EXPECT_TRUE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, AsofJoin_NotSwapped) {
+  // ASOF JOIN inequality direction is bound to which side is the lookup
+  // (right) table. Even if right is larger, swap would change semantics.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a ASOF JOIN b ON a.k = b.k AND a.t >= b.t",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  const auto from_pos = sql.find("FROM");
+  ASSERT_NE(from_pos, std::string::npos);
+  const auto asof_pos = sql.find("ASOF");
+  ASSERT_NE(asof_pos, std::string::npos);
+  const auto between = sql.substr(from_pos, asof_pos - from_pos);
+  EXPECT_NE(between.find("a"), std::string::npos) << sql;
+  EXPECT_EQ(between.find("b"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, LeftAsofJoin_NotSwapped) {
+  // On Unoptimizable the SQL is echoed verbatim — assert on the
+  // user-written `LEFT ASOF JOIN` form, not CH formatter's canonical
+  // `ASOF LEFT JOIN`.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a LEFT ASOF JOIN b ON a.k = b.k AND a.t >= b.t",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  EXPECT_EQ(sql.find("RIGHT"), std::string::npos) << sql;
+  EXPECT_NE(sql.find("LEFT ASOF"), std::string::npos) << sql;
+}
+
+TEST(JoinSwap, PasteJoin_NotSwapped) {
+  // PASTE JOIN concatenates by row position with no ON/USING. Swap would
+  // change projected column order — leave it alone.
+  const auto resp = RunOptimize(
+    "SELECT * FROM a PASTE JOIN b",
+    {{"a", 100}, {"b", 1000}});
+  EXPECT_EQ(resp.code(), rewriter::OptimizeCode::OptimizeUnoptimizable);
+  EXPECT_FALSE(resp.swap_applied());
+  const auto sql = NormalizeWS(resp.sql_after_optimize());
+  const auto from_pos = sql.find("FROM");
+  ASSERT_NE(from_pos, std::string::npos);
+  const auto paste_pos = sql.find("PASTE");
+  ASSERT_NE(paste_pos, std::string::npos);
+  const auto between = sql.substr(from_pos, paste_pos - from_pos);
+  EXPECT_NE(between.find("a"), std::string::npos) << sql;
+  EXPECT_EQ(between.find("b"), std::string::npos) << sql;
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

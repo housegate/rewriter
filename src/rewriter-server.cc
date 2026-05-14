@@ -14,9 +14,12 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
+#include "handlers/common.h"
 #include "handlers/exists.h"
 #include "handlers/grant.h"
+#include "handlers/join_swap.h"
 #include "handlers/select.h"
 #include "handlers/show_create.h"
 #include "handlers/show_databases.h"
@@ -502,6 +505,77 @@ grpc::Status RewriterServiceImpl::RewriteErrorMessage(
   const RewriteErrorMessageRequest *request,
   RewriteErrorMessageResponse *response) {
   doRewriteErrorMessage(request, response);
+  return grpc::Status::OK;
+}
+
+void RewriterServiceImpl::doOptimize(
+  const OptimizeRequest *request, OptimizeResponse *response) {
+  const std::string &sql = request->sql();
+  const std::string sql_id = shortSqlHash(sql);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  struct AccessLog {
+    const std::string &sql_id;
+    const OptimizeResponse *response;
+    std::chrono::steady_clock::time_point t0;
+    size_t sql_len;
+    ~AccessLog() {
+      const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      std::cerr << "[access] method=Optimize sql=" << sql_id
+                << " code=" << response->code()
+                << " swap_applied=" << (response->swap_applied() ? "1" : "0")
+                << " sql_len=" << sql_len
+                << " took_us=" << us << std::endl;
+    }
+  } _access_log{sql_id, response, t0, sql.size()};
+
+  // Default response: original SQL echoed back. Any branch that bails sets
+  // the appropriate code and leaves sql_after_optimize as the input.
+  response->set_sql_after_optimize(sql);
+  response->set_swap_applied(false);
+
+  const char *pos = sql.data();
+  const char *end = pos + sql.size();
+  DB::ParserQuery parser(end, /*allow_settings_after_format_in_insert=*/false);
+  DB::ASTPtr ast;
+  try {
+    ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+  } catch (const DB::Exception &e) {
+    response->set_code(rewriter::OptimizeCode::OptimizeSyntaxError);
+    response->set_message(e.displayText());
+    return;
+  }
+
+  std::unordered_map<std::string, uint64_t> sizes;
+  sizes.reserve(request->table_sizes().size());
+  for (const auto &kv : request->table_sizes()) {
+    sizes[kv.first] = kv.second;
+  }
+  const uint64_t default_size = request->has_default_size() ? request->default_size() : 0;
+  const double swap_threshold = request->has_swap_threshold() ? request->swap_threshold() : 1.0;
+
+  const bool swapped = rewriter_handlers::applyJoinSwap(
+    ast, sizes, default_size, swap_threshold);
+
+  if (!swapped) {
+    response->set_code(rewriter::OptimizeCode::OptimizeUnoptimizable);
+    response->set_message("no swappable JOIN found");
+    return;
+  }
+
+  response->set_sql_after_optimize(rewriter_handlers::formatAst(ast));
+  response->set_swap_applied(true);
+  response->set_code(rewriter::OptimizeCode::OptimizeOK);
+  response->set_message("success");
+}
+
+// gRPC thin wrapper — delegates to doOptimize.
+grpc::Status RewriterServiceImpl::Optimize(
+  ServerContext * /*context*/,
+  const OptimizeRequest *request,
+  OptimizeResponse *response) {
+  doOptimize(request, response);
   return grpc::Status::OK;
 }
 
