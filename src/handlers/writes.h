@@ -1,10 +1,10 @@
 // src/handlers/writes.h
 //
-// Write-statement handler. Covers CREATE/DROP/ALTER TABLE, INSERT,
-// UPDATE, DELETE, RENAME TABLE, plus the special-cased CREATE/DROP DATABASE
-// and TRUNCATE TABLE paths. Handles CREATE/DROP VIEW and CREATE MATERIALIZED VIEW; rejects the
-// unsupported variants (CREATE LIVE/WINDOW VIEW, CREATE DICTIONARY, OPTIMIZE,
-// DETACH, UNDROP, MOVE, KILL, BACKUP/RESTORE,
+// Write-statement handler. Covers CREATE/DROP/ALTER TABLE, INSERT, UPDATE,
+// DELETE, RENAME TABLE, CREATE/DROP VIEW, CREATE MATERIALIZED VIEW, plus the
+// special-cased CREATE/DROP DATABASE and TRUNCATE TABLE paths.
+// Rejects the unsupported variants (CREATE LIVE/WINDOW VIEW, CREATE
+// DICTIONARY, OPTIMIZE, DETACH, UNDROP, MOVE, KILL, BACKUP/RESTORE,
 // ATTACH/REPLACE/FETCH PARTITION FROM ..., ...).
 //
 // GRANT and REVOKE are handled by handlers/grant.cc, which dispatches

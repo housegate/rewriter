@@ -3999,6 +3999,38 @@ TEST(View, CreateWindowView_Unsupported) {
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
 }
 
+TEST(View, CreateView_UnionBody_RewritesAllBranches) {
+  // The view body is an ASTSelectWithUnionQuery — confirm both UNION
+  // branches get their table references rewritten.
+  auto resp = RunWithDynamicArgs(
+    "CREATE VIEW tenant1.v AS "
+    "SELECT x FROM tenant1.a UNION ALL SELECT x FROM tenant1.b",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "a"), nullptr);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "b"), nullptr);
+  EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
+}
+
+TEST(View, CreateView_Dynamic_UnknownDb_Rejected) {
+  // The view name's logical DB is not in database_map and not a known
+  // physical DB — rewriteOneTarget must reject before acceptWrite.
+  auto resp = RunWithDynamicArgs(
+    "CREATE VIEW unknowndb.v AS SELECT 1",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+TEST(View, CreateView_Static_RemoteTableMapHit_Unsupported) {
+  // A view name cannot map to a remote() table function.
+  auto resp = RunSelectWithStaticArgs(
+    "CREATE VIEW v AS SELECT 1",
+    /*table_map*/ {},
+    /*remote_table_map*/ {{"v", {"remote_db", "remote_v"}}});
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
