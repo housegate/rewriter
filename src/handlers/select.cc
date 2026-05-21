@@ -823,4 +823,59 @@ void handleSelectQuery(DB::ASTPtr ast,
   setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SELECT);
 }
 
+void rewriteEmbeddedViewBody(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
+  DB::ASTPtr body,
+  rewriter::RewriteSQLResponse *response) {
+  if (!body) return;
+
+  // Collect the body's accessed tables from the pre-rewrite AST.
+  std::map<std::string, AccessedTablePair> originals;
+  collectAccessedTablePairsFromAST(body, originals);
+
+  // Pre-scan CTE options so failed_cte_aliases and CTE-body table
+  // collection work for the view body too (mirrors handleSelectQuery).
+  std::vector<ParsedCTEASTMap> preparsed_cte_ast_maps;
+  for (const auto &option : options) {
+    if (option.op() != rewriter::RewriteOp::CommonTableExprRewrite) continue;
+    std::map<std::string, DB::CommonTableExpr> cte_map;
+    for (const auto &kv : option.common_table_expr_args().cte_map()) {
+      cte_map[kv.first] = {kv.second.alias(), kv.second.sql()};
+    }
+    std::vector<std::string> failed_aliases;
+    auto cte_ast_map = DB::parseCTEMapToAST(cte_map, &failed_aliases);
+    for (const auto &a : failed_aliases) response->add_failed_cte_aliases(a);
+    for (const auto &kv : cte_ast_map) {
+      originals.erase(kv.first);
+      collectAccessedTablePairsFromAST(kv.second, originals);
+    }
+    preparsed_cte_ast_maps.push_back(std::move(cte_ast_map));
+  }
+
+  const auto selection = findActiveTableRewrite(options);
+
+  std::map<std::string, std::string> table_rewrites;
+  body = applyRewriteOptions(options, body, &preparsed_cte_ast_maps,
+                             &table_rewrites);
+
+  // Cross-shard correctness pass — a view body that joins a remote() source
+  // with a local table would otherwise fail on the remote shard.
+  forceGlobalForRemoteAsymmetry(body);
+
+  for (const auto &[_, pair] : originals) {
+    auto *entry = response->add_original_accessed_tables();
+    entry->set_original_database(pair.original_db);
+    entry->set_original_table(pair.original_table);
+    const auto resolution = resolveAccessedTable(
+      pair.original_db, pair.original_table, selection);
+    entry->set_logical_database(resolution.logical_database);
+    entry->set_physical_database(resolution.physical_database);
+    entry->set_is_remote(resolution.is_remote);
+  }
+  auto *resp_rewrites = response->mutable_table_rewrites();
+  for (const auto &[k, v] : table_rewrites) {
+    if (k != v) (*resp_rewrites)[k] = v;
+  }
+}
+
 } // namespace rewriter_handlers

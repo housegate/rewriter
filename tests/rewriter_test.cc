@@ -2237,14 +2237,18 @@ TEST(WriteOp, CreateTable_AsSelect_ReturnsTargetOnly) {
   EXPECT_EQ(r.original_accessed_count, 1);
 }
 
-TEST(WriteOp, CreateView_Rejected) {
+TEST(WriteOp, CreateView_NoOptions_Passthrough) {
+  // CREATE VIEW is now supported: with no rewrite options it passes through.
   auto r = RunWriteOp("CREATE VIEW v AS SELECT 1");
-  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_VIEW);
 }
 
-TEST(WriteOp, CreateMaterializedView_Rejected) {
+TEST(WriteOp, CreateMaterializedView_NoOptions_Passthrough) {
+  // CREATE MATERIALIZED VIEW is now supported: with no rewrite options it passes through.
   auto r = RunWriteOp("CREATE MATERIALIZED VIEW mv ENGINE=Memory AS SELECT 1 AS a");
-  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW);
 }
 
 TEST(WriteOp, CreateDatabase_NoOptions_Rejected) {
@@ -3884,6 +3888,112 @@ TEST(View, DropView_IfExists_Dynamic_RewritesName) {
   const auto *e = FindAccessed(resp, "tenant1", "v");
   ASSERT_NE(e, nullptr);
   EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(View, CreateView_Dynamic_RewritesNameAndBody) {
+  auto resp = RunWithDynamicArgs(
+    "CREATE VIEW tenant1.v AS SELECT * FROM tenant1.events",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
+  const auto *view = FindAccessed(resp, "tenant1", "v");
+  ASSERT_NE(view, nullptr);
+  EXPECT_EQ(view->physical_database(), "physical_1");
+  const auto *body = FindAccessed(resp, "tenant1", "events");
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(body->physical_database(), "physical_1");
+}
+
+TEST(View, CreateView_Static_RewritesNameAndBody) {
+  auto resp = RunSelectWithStaticArgs(
+    "CREATE VIEW v AS SELECT * FROM t",
+    /*table_map*/ {{"t", "t_phys"}, {"v", "v_phys"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("t_phys"), std::string::npos);
+  EXPECT_NE(resp.sql_after_rewrite().find("v_phys"), std::string::npos);
+}
+
+TEST(View, CreateView_NoOptions_Passthrough) {
+  auto resp = RunNoOptions("CREATE VIEW mydb.v AS SELECT * FROM mydb.t");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+}
+
+TEST(View, CreateOrReplaceView_RoundTrips) {
+  auto resp = RunWithDynamicArgs(
+    "CREATE OR REPLACE VIEW tenant1.v AS SELECT 1",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("REPLACE"), std::string::npos);
+}
+
+TEST(View, CreateView_BodyJoin_RewritesBothTables) {
+  auto resp = RunWithDynamicArgs(
+    "CREATE VIEW tenant1.v AS "
+    "SELECT * FROM tenant1.a JOIN tenant1.b USING (id)",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "a"), nullptr);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "b"), nullptr);
+}
+
+TEST(View, CreateMaterializedView_WithTo_RewritesNameTargetAndBody) {
+  auto resp = RunWithDynamicArgs(
+    "CREATE MATERIALIZED VIEW tenant1.mv TO tenant1.dest "
+    "AS SELECT * FROM tenant1.src",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(),
+            rewriter::STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "mv"), nullptr);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "dest"), nullptr);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "src"), nullptr);
+  EXPECT_EQ(FindAccessed(resp, "tenant1", "dest")->physical_database(),
+            "physical_1");
+}
+
+TEST(View, CreateMaterializedView_NoTo_RewritesNameAndBody) {
+  auto resp = RunWithDynamicArgs(
+    "CREATE MATERIALIZED VIEW tenant1.mv ENGINE = MergeTree ORDER BY x "
+    "AS SELECT x FROM tenant1.src",
+    /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(),
+            rewriter::STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW);
+  ASSERT_NE(FindAccessed(resp, "tenant1", "src"), nullptr);
+  EXPECT_EQ(FindAccessed(resp, "tenant1", "src")->physical_database(),
+            "physical_1");
+}
+
+TEST(View, CreateView_BodyRemoteLocalJoin_ForcesGlobal) {
+  // tenant1 maps to a remote upstream; tenant2 is local. A JOIN across them
+  // in the view body must become a GLOBAL JOIN via the cross-shard pass.
+  auto resp = RunSelectWithDynamicArgs(
+    "CREATE VIEW tenant2.v AS "
+    "SELECT * FROM tenant1.a JOIN tenant2.b USING (id)",
+    /*database_map*/ {{"tenant1", "physical_1"}, {"tenant2", "physical_2"}},
+    /*known_physical*/ {},
+    /*upstream_logical_in_context*/ "",
+    /*remote_index*/ {{"tenant1", "up1"}},
+    /*remote_upstreams*/ {{"up1", {"remote:9000", "u", "p"}}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("GLOBAL"), std::string::npos);
+}
+
+TEST(View, CreateLiveView_Unsupported) {
+  auto resp = RunNoOptions("CREATE LIVE VIEW lv AS SELECT 1");
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+}
+
+TEST(View, CreateWindowView_Unsupported) {
+  auto resp = RunNoOptions(
+    "CREATE WINDOW VIEW wv AS "
+    "SELECT count(*) FROM t GROUP BY tumble(ts, INTERVAL 1 SECOND)");
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
 }
 
 #if !REWRITER_RELEASE_MAIN

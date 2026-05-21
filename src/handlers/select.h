@@ -42,4 +42,17 @@ DB::ASTPtr applyRewriteOptions(
   const std::vector<ParsedCTEASTMap> *preparsed_cte_ast_maps = nullptr,
   std::map<std::string, std::string> *out_table_rewrites = nullptr);
 
+// Rewrite a SELECT subtree embedded in a DDL statement — the body of a
+// CREATE VIEW / CREATE MATERIALIZED VIEW. Applies the full rewrite-option
+// pipeline (Limit / TableName / Offset / Settings / CTE) and the
+// cross-shard GLOBAL correctness pass, then records the tables the body
+// accesses into response.original_accessed_tables and any rewrite hits
+// into response.table_rewrites. Mirrors handleSelectQuery minus the final
+// setSuccessResponse — the caller owns the response's code / sql /
+// statement_type.
+void rewriteEmbeddedViewBody(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
+  DB::ASTPtr body,
+  rewriter::RewriteSQLResponse *response);
+
 } // namespace rewriter_handlers

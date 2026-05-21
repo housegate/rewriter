@@ -4,6 +4,7 @@
 #include <Parsers/ASTAlterQuery.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTDeleteQuery.h>
+#include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTDropQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTIdentifier.h>
@@ -16,6 +17,7 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/select.h"
 
 namespace rewriter_handlers {
 
@@ -180,6 +182,69 @@ bool rewriteRenameSide(
     [&](const std::string &s){ side.table    = std::make_shared<DB::ASTIdentifier>(s); });
 }
 
+// CREATE VIEW / CREATE MATERIALIZED VIEW. Rewrites three things via the
+// unified static->dynamic precedence already resolved into `sel`:
+//   1. the view name itself (single target, like CREATE TABLE);
+//   2. a materialized view's TO target, when present;
+//   3. the view body SELECT (full option pipeline, via select.cc).
+// LIVE / WINDOW views are rejected by the caller before reaching here.
+WriteDispatchResult handleViewCreate(
+  const DB::ASTPtr &ast,
+  DB::ASTCreateQuery *create_query,
+  const rewriter::RewriteSQLRequest *request,
+  rewriter::RewriteSQLResponse *response,
+  const TableRewriteSelection &sel) {
+  const bool is_mv = create_query->is_materialized_view;
+  const std::string_view stmt_kind =
+    is_mv ? "CREATE MATERIALIZED VIEW" : "CREATE VIEW";
+
+  // 1. View name.
+  if (!rewriteOneTarget(
+        response, sel, create_query->getDatabase(), create_query->getTable(),
+        stmt_kind,
+        [&](const std::string &s){ create_query->setDatabase(s); },
+        [&](const std::string &s){ create_query->setTable(s); })) {
+    return WriteDispatchResult::Rejected;
+  }
+
+  // 2. Materialized view TO target. A TO-less materialized view has an
+  //    implicit inner table whose name CH derives — nothing to rewrite.
+  if (is_mv && create_query->hasTargetTableID(DB::ViewTarget::To)) {
+    const DB::StorageID to_id =
+      create_query->getTargetTableID(DB::ViewTarget::To);
+    std::string to_db = to_id.database_name;
+    std::string to_table = to_id.table_name;
+    if (!rewriteOneTarget(
+          response, sel, to_id.database_name, to_id.table_name,
+          "CREATE MATERIALIZED VIEW TO target",
+          [&](const std::string &s){ to_db = s; },
+          [&](const std::string &s){ to_table = s; })) {
+      return WriteDispatchResult::Rejected;
+    }
+    create_query->targets->setTableID(
+      DB::ViewTarget::To, DB::StorageID{to_db, to_table});
+  }
+
+  // 3. View body SELECT — full option pipeline + cross-shard GLOBAL pass.
+  if (create_query->select) {
+    DB::ASTPtr body;
+    for (auto &child : create_query->children) {
+      if (child.get() == static_cast<DB::IAST *>(create_query->select)) {
+        body = child;
+        break;
+      }
+    }
+    if (body) {
+      rewriteEmbeddedViewBody(request->options(), body, response);
+    }
+  }
+
+  acceptWrite(ast, response,
+              is_mv ? rewriter::STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW
+                    : rewriter::STATEMENT_TYPE_CREATE_VIEW);
+  return WriteDispatchResult::Handled;
+}
+
 } // namespace
 
 WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
@@ -195,14 +260,16 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   const auto *dynamic = findDynamicArgs(request->options());
 
   if (auto *create_query = ast->as<DB::ASTCreateQuery>()) {
-    if (create_query->is_ordinary_view || create_query->is_materialized_view
-        || create_query->is_live_view || create_query->is_window_view) {
-      rejectUnsupported(response, "CREATE VIEW is not supported; only CREATE TABLE is allowed");
+    if (create_query->is_live_view || create_query->is_window_view) {
+      rejectUnsupported(response, "CREATE LIVE VIEW / WINDOW VIEW is not supported");
       return WriteDispatchResult::Rejected;
     }
     if (create_query->is_dictionary) {
       rejectUnsupported(response, "CREATE DICTIONARY is not supported");
       return WriteDispatchResult::Rejected;
+    }
+    if (create_query->is_ordinary_view || create_query->is_materialized_view) {
+      return handleViewCreate(ast, create_query, request, response, sel);
     }
     if (!create_query->table) {
       // CREATE DATABASE — special handling (see proto comment on
