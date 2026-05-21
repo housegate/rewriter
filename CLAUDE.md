@@ -191,6 +191,15 @@ A second top-level RPC, separate from `Rewrite`. Lives in `RewriterServiceImpl::
 
 GoogleTest v1.14 fetched via `FetchContent`. Tests link the full server implementation (`rewriter-server.cc` + `ASTTransformers.cc`) and call `RewriterServiceImpl::Rewrite` directly (`main()` is excluded by `REWRITER_RELEASE_MAIN=0` for the test target). Use `RewriterServiceImpl::RewriteForTest` if you need to go through the public-looking entrypoint.
 
+## Development workflow
+
+- **Branch-mode development.** Never commit feature work directly to `main`.
+  Cut a dedicated branch first — `feat/<topic>` for features, `fix/<topic>`
+  for fixes — and land the work via PR.
+- **Commit design docs.** Brainstorming / design specs live under
+  `docs/superpowers/specs/` and are committed to git alongside the feature
+  branch they belong to, so the design is reviewable next to the code.
+
 ## Conventions
 
 - Comments and script output are often in Chinese; match the surrounding language when editing those files, otherwise English.
