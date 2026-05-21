@@ -3906,6 +3906,8 @@ TEST(View, CreateView_Dynamic_RewritesNameAndBody) {
 }
 
 TEST(View, CreateView_Static_RewritesNameAndBody) {
+  // RunSelectWithStaticArgs only populates static_args on the request; it
+  // works for any statement kind — here a CREATE VIEW.
   auto resp = RunSelectWithStaticArgs(
     "CREATE VIEW v AS SELECT * FROM t",
     /*table_map*/ {{"t", "t_phys"}, {"v", "v_phys"}});
@@ -3938,6 +3940,7 @@ TEST(View, CreateView_BodyJoin_RewritesBothTables) {
   ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
   ASSERT_NE(FindAccessed(resp, "tenant1", "a"), nullptr);
   ASSERT_NE(FindAccessed(resp, "tenant1", "b"), nullptr);
+  EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
 }
 
 TEST(View, CreateMaterializedView_WithTo_RewritesNameTargetAndBody) {
