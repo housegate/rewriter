@@ -305,7 +305,10 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
 
   if (auto *drop_query = ast->as<DB::ASTDropQuery>()) {
     const bool is_truncate = drop_query->kind == DB::ASTDropQuery::Kind::Truncate;
-    const std::string_view stmt_kind_str = is_truncate ? "TRUNCATE TABLE" : "DROP TABLE";
+    const std::string_view stmt_kind_str =
+      drop_query->is_view ? "DROP VIEW"
+      : is_truncate       ? "TRUNCATE TABLE"
+                          : "DROP TABLE";
 
     if (drop_query->kind == DB::ASTDropQuery::Kind::Detach) {
       rejectUnsupported(response, "DETACH is not supported");

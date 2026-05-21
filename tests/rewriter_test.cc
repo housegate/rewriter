@@ -3881,6 +3881,9 @@ TEST(View, DropView_IfExists_Dynamic_RewritesName) {
   ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
   EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_VIEW);
   EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
+  const auto *e = FindAccessed(resp, "tenant1", "v");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
 }
 
 #if !REWRITER_RELEASE_MAIN
