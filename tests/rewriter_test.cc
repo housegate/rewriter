@@ -2289,9 +2289,11 @@ TEST(WriteOp, DropDatabase_NoOptions_Rejected) {
   EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
 }
 
-TEST(WriteOp, DropView_Rejected) {
+TEST(WriteOp, DropView_NoOptions_Passthrough) {
+  // DROP VIEW is now supported; without options it passes through unchanged.
   auto r = RunWriteOp("DROP VIEW v");
-  EXPECT_EQ(r.code, rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_DROP_VIEW);
 }
 
 TEST(WriteOp, Detach_Rejected) {
@@ -3851,6 +3853,34 @@ TEST(JoinSwap, PasteJoin_NotSwapped) {
   const auto between = sql.substr(from_pos, paste_pos - from_pos);
   EXPECT_NE(between.find("a"), std::string::npos) << sql;
   EXPECT_EQ(between.find("b"), std::string::npos) << sql;
+}
+
+// ============================ View rewrite ============================
+
+TEST(View, DropView_Dynamic_RewritesName) {
+  auto resp = RunWithDynamicArgs(
+    "DROP VIEW tenant1.v", /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
+  const auto *e = FindAccessed(resp, "tenant1", "v");
+  ASSERT_NE(e, nullptr);
+  EXPECT_EQ(e->physical_database(), "physical_1");
+}
+
+TEST(View, DropView_NoOptions_Passthrough) {
+  auto resp = RunNoOptions("DROP VIEW mydb.v");
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_VIEW);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+}
+
+TEST(View, DropView_IfExists_Dynamic_RewritesName) {
+  auto resp = RunWithDynamicArgs(
+    "DROP VIEW IF EXISTS tenant1.v", /*database_map*/ {{"tenant1", "physical_1"}});
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_VIEW);
+  EXPECT_NE(resp.sql_after_rewrite().find("physical_1"), std::string::npos);
 }
 
 #if !REWRITER_RELEASE_MAIN

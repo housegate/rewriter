@@ -483,6 +483,15 @@ enum StatementType {
     // REVOKE — symmetric to GRANT. SQL rewritten to
     // `SELECT '<original SQL minus ON CLUSTER>' AS rstmt`.
     STATEMENT_TYPE_REVOKE = 18;
+
+    // CREATE VIEW <v> AS SELECT ...
+    STATEMENT_TYPE_CREATE_VIEW = 19;
+
+    // CREATE MATERIALIZED VIEW <v> [TO <target>] AS SELECT ...
+    STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW = 20;
+
+    // DROP VIEW <v>
+    STATEMENT_TYPE_DROP_VIEW = 21;
 }
 
 message RewriteSQLResponse {

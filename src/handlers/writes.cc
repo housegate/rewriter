@@ -311,10 +311,18 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       rejectUnsupported(response, "DETACH is not supported");
       return WriteDispatchResult::Rejected;
     }
-    if (drop_query->is_view || drop_query->is_dictionary) {
-      rejectUnsupported(response, "DROP/TRUNCATE on VIEW/DICTIONARY is not supported; only DROP TABLE / TRUNCATE TABLE are allowed");
+    if (drop_query->is_dictionary) {
+      rejectUnsupported(response, "DROP/TRUNCATE on DICTIONARY is not supported");
       return WriteDispatchResult::Rejected;
     }
+    if (drop_query->is_view && is_truncate) {
+      // TRUNCATE has no meaning for a view. (CH's parser normally rejects
+      // `TRUNCATE VIEW` outright; this guard is belt-and-suspenders.)
+      rejectUnsupported(response, "TRUNCATE on VIEW is not supported");
+      return WriteDispatchResult::Rejected;
+    }
+    // DROP VIEW (kind == Drop, is_view == true) falls through to the
+    // single-target rewriteOneTarget path below, same as DROP TABLE.
     if (drop_query->database_and_tables) {
       rejectUnsupported(response, "multi-table DROP/TRUNCATE is not supported");
       return WriteDispatchResult::Rejected;
@@ -388,9 +396,11 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
         [&](const std::string &s){ drop_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
     }
-    acceptWrite(ast, response,
-                is_truncate ? rewriter::STATEMENT_TYPE_TRUNCATE_TABLE
-                            : rewriter::STATEMENT_TYPE_DROP_TABLE);
+    const rewriter::StatementType drop_stmt_type =
+      drop_query->is_view ? rewriter::STATEMENT_TYPE_DROP_VIEW
+      : is_truncate       ? rewriter::STATEMENT_TYPE_TRUNCATE_TABLE
+                          : rewriter::STATEMENT_TYPE_DROP_TABLE;
+    acceptWrite(ast, response, drop_stmt_type);
     return WriteDispatchResult::Handled;
   }
 
