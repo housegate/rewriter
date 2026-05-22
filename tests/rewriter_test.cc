@@ -1105,6 +1105,43 @@ TEST(AccessedTable, CreateTable_StaticTableWithDb_RecordsPhysical) {
   EXPECT_EQ(e->physical_database(), "explicit_db");
 }
 
+TEST(ExistenceClause, CreateTable_IfNotExists) {
+  auto resp = RunNoOptions("CREATE TABLE IF NOT EXISTS t (a Int32) ENGINE=Memory");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_NOT_EXISTS);
+}
+
+TEST(ExistenceClause, CreateTable_Plain_Unspecified) {
+  auto resp = RunNoOptions("CREATE TABLE t (a Int32) ENGINE=Memory");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_UNSPECIFIED);
+}
+
+TEST(ExistenceClause, CreateDatabase_IfNotExists) {
+  // CREATE DATABASE with no dynamic_args is rejected, but existence_clause is
+  // a pure syntactic property set before dispatch — so it's still accurate.
+  auto resp = RunNoOptions("CREATE DATABASE IF NOT EXISTS d");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_NOT_EXISTS);
+}
+
+TEST(ExistenceClause, DropTable_IfExists) {
+  auto resp = RunNoOptions("DROP TABLE IF EXISTS mydb.t");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
+}
+
+TEST(ExistenceClause, DropDatabase_IfExists) {
+  auto resp = RunNoOptions("DROP DATABASE IF EXISTS d");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
+}
+
+TEST(ExistenceClause, TruncateTable_IfExists) {
+  auto resp = RunNoOptions("TRUNCATE TABLE IF EXISTS mydb.t");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
+}
+
+TEST(ExistenceClause, Select_Unspecified) {
+  auto resp = RunNoOptions("SELECT 1");
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_UNSPECIFIED);
+}
+
 TEST(AccessedTable, DropTable_NoOptions_StillRecordsOriginal) {
   // Even with no TableNameRewrite option, the rewriter records what was
   // accessed so callers always get a uniform view of the request shape.

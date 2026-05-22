@@ -1,6 +1,8 @@
 #include "rewriter-server.h"
 
 #include <IO/WriteBufferFromString.h>
+#include <Parsers/ASTCreateQuery.h>
+#include <Parsers/ASTDropQuery.h>
 #include <Parsers/IdentifierQuotingStyle.h>
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>
@@ -343,6 +345,18 @@ void RewriterServiceImpl::doRewrite(
     // buffers die on return — leaving INSERT inline payload pointers
     // dangling. See doRewriteErrorMessage below for the same pattern.
     DB::ASTPtr ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+
+    // Surface the existence-check clause (IF NOT EXISTS / IF EXISTS) as a
+    // pure syntactic property of the AST, before any handler runs — so it's
+    // accurate even when the statement is later rejected. ASTDropQuery backs
+    // DROP TABLE/DATABASE/VIEW *and* TRUNCATE, so one branch covers them all.
+    if (const auto *create = ast->as<DB::ASTCreateQuery>()) {
+      if (create->if_not_exists)
+        response->set_existence_clause(rewriter::EXISTENCE_CLAUSE_IF_NOT_EXISTS);
+    } else if (const auto *drop = ast->as<DB::ASTDropQuery>()) {
+      if (drop->if_exists)
+        response->set_existence_clause(rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
+    }
 
     if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
