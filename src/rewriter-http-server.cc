@@ -214,7 +214,7 @@ void RunHttpServer(uint16_t port, RewriterServiceImpl &core) {
   server->start();
 
   std::cout << "[http] RewriterService listening on 0.0.0.0:" << port
-            << " (POST /materialize, /rewrite, /rewriteerrormessage, /optimize; GET /healthz)" << std::endl;
+            << " (POST /rewrite, /rewriteerrormessage, /optimize, /materialize; GET /healthz)" << std::endl;
 }
 
 } // namespace rewriter_http

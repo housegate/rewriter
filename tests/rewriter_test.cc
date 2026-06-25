@@ -4095,6 +4095,7 @@ TEST(Materialize, SyntaxErrorEchoesAndFlags) {
   auto resp = RunMaterialize(req);
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSyntaxError);
   EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+  EXPECT_FALSE(resp.message().empty());  // carries the parser's displayText()
 }
 
 TEST(Materialize, RejectsBadPolicy) {
@@ -4104,6 +4105,8 @@ TEST(Materialize, RejectsBadPolicy) {
   auto resp = RunMaterialize(req);
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
   EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+  // Mirrors rewriter-go: a policy reject still echoes the default profile id.
+  EXPECT_EQ(resp.materializer_profile_id(), "sentio-p1-nondet-v1");
 
   rewriter::MaterializeSQLRequest req2;
   req2.set_sql("SELECT 1");

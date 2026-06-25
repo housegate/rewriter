@@ -67,6 +67,13 @@ void materialize(const rewriter::MaterializeSQLRequest *request,
     response->set_code(rewriter::MaterializeCode::MaterializeSyntaxError);
     response->set_message(e.displayText());
     return;
+  } catch (const std::exception &e) {
+    // "Never throws past the boundary": ClickHouse internals can surface a
+    // non-DB::Exception (std/Poco) from allocation/encoding paths. Fail closed
+    // as an internal error rather than letting it crash the RPC thread.
+    response->set_code(rewriter::MaterializeCode::MaterializeError);
+    response->set_message(e.what());
+    return;
   }
 
   // Materialization wired in Task 2+. For now, deterministic SQL passes through
