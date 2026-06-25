@@ -4068,6 +4068,50 @@ TEST(View, CreateView_Static_RemoteTableMapHit_Unsupported) {
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
 }
 
+// ------------------------ MaterializeSQL ------------------------
+static rewriter::MaterializeSQLResponse RunMaterialize(
+    const rewriter::MaterializeSQLRequest &req) {
+  RewriterServiceImpl service;
+  rewriter::MaterializeSQLResponse resp;
+  grpc::ServerContext ctx;
+  auto status = service.MaterializeSQL(&ctx, &req, &resp);
+  EXPECT_TRUE(status.ok());
+  return resp;
+}
+
+TEST(Materialize, PassesThroughDeterministicSQL) {
+  rewriter::MaterializeSQLRequest req;
+  req.set_sql("INSERT INTO db.t VALUES (1)");
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess);
+  EXPECT_EQ(resp.sql_after_materialization(), "INSERT INTO db.t VALUES (1)");
+  EXPECT_EQ(resp.replacements_size(), 0);
+  EXPECT_EQ(resp.materializer_profile_id(), "sentio-p1-nondet-v1");
+}
+
+TEST(Materialize, SyntaxErrorEchoesAndFlags) {
+  rewriter::MaterializeSQLRequest req;
+  req.set_sql("INSERT INTO db.t VALUE (");  // malformed
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSyntaxError);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+TEST(Materialize, RejectsBadPolicy) {
+  rewriter::MaterializeSQLRequest req;
+  req.set_sql("SELECT 1");
+  req.mutable_policy()->set_profile_id("other");
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+
+  rewriter::MaterializeSQLRequest req2;
+  req2.set_sql("SELECT 1");
+  req2.mutable_policy()->set_timezone("PST");
+  auto resp2 = RunMaterialize(req2);
+  EXPECT_EQ(resp2.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

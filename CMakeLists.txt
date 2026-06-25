@@ -172,6 +172,7 @@ add_library(rewriter_core OBJECT
     src/handlers/exists.cc
     src/handlers/show_create.cc
     src/handlers/grant.cc
+    src/handlers/materialize.cc
     src/handlers/join_swap.cc)
 target_include_directories(rewriter_core SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

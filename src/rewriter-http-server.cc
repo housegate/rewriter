@@ -135,6 +135,21 @@ private:
   RewriterServiceImpl *core_;
 };
 
+class MaterializeHandler : public HTTPRequestHandler {
+public:
+  explicit MaterializeHandler(RewriterServiceImpl *core) : core_(core) {}
+  void handleRequest(HTTPServerRequest &request, HTTPServerResponse &response) override {
+    handleProtoEndpoint<rewriter::MaterializeSQLRequest, rewriter::MaterializeSQLResponse>(
+      request, response,
+      [this](const rewriter::MaterializeSQLRequest *req, rewriter::MaterializeSQLResponse *resp) {
+        core_->doMaterializeSQL(req, resp);
+      });
+  }
+
+private:
+  RewriterServiceImpl *core_;
+};
+
 class HealthHandler : public HTTPRequestHandler {
 public:
   void handleRequest(HTTPServerRequest &, HTTPServerResponse &response) override {
@@ -168,6 +183,9 @@ public:
     if (path == "/optimize" || path == "/rewriter.RewriterService/Optimize") {
       return new OptimizeHandler(core_);
     }
+    if (path == "/materialize" || path == "/rewriter.RewriterService/MaterializeSQL") {
+      return new MaterializeHandler(core_);
+    }
     if (path == "/healthz" || path == "/health" || path == "/") {
       return new HealthHandler();
     }
@@ -196,7 +214,7 @@ void RunHttpServer(uint16_t port, RewriterServiceImpl &core) {
   server->start();
 
   std::cout << "[http] RewriterService listening on 0.0.0.0:" << port
-            << " (POST /rewrite, /rewriteerrormessage, /optimize; GET /healthz)" << std::endl;
+            << " (POST /materialize, /rewrite, /rewriteerrormessage, /optimize; GET /healthz)" << std::endl;
 }
 
 } // namespace rewriter_http

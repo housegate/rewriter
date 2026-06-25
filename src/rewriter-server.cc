@@ -20,6 +20,7 @@
 
 #include "handlers/common.h"
 #include "handlers/exists.h"
+#include "handlers/materialize.h"
 #include "handlers/grant.h"
 #include "handlers/join_swap.h"
 #include "handlers/select.h"
@@ -590,6 +591,38 @@ grpc::Status RewriterServiceImpl::Optimize(
   const OptimizeRequest *request,
   OptimizeResponse *response) {
   doOptimize(request, response);
+  return grpc::Status::OK;
+}
+
+void RewriterServiceImpl::doMaterializeSQL(
+  const MaterializeSQLRequest *request, MaterializeSQLResponse *response) {
+  const std::string sql_id = shortSqlHash(request->sql());
+  const auto t0 = std::chrono::steady_clock::now();
+
+  struct AccessLog {
+    const std::string &sql_id;
+    const MaterializeSQLResponse *response;
+    std::chrono::steady_clock::time_point t0;
+    size_t sql_len;
+    ~AccessLog() {
+      const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+      std::cerr << "[access] method=MaterializeSQL sql=" << sql_id
+                << " code=" << response->code()
+                << " replacements=" << response->replacements_size()
+                << " sql_len=" << sql_len
+                << " took_us=" << us << std::endl;
+    }
+  } _access_log{sql_id, response, t0, request->sql().size()};
+
+  rewriter_handlers::materialize(request, response);
+}
+
+grpc::Status RewriterServiceImpl::MaterializeSQL(
+  ServerContext * /*context*/,
+  const MaterializeSQLRequest *request,
+  MaterializeSQLResponse *response) {
+  doMaterializeSQL(request, response);
   return grpc::Status::OK;
 }
 

@@ -336,6 +336,62 @@ message RewriteSQLRequest {
     repeated RewriteOption options = 2;
 }
 
+// Phase-1 signing normalizer. MaterializeSQL runs before the agent/SDK signs a
+// statement; Rewrite remains the runtime physical-name rewrite used after
+// ingress. The rewriter does NOT read wall-clock time or generate randomness:
+// callers provide deterministic values in MaterializationInputs. Missing inputs
+// and unsupported volatile functions return non-Success codes;
+// sql_after_materialization echoes sql so callers can reject before signing.
+message MaterializeSQLRequest {
+    string sql = 1;
+    MaterializationInputs inputs = 2;
+    MaterializationPolicy policy = 3;
+}
+
+message MaterializationPolicy {
+    // Empty selects the default profile, currently "sentio-p1-nondet-v1".
+    string profile_id = 1;
+    // v1 accepts empty or "UTC" only.
+    string timezone = 2;
+}
+
+message MaterializationInputs {
+    // Unix time in nanoseconds from the trusted agent/SDK clock. Required when
+    // materializing current-time/date functions.
+    optional int64 now_unix_ns = 1;
+    // Deterministic values consumed in traversal order by rand/rand32/rand64/
+    // random/randConstant. rand/rand32/randConstant values must fit UInt32.
+    repeated uint64 random_uint64_values = 2;
+    // UUID strings consumed in traversal order by generateUUIDv4/generateUUIDv7.
+    repeated string uuid_values = 3;
+    // Float64 values consumed in traversal order by randCanonical; finite, [0,1).
+    repeated double random_float64_values = 4;
+}
+
+enum MaterializeCode {
+    MaterializeSuccess = 0;
+    MaterializeSyntaxError = 1;
+    MaterializeUnsupportedStatement = 2;
+    MaterializeInvalidRequest = 3;
+    MaterializeError = 4;
+}
+
+message MaterializedReplacement {
+    string function_name = 1;
+    uint32 ordinal = 2;
+    string literal_sql = 3;
+    string value_type = 4;
+}
+
+message MaterializeSQLResponse {
+    MaterializeCode code = 1;
+    string sql = 2;
+    string sql_after_materialization = 3;
+    string message = 4;
+    repeated MaterializedReplacement replacements = 5;
+    string materializer_profile_id = 6;
+}
+
 enum RewriteCode {
     Success = 0;
     // SQL failed to parse via ClickHouse's ParserQuery. Message carries the
@@ -774,6 +830,7 @@ message PrivilegeDelta {
 }
 
 service RewriterService {
+    rpc MaterializeSQL (MaterializeSQLRequest) returns (MaterializeSQLResponse) {}
     rpc Rewrite (RewriteSQLRequest) returns (RewriteSQLResponse) {}
     rpc RewriteErrorMessage (RewriteErrorMessageRequest) returns (RewriteErrorMessageResponse) {}
     // Apply performance-only optimizations to an already-rewritten (i.e.

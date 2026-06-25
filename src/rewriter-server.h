@@ -26,12 +26,18 @@ using rewriter::OptimizeResponse;
 using rewriter::RewriteErrorMessageRequest;
 using rewriter::RewriteErrorMessageResponse;
 using rewriter::RewriterService;
+using rewriter::MaterializeSQLRequest;
+using rewriter::MaterializeSQLResponse;
 using rewriter::RewriteSQLRequest;
 using rewriter::RewriteSQLResponse;
 
 class RewriterServiceImpl final : public RewriterService::Service {
 public:
   // gRPC entrypoints — thin wrappers over the protocol-agnostic do* methods.
+  Status MaterializeSQL(ServerContext *context,
+    const MaterializeSQLRequest *request,
+    MaterializeSQLResponse *response) override;
+
   Status Rewrite(ServerContext *context,
     const RewriteSQLRequest *request,
     RewriteSQLResponse *response) override;
@@ -47,7 +53,9 @@ public:
   // Protocol-agnostic dispatch. The HTTP façade (rewriter-http-server.cc)
   // delegates straight to these; the gRPC wrappers above do the same and just
   // synthesize a Status::OK. No failure paths — errors are reported inside
-  // `response` via the `RewriteCode` / `OptimizeCode` field.
+  // `response` via the `RewriteCode` / `OptimizeCode` / `MaterializeCode` field.
+  void doMaterializeSQL(
+    const MaterializeSQLRequest *request, MaterializeSQLResponse *response);
   void doRewrite(
     const RewriteSQLRequest *request, RewriteSQLResponse *response);
   void doRewriteErrorMessage(
