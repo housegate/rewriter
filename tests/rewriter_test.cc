@@ -4151,6 +4151,18 @@ TEST(Materialize, FailsClosedWhenSupportedFunctionHasArguments) {
   req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
   auto resp = RunMaterialize(req);
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeUnsupportedStatement);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());  // fail-closed echo
+}
+
+// nowInBlock() is a real ClickHouse niladic function in the now-family branch.
+TEST(Materialize, NowInBlockToDateTime) {
+  auto req = MatReq("SELECT nowInBlock()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  EXPECT_EQ(resp.replacements(0).value_type(), "DateTime");
 }
 
 // current_timestamp() (with parens) is a ClickHouse alias of now() → ASTFunction,

@@ -107,6 +107,10 @@ std::optional<int64_t> nowSeconds(Materializer &m, const std::string &name) {
 
 ASTPtr Materializer::build(const std::string &lname, const std::string &original,
                            std::string &value_type) {
+  // now / current_timestamp() / nowInBlock() are real ClickHouse niladic
+  // functions. localtime/localtimestamp are kept only to mirror rewriter-go's
+  // name set — ClickHouse has no such functions, so they never appear here from
+  // valid CH SQL (bare forms parse as identifiers; see BareKeywordIdentifiers).
   if (lname == "now" || lname == "current_timestamp" || lname == "localtimestamp" ||
       lname == "localtime" || lname == "nowinblock") {
     auto s = nowSeconds(*this, lname);
@@ -126,6 +130,8 @@ void Materializer::visit(ASTPtr &node) {
     const std::string lname = toLower(fn->name);
     if (isKnownNondeterministic(lname)) {
       // Every supported function is nullary; arguments → unsupported variant.
+      // A nullary call `f()` may carry a non-null but empty `arguments`
+      // ASTExpressionList, so test `children.empty()`, not just non-null.
       if (fn->arguments && !fn->arguments->children.empty()) {
         fail(MatErr::Unsupported, fn->name + " with arguments");
         return;
