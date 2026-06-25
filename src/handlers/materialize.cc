@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -40,9 +41,13 @@ std::string toLower(std::string s) {
 // exactly as the rewriter-go contract expects (e.g. "1710000000", "'UTC'").
 ASTPtr litI(int64_t v)  { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<Int64>(v))); }
 ASTPtr litU(uint64_t v) { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<UInt64>(v))); }
+ASTPtr litF(double v)   { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<Float64>(v))); }
 ASTPtr litS(const std::string &v) { return std::make_shared<DB::ASTLiteral>(DB::Field(v)); }
 
 constexpr int64_t kNanosPerSecond = 1'000'000'000;
+constexpr int64_t kNanosPerMilli = 1'000'000;
+constexpr int64_t kSecondsPerDay = 86'400;
+constexpr uint64_t kMaxUInt32 = 0xFFFFFFFFull;
 
 enum class MatErr { None, Unsupported, InvalidInput };
 
@@ -105,6 +110,47 @@ std::optional<int64_t> nowSeconds(Materializer &m, const std::string &name) {
   return *m.now_unix_ns / kNanosPerSecond;
 }
 
+bool nextUint(Materializer &m, const std::string &name, uint64_t &out) {
+  if (!m.rand_u64 || m.rand_i >= static_cast<size_t>(m.rand_u64->size())) {
+    m.fail(MatErr::InvalidInput, name + " requires random_uint64_values");
+    return false;
+  }
+  out = m.rand_u64->Get(static_cast<int>(m.rand_i++));
+  return true;
+}
+
+bool nextFloat(Materializer &m, const std::string &name, double &out) {
+  if (!m.rand_f64 || m.float_i >= static_cast<size_t>(m.rand_f64->size())) {
+    m.fail(MatErr::InvalidInput, name + " requires random_float64_values");
+    return false;
+  }
+  out = m.rand_f64->Get(static_cast<int>(m.float_i++));
+  return true;
+}
+
+bool nextUuid(Materializer &m, const std::string &name, std::string &out) {
+  if (!m.uuids || m.uuid_i >= static_cast<size_t>(m.uuids->size())) {
+    m.fail(MatErr::InvalidInput, name + " requires uuid_values");
+    return false;
+  }
+  out = m.uuids->Get(static_cast<int>(m.uuid_i++));
+  return true;
+}
+
+bool isUuid(const std::string &s) {
+  if (s.size() != 36) return false;
+  for (size_t i = 0; i < 36; ++i) {
+    const char c = s[i];
+    if (i == 8 || i == 13 || i == 18 || i == 23) { if (c != '-') return false; }
+    else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  return true;
+}
+
+ASTPtr toDateExpr(int64_t seconds) {
+  return DB::makeASTFunction("toDate", DB::makeASTFunction("toDateTime", litI(seconds)));
+}
+
 ASTPtr Materializer::build(const std::string &lname, const std::string &original,
                            std::string &value_type) {
   // now / current_timestamp() / nowInBlock() are real ClickHouse niladic
@@ -118,7 +164,60 @@ ASTPtr Materializer::build(const std::string &lname, const std::string &original
     value_type = "DateTime";
     return DB::makeASTFunction("toDateTime", litI(*s));
   }
-  // Remaining builders land in Task 3 (date family, rand, uuid, …).
+  if (lname == "utctimestamp" || lname == "utc_timestamp") {
+    auto s = nowSeconds(*this, lname);
+    if (!s) return nullptr;
+    value_type = "DateTime";
+    return DB::makeASTFunction("toDateTime", litI(*s), litS("UTC"));
+  }
+  if (lname == "now64" || lname == "nowinblock64") {
+    if (!now_unix_ns) { fail(MatErr::InvalidInput, lname + " requires now_unix_ns"); return nullptr; }
+    value_type = "DateTime64(3)";
+    return DB::makeASTFunction("fromUnixTimestamp64Milli", litI(*now_unix_ns / kNanosPerMilli));
+  }
+  if (lname == "today" || lname == "current_date" || lname == "curdate") {
+    auto s = nowSeconds(*this, lname);
+    if (!s) return nullptr;
+    value_type = "Date";
+    return toDateExpr(*s);
+  }
+  if (lname == "yesterday") {
+    auto s = nowSeconds(*this, lname);
+    if (!s) return nullptr;
+    value_type = "Date";
+    return toDateExpr(*s - kSecondsPerDay);
+  }
+  if (lname == "rand" || lname == "rand32" || lname == "randconstant") {
+    uint64_t v;
+    if (!nextUint(*this, lname, v)) return nullptr;
+    if (v > kMaxUInt32) { fail(MatErr::InvalidInput, lname + " value exceeds UInt32"); return nullptr; }
+    value_type = "UInt32";
+    return litU(v);
+  }
+  if (lname == "rand64" || lname == "random") {
+    uint64_t v;
+    if (!nextUint(*this, lname, v)) return nullptr;
+    value_type = "UInt64";
+    return litU(v);
+  }
+  if (lname == "randcanonical") {
+    double x;
+    if (!nextFloat(*this, lname, x)) return nullptr;
+    if (!std::isfinite(x) || x < 0.0 || x >= 1.0) {
+      fail(MatErr::InvalidInput, lname + " value outside [0,1)");
+      return nullptr;
+    }
+    value_type = "Float64";
+    return DB::makeASTFunction("toFloat64", litF(x));
+  }
+  if (lname == "generateuuidv4" || lname == "generateuuidv7") {
+    std::string u;
+    if (!nextUuid(*this, lname, u)) return nullptr;
+    u = toLower(u);
+    if (!isUuid(u)) { fail(MatErr::InvalidInput, lname + " invalid uuid"); return nullptr; }
+    value_type = "UUID";
+    return DB::makeASTFunction("toUUID", litS(u));
+  }
   fail(MatErr::Unsupported, original);
   return nullptr;
 }

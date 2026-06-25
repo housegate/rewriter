@@ -4189,6 +4189,65 @@ TEST(Materialize, BareKeywordIdentifiersLeftAlone) {
   EXPECT_EQ(resp.sql_after_materialization(), resp.sql());  // echoed verbatim
 }
 
+// Full Go-parity scalar set (parens forms — bare CURRENT_DATE is a CH identifier).
+TEST(Materialize, AdditionalSafeScalarFunctions) {
+  auto req = MatReq("SELECT now64(), today(), current_date(), curdate(), yesterday(), "
+                    "UTCTimestamp(), rand32(), rand64(), randCanonical(), generateUUIDv4()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  req.mutable_inputs()->add_random_uint64_values(13);  // rand32
+  req.mutable_inputs()->add_random_uint64_values(99);  // rand64
+  req.mutable_inputs()->add_random_float64_values(0.125);
+  req.mutable_inputs()->add_uuid_values("018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001");
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 10);
+  const std::vector<std::string> want = {
+    "fromUnixTimestamp64Milli(1710000000123)",
+    "toDate(toDateTime(1710000000))",
+    "toDate(toDateTime(1710000000))",
+    "toDate(toDateTime(1710000000))",
+    "toDate(toDateTime(1709913600))",
+    "toDateTime(1710000000, 'UTC')",
+    "13",
+    "99",
+    "toFloat64(0.125)",
+    "toUUID('018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001')"};
+  for (int i = 0; i < resp.replacements_size(); ++i)
+    EXPECT_EQ(resp.replacements(i).literal_sql(), want[i]) << "ordinal " << i;
+  EXPECT_EQ(resp.replacements(0).value_type(), "DateTime64(3)");
+  EXPECT_EQ(resp.replacements(6).value_type(), "UInt32");
+  EXPECT_EQ(resp.replacements(7).value_type(), "UInt64");
+  EXPECT_EQ(resp.replacements(8).value_type(), "Float64");
+  EXPECT_EQ(resp.replacements(9).value_type(), "UUID");
+}
+
+TEST(Materialize, Rand32OverflowFailsClosed) {
+  auto req = MatReq("SELECT rand32()");
+  req.mutable_inputs()->add_random_uint64_values(uint64_t(1) << 32);
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+TEST(Materialize, RandCanonicalOutOfRangeFailsClosed) {
+  auto req = MatReq("SELECT randCanonical()");
+  req.mutable_inputs()->add_random_float64_values(1.0);
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+}
+
+TEST(Materialize, BadUuidFailsClosed) {
+  auto req = MatReq("SELECT generateUUIDv4()");
+  req.mutable_inputs()->add_uuid_values("not-a-uuid");
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+}
+
+TEST(Materialize, RandValueExhaustionFailsClosed) {
+  auto resp = RunMaterialize(MatReq("SELECT rand64()"));  // no inputs
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
