@@ -4115,6 +4115,68 @@ TEST(Materialize, RejectsBadPolicy) {
   EXPECT_EQ(resp2.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
 }
 
+static rewriter::MaterializeSQLRequest MatReq(const std::string &sql) {
+  rewriter::MaterializeSQLRequest req;
+  req.set_sql(sql);
+  return req;
+}
+
+TEST(Materialize, NowToDateTime) {
+  auto req = MatReq("SELECT now()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).function_name(), "now");
+  EXPECT_EQ(resp.replacements(0).ordinal(), 0u);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  EXPECT_EQ(resp.replacements(0).value_type(), "DateTime");
+  EXPECT_EQ(resp.sql_after_materialization().find("now("), std::string::npos);
+}
+
+TEST(Materialize, FailsClosedWhenNowInputMissing) {
+  auto resp = RunMaterialize(MatReq("SELECT now()"));
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+TEST(Materialize, FailsClosedWhenKnownVolatileUnsupported) {
+  auto resp = RunMaterialize(MatReq("SELECT generateSnowflakeID()"));
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeUnsupportedStatement);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+TEST(Materialize, FailsClosedWhenSupportedFunctionHasArguments) {
+  auto req = MatReq("SELECT now('UTC')");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeUnsupportedStatement);
+}
+
+// current_timestamp() (with parens) is a ClickHouse alias of now() → ASTFunction,
+// so it materializes the same as now().
+TEST(Materialize, CurrentTimestampParensToDateTime) {
+  auto req = MatReq("SELECT current_timestamp()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+}
+
+// ClickHouse-vs-polyglot divergence: bare SQL-standard keywords (no parens) are
+// parsed as IDENTIFIERS, not functions (and error as UNKNOWN_IDENTIFIER at
+// execution — they are not volatile in ClickHouse). The materializer correctly
+// leaves them untouched (unlike the Go/polyglot materializer).
+TEST(Materialize, BareKeywordIdentifiersLeftAlone) {
+  auto req = MatReq("SELECT CURRENT_TIMESTAMP, CURRENT_DATE, localtime");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess);
+  EXPECT_EQ(resp.replacements_size(), 0);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());  // echoed verbatim
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
