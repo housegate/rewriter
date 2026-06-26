@@ -4264,10 +4264,27 @@ TEST(Materialize, InsertValuesSupportedFunctions) {
   const std::string &out = resp.sql_after_materialization();
   EXPECT_EQ(out.find("now("), std::string::npos);
   EXPECT_EQ(out.find("rand("), std::string::npos);
-  EXPECT_EQ(out.find("generateUUIDv4("), std::string::npos);
-  EXPECT_NE(out.find("toDateTime(1710000000)"), std::string::npos);
   EXPECT_EQ(resp.replacements(1).literal_sql(), "7");  // rand()
-  EXPECT_NE(out.find("toUUID('018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001')"), std::string::npos);
+  // Pin the exact reassembled output. `FORMAT Values(...)` (no space) is
+  // ClickHouse's own round-trip form — verified to parse AND execute via
+  // clickhouse-local, so it is the intended output, not a missing-space bug.
+  EXPECT_EQ(out,
+            "INSERT INTO db.t FORMAT Values(toDateTime(1710000000), 7, "
+            "toUUID('018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001'))");
+}
+
+// Nested function-call parens inside a VALUES row: now() at depth 2 must be
+// found and materialized (exercises splitValuesRows depth tracking + recursion).
+TEST(Materialize, InsertValuesNestedParens) {
+  auto req = MatReq("INSERT INTO db.t VALUES (toString(now()))");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  const std::string &out = resp.sql_after_materialization();
+  EXPECT_EQ(out.find("now("), std::string::npos);
+  EXPECT_NE(out.find("toString(toDateTime(1710000000))"), std::string::npos);
 }
 
 TEST(Materialize, InsertValuesMultiRow) {

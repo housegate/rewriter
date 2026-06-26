@@ -312,7 +312,7 @@ bool materializeRow(const std::string &interior, Materializer &m, std::string &o
   bool first = true;
   for (auto &col : list->children) {
     m.visit(col);
-    if (m.err != MatErr::None) return true;  // propagated; caller checks m.err
+    if (m.err != MatErr::None) { out.clear(); return true; }  // caller checks m.err
     if (!first) out += ", ";
     out += formatAst(col);
     first = false;
