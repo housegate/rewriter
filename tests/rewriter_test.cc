@@ -4307,6 +4307,40 @@ TEST(Materialize, InsertSelectMaterializes) {
   EXPECT_EQ(resp.sql_after_materialization().find("now("), std::string::npos);
 }
 
+// ---- C++ extensions beyond the rewriter-go supported set ----
+// generateUUIDv7 reuses the uuid_values channel (symmetric with v4). Go rejects
+// it as unsupported; C++ accepts it (explicit divergence, same proto contract).
+TEST(Materialize, ExtensionGenerateUUIDv7) {
+  auto req = MatReq("SELECT generateUUIDv7()");
+  req.mutable_inputs()->add_uuid_values("018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001");
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).literal_sql(),
+            "toUUID('018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001')");
+  EXPECT_EQ(resp.replacements(0).value_type(), "UUID");
+}
+
+TEST(Materialize, ExtensionGenerateUUIDv7ChannelExhaustedFailsClosed) {
+  auto resp = RunMaterialize(MatReq("SELECT generateUUIDv7()"));  // no uuid value
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+// nowInBlock()/nowInBlock64() alias now()/now64(); randConstant() is UInt32.
+TEST(Materialize, ExtensionNowInBlockAndRandConstant) {
+  auto req = MatReq("SELECT nowInBlock(), nowInBlock64(), randConstant()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  req.mutable_inputs()->add_random_uint64_values(5);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 3);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  EXPECT_EQ(resp.replacements(1).literal_sql(), "fromUnixTimestamp64Milli(1710000000123)");
+  EXPECT_EQ(resp.replacements(2).literal_sql(), "5");
+  EXPECT_EQ(resp.replacements(2).value_type(), "UInt32");
+}
+
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
