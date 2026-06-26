@@ -4342,6 +4342,7 @@ TEST(Materialize, ExtensionGenerateUUIDv7ChannelExhaustedFailsClosed) {
   auto resp = RunMaterialize(MatReq("SELECT generateUUIDv7()"));  // no uuid value
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
   EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+  EXPECT_EQ(resp.replacements_size(), 0);  // no partial replacement on error
 }
 
 // nowInBlock()/nowInBlock64() alias now()/now64(); randConstant() is UInt32.
@@ -4353,7 +4354,9 @@ TEST(Materialize, ExtensionNowInBlockAndRandConstant) {
   ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
   ASSERT_EQ(resp.replacements_size(), 3);
   EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  EXPECT_EQ(resp.replacements(0).value_type(), "DateTime");        // nowInBlock
   EXPECT_EQ(resp.replacements(1).literal_sql(), "fromUnixTimestamp64Milli(1710000000123)");
+  EXPECT_EQ(resp.replacements(1).value_type(), "DateTime64(3)");   // nowInBlock64
   EXPECT_EQ(resp.replacements(2).literal_sql(), "5");
   EXPECT_EQ(resp.replacements(2).value_type(), "UInt32");
 }
