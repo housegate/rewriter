@@ -4215,6 +4215,8 @@ TEST(Materialize, AdditionalSafeScalarFunctions) {
   for (int i = 0; i < resp.replacements_size(); ++i)
     EXPECT_EQ(resp.replacements(i).literal_sql(), want[i]) << "ordinal " << i;
   EXPECT_EQ(resp.replacements(0).value_type(), "DateTime64(3)");
+  EXPECT_EQ(resp.replacements(1).value_type(), "Date");   // today
+  EXPECT_EQ(resp.replacements(4).value_type(), "Date");   // yesterday
   EXPECT_EQ(resp.replacements(6).value_type(), "UInt32");
   EXPECT_EQ(resp.replacements(7).value_type(), "UInt64");
   EXPECT_EQ(resp.replacements(8).value_type(), "Float64");
@@ -4234,6 +4236,7 @@ TEST(Materialize, RandCanonicalOutOfRangeFailsClosed) {
   req.mutable_inputs()->add_random_float64_values(1.0);
   auto resp = RunMaterialize(req);
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
 }
 
 TEST(Materialize, BadUuidFailsClosed) {
@@ -4241,11 +4244,67 @@ TEST(Materialize, BadUuidFailsClosed) {
   req.mutable_inputs()->add_uuid_values("not-a-uuid");
   auto resp = RunMaterialize(req);
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
 }
 
 TEST(Materialize, RandValueExhaustionFailsClosed) {
   auto resp = RunMaterialize(MatReq("SELECT rand64()"));  // no inputs
   EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeInvalidRequest);
+}
+
+// ---- INSERT … VALUES data-section materialization (off-AST) ----
+TEST(Materialize, InsertValuesSupportedFunctions) {
+  auto req = MatReq("INSERT INTO db.t VALUES (now(), rand(), generateUUIDv4())");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  req.mutable_inputs()->add_random_uint64_values(7);
+  req.mutable_inputs()->add_uuid_values("018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001");
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  EXPECT_EQ(resp.replacements_size(), 3);
+  const std::string &out = resp.sql_after_materialization();
+  EXPECT_EQ(out.find("now("), std::string::npos);
+  EXPECT_EQ(out.find("rand("), std::string::npos);
+  EXPECT_EQ(out.find("generateUUIDv4("), std::string::npos);
+  EXPECT_NE(out.find("toDateTime(1710000000)"), std::string::npos);
+  EXPECT_EQ(resp.replacements(1).literal_sql(), "7");  // rand()
+  EXPECT_NE(out.find("toUUID('018f3c8a-3e8a-7d0a-b5b0-6e95e3f0b001')"), std::string::npos);
+}
+
+TEST(Materialize, InsertValuesMultiRow) {
+  auto req = MatReq("INSERT INTO db.t VALUES (rand64()), (rand64())");
+  req.mutable_inputs()->add_random_uint64_values(11);
+  req.mutable_inputs()->add_random_uint64_values(22);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 2);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "11");
+  EXPECT_EQ(resp.replacements(1).literal_sql(), "22");
+  const std::string &out = resp.sql_after_materialization();
+  EXPECT_NE(out.find("(11)"), std::string::npos);
+  EXPECT_NE(out.find("(22)"), std::string::npos);
+}
+
+TEST(Materialize, InsertValuesDeterministicEchoesVerbatim) {
+  auto resp = RunMaterialize(MatReq("INSERT INTO db.t VALUES (1, 'a')"));
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess);
+  EXPECT_EQ(resp.replacements_size(), 0);
+  EXPECT_EQ(resp.sql_after_materialization(), "INSERT INTO db.t VALUES (1, 'a')");
+}
+
+TEST(Materialize, InsertValuesUnsupportedVolatileFailsClosed) {
+  auto resp = RunMaterialize(MatReq("INSERT INTO db.t VALUES (generateSnowflakeID())"));
+  EXPECT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeUnsupportedStatement);
+  EXPECT_EQ(resp.sql_after_materialization(), resp.sql());
+}
+
+TEST(Materialize, InsertSelectMaterializes) {
+  auto req = MatReq("INSERT INTO db.t SELECT now()");
+  req.mutable_inputs()->set_now_unix_ns(1710000000123456789LL);
+  auto resp = RunMaterialize(req);
+  ASSERT_EQ(resp.code(), rewriter::MaterializeCode::MaterializeSuccess) << resp.message();
+  ASSERT_EQ(resp.replacements_size(), 1);
+  EXPECT_EQ(resp.replacements(0).literal_sql(), "toDateTime(1710000000)");
+  EXPECT_EQ(resp.sql_after_materialization().find("now("), std::string::npos);
 }
 
 #if !REWRITER_RELEASE_MAIN

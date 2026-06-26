@@ -2,7 +2,10 @@
 #include "handlers/materialize.h"
 
 #include <Parsers/ASTFunction.h>
+#include <Parsers/ASTInsertQuery.h>
 #include <Parsers/ASTLiteral.h>
+#include <Parsers/ExpressionListParsers.h>
+#include <Parsers/Lexer.h>
 #include <Parsers/ParserQuery.h>
 #include <Parsers/parseQuery.h>
 #include <Core/Field.h>
@@ -252,6 +255,90 @@ void Materializer::visit(ASTPtr &node) {
   }
 }
 
+// ---- INSERT … VALUES data section -----------------------------------------
+// ClickHouse leaves the VALUES payload off-AST (raw [data, end) bytes), so the
+// AST walk above never sees functions inside it. We tokenize with ClickHouse's
+// own lexer to split top-level "(...)" rows, parse each row's columns, run the
+// same Materializer over them, and re-emit — preserving row/column structure.
+
+// Split raw VALUES bytes into top-level "(...)" row interiors (text between a
+// depth-0 '(' and its matching ')'), skipping string/comment tokens via the
+// lexer. Returns false on malformed input (unbalanced parens / stray tokens).
+bool splitValuesRows(const char *data, const char *end, std::vector<std::string> &rows) {
+  DB::Lexer lexer(data, end);
+  int depth = 0;
+  const char *row_start = nullptr;
+  for (DB::Token tok = lexer.nextToken(); !tok.isEnd(); tok = lexer.nextToken()) {
+    if (tok.isError()) return false;
+    if (tok.type == DB::TokenType::OpeningRoundBracket) {
+      if (depth == 0) row_start = tok.end;  // interior begins after '('
+      ++depth;
+    } else if (tok.type == DB::TokenType::ClosingRoundBracket) {
+      if (depth == 0) return false;
+      --depth;
+      if (depth == 0 && row_start) {
+        rows.emplace_back(row_start, tok.begin);  // interior = [start, ')')
+        row_start = nullptr;
+      }
+    } else if (depth == 0) {
+      switch (tok.type) {  // only separators/terminators allowed between rows
+        case DB::TokenType::Whitespace:
+        case DB::TokenType::Comment:
+        case DB::TokenType::Comma:
+        case DB::TokenType::Semicolon:
+          break;
+        default:
+          return false;
+      }
+    }
+  }
+  return depth == 0 && !rows.empty();
+}
+
+// Parse one row interior into column expressions, materialize each through `m`,
+// and re-emit "(col0, col1, ...)" into `out`. Returns false on a parse failure;
+// a per-column fail-closed condition sets m.err (caller checks it).
+bool materializeRow(const std::string &interior, Materializer &m, std::string &out) {
+  DB::ParserExpressionList parser(/*allow_alias_without_as=*/false);
+  const char *p = interior.data();
+  const char *e = p + interior.size();
+  DB::ASTPtr list;
+  try {
+    list = DB::parseQuery(parser, p, e, /*description=*/"", 0, 0, 0);
+  } catch (const std::exception &) {
+    return false;
+  }
+  out = "(";
+  bool first = true;
+  for (auto &col : list->children) {
+    m.visit(col);
+    if (m.err != MatErr::None) return true;  // propagated; caller checks m.err
+    if (!first) out += ", ";
+    out += formatAst(col);
+    first = false;
+  }
+  out += ")";
+  return true;
+}
+
+// Materialize a VALUES data section into `out` (the full "(row), (row)" text).
+// Returns false on a hard tokenize/parse failure (caller → MaterializeError).
+bool materializeValuesData(const char *data, const char *end, Materializer &m,
+                           std::string &out) {
+  std::vector<std::string> rows;
+  if (!splitValuesRows(data, end, rows)) return false;
+  std::string acc;
+  for (size_t i = 0; i < rows.size(); ++i) {
+    std::string row_sql;
+    if (!materializeRow(rows[i], m, row_sql)) return false;
+    if (m.err != MatErr::None) return true;  // fail-closed column; stop
+    if (i) acc += ", ";
+    acc += row_sql;
+  }
+  out = std::move(acc);
+  return true;
+}
+
 // Returns the resolved profile id, or std::nullopt + sets `err` on a bad policy.
 std::optional<std::string> resolveProfile(const rewriter::MaterializationPolicy &policy,
                                           std::string &err) {
@@ -323,9 +410,41 @@ void materialize(const rewriter::MaterializeSQLRequest *request,
     return;  // sql_after_materialization stays == sql
   }
 
+  // INSERT … VALUES: the data section is off-AST, so materialize it separately
+  // through the SAME Materializer (cursors/ordinals continue after any prelude
+  // rewrites). ASTInsertQuery formats the prelude only, so we append the tail.
+  std::string insert_tail;
+  bool has_insert_tail = false;
+  if (auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    if (insert->data && insert->data != insert->end) {
+      has_insert_tail = true;
+      const std::string &fmt = insert->format;
+      if (fmt.empty() || fmt == "Values") {
+        if (!materializeValuesData(insert->data, insert->end, m, insert_tail)) {
+          response->set_code(rewriter::MaterializeCode::MaterializeError);
+          response->set_message("could not materialize INSERT VALUES data section");
+          return;
+        }
+        if (m.err != MatErr::None) {
+          response->set_code(m.err == MatErr::Unsupported
+                               ? rewriter::MaterializeCode::MaterializeUnsupportedStatement
+                               : rewriter::MaterializeCode::MaterializeInvalidRequest);
+          response->set_message(m.err_msg);
+          return;
+        }
+      } else {
+        // Non-VALUES inline data (RowBinary/JSON/…) carries no SQL function
+        // calls; preserve it verbatim so a prelude rewrite doesn't drop it.
+        insert_tail.assign(insert->data, insert->end);
+      }
+    }
+  }
+
   if (m.reps.empty()) return;  // echo verbatim, Success
 
-  response->set_sql_after_materialization(formatAst(ast));
+  std::string out = formatAst(ast);  // prelude only for INSERT
+  if (has_insert_tail) out += insert_tail;
+  response->set_sql_after_materialization(out);
   for (size_t i = 0; i < m.reps.size(); ++i) {
     auto *r = response->add_replacements();
     r->set_function_name(m.reps[i].function_name);
