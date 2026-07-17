@@ -1,3 +1,6 @@
 [submodule "clickHouse"]
 	path = clickHouse
 	url = https://github.com/ClickHouse/ClickHouse.git
+[submodule "third_party/rewriter-proto"]
+	path = third_party/rewriter-proto
+	url = https://github.com/housegate/rewriter-proto.git

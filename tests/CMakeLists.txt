@@ -25,8 +25,7 @@ clickhouse_add_executable(rewriter_tests
 )
 
 target_include_directories(rewriter_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/protos
-    ${PROJECT_BINARY_DIR}/protos
+    ${REWRITER_PROTO_GENERATED_DIR}
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_BINARY_DIR}/src
 )

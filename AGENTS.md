@@ -60,7 +60,8 @@ The wrapper handles symlinks and submodule patches that `ninja` otherwise trips 
 ./scripts.sh docker push  <v>
 ```
 
-Prerequisite submodule init on a fresh clone: `cd clickHouse && git submodule update --init --depth=1`.
+Prerequisite submodule init on a fresh clone (run from the repository root):
+`git submodule update --init --recursive --depth=1`.
 
 Single-test runs (gtest binary):
 ```shell
@@ -152,7 +153,9 @@ Each transformer subclasses `IASTTransformer` (itself an `IAST` so it can live i
 
 ### Protocol
 
-[protos/rewriter.proto](protos/rewriter.proto) defines the contract. Key invariants worth preserving:
+The pinned
+[`rewriter-proto`](third_party/rewriter-proto/proto/rewriter.proto) submodule
+defines the contract. Key invariants worth preserving:
 
 - `RewriteOp` + `RewriteOption.value` are a tagged-union by `op` — adding a new op means: new enum value, new `*Args` message, new `oneof` case, new `case` in the dispatch switch, and probably new response fields. Bump both C++ and Go clients.
 - `TableNameRewrite` is the only table-touching op. Its `RewriteTableNameArgs` has two sub-messages:

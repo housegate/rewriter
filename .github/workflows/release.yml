@@ -74,6 +74,13 @@ jobs:
             rm -rf clickHouse
             ln -s /home/sentio/chen/rewriter-grpc/clickHouse clickHouse
           fi
+          # Older release tags predate the shared proto submodule. Keep those
+          # refs rebuildable by initializing it only when the checked-out tree
+          # actually contains the gitlink.
+          if git ls-tree HEAD third_party/rewriter-proto | grep -q '^160000 '; then
+            git submodule sync -- third_party/rewriter-proto
+            git submodule update --init --depth=1 third_party/rewriter-proto
+          fi
           REMOTE
 
       - name: Build binary on build host

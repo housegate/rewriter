@@ -145,14 +145,28 @@ set(CMAKE_MODULE_LINKER_FLAGS
 add_subdirectory(clickHouse)
 no_warning(enum-constexpr-conversion)
 
-PROTOBUF_GENERATE_GRPC_CPP(rewriter_grpc_proto_sources rewriter_grpc_proto_headers protos/rewriter.proto)
+set(REWRITER_PROTO_PATH "third_party/rewriter-proto/proto/rewriter.proto")
+if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${REWRITER_PROTO_PATH}")
+    message(FATAL_ERROR
+        "Missing ${REWRITER_PROTO_PATH}; run "
+        "`git submodule update --init third_party/rewriter-proto`")
+endif ()
+
+PROTOBUF_GENERATE_GRPC_CPP(
+    rewriter_grpc_proto_sources
+    rewriter_grpc_proto_headers
+    "${REWRITER_PROTO_PATH}")
+set(REWRITER_PROTO_GENERATED_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/third_party/rewriter-proto/proto")
 # Ignore warnings while compiling protobuf-generated *.pb.h and *.pb.cpp files.
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
 # Disable clang-tidy for protobuf-generated *.pb.h and *.pb.cpp files.
 set(CMAKE_CXX_CLANG_TIDY "")
 
 add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_proto_sources})
-target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${REWRITER_PROTO_GENERATED_DIR})
 target_link_libraries(rewriter_grpc_protos PUBLIC ch_contrib::grpc)
 
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
@@ -177,7 +191,7 @@ add_library(rewriter_core OBJECT
 target_include_directories(rewriter_core SYSTEM PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_BINARY_DIR}/protos)
+    ${REWRITER_PROTO_GENERATED_DIR})
 target_link_libraries(rewriter_core PUBLIC
     clickhouse_parsers clickhouse_common_io dbms clickhouse_functions
     rewriter_grpc_protos absl::debugging_internal)

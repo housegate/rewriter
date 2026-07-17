@@ -32,8 +32,8 @@ taxonomy: `Success`, `SyntaxError`, `UnsupportedStatement` (statement kind out
 of scope — caller may pass through), and `InvalidRewriteRequest` (caller's
 options don't match the SQL, e.g. a non-SELECT target named a logical DB
 that's neither in `database_map` nor in `known_physical_databases` — caller
-must NOT pass through). Full details in
-[protos/rewriter.proto](protos/rewriter.proto).
+must NOT pass through). The canonical contract comes from the pinned
+[`rewriter-proto`](third_party/rewriter-proto/proto/rewriter.proto) submodule.
 
 ## What's in the box
 
@@ -118,7 +118,7 @@ curl -s -XPOST http://localhost:50052/rewrite \
 Any gRPC client works; for quick shell usage install `grpcurl`:
 
 ```shell
-grpcurl -plaintext -proto protos/rewriter.proto \
+grpcurl -plaintext -proto third_party/rewriter-proto/proto/rewriter.proto \
   -d '{"sql": "SELECT 1"}' \
   localhost:50051 rewriter.RewriterService/Rewrite
 ```

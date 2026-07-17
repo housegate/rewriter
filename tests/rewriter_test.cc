@@ -1,4 +1,4 @@
-#include "protos/rewriter.grpc.pb.h"
+#include "rewriter.grpc.pb.h"
 #include "rewriter-server.h"
 #include <gtest/gtest.h>
 #include <algorithm>
