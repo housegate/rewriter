@@ -1134,8 +1134,12 @@ bool astReferencesIdentifier(const DB::ASTPtr &ast, const std::string &name) {
 
 std::string describeMetadataSQL(const std::string &safe_table, const std::string &reserved_column) {
   const auto [database, table] = splitPhysical(safe_table);
-  return "SELECT name, type, default_type, default_expression, comment, "
-         "codec_expression, ttl_expression FROM system.columns WHERE database = '" +
+  // system.columns exposes default_kind; alias it to native DESCRIBE's
+  // default_type field. Protocol-owned SI DDL has no column CODEC or TTL, so
+  // those two fields are empty (and ttl_expression is absent from
+  // system.columns on ClickHouse 25.8), preserving an executable 7-field shape.
+  return "SELECT name, type, default_kind AS default_type, default_expression, comment, "
+         "'' AS codec_expression, '' AS ttl_expression FROM system.columns WHERE database = '" +
          escapeSqlLiteral(database) + "' AND table = '" + escapeSqlLiteral(table) +
          "' AND name != '" + escapeSqlLiteral(reserved_column) + "' ORDER BY position";
 }
