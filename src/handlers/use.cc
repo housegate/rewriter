@@ -8,6 +8,7 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -39,6 +40,13 @@ bool handleUseQuery(DB::ASTPtr ast,
   if (!dynamic) {
     // No TableNameRewrite / dynamic_args in the request → passthrough.
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_USE);
+    return true;
+  }
+
+  if (isStorageIntegrityPhysicalDatabase(origin_db, *dynamic)) {
+    recordPhysicalStorageIntegrityAccess(response, origin_db, "", origin_db);
+    rejectUnsupported(response,
+      storageIntegrityPhysicalDatabaseRejectMessage(origin_db));
     return true;
   }
 

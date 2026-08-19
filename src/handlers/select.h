@@ -21,6 +21,7 @@
 namespace rewriter_handlers {
 
 using ParsedCTEASTMap = std::unordered_map<std::string, DB::ASTPtr>;
+struct TableRewriteSelection;
 
 // Populate `response` with the rewritten SELECT/DML SQL and the set of
 // originally accessed table names (including any tables reached through CTEs).
@@ -54,5 +55,14 @@ void rewriteEmbeddedViewBody(
   const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
   DB::ASTPtr body,
   rewriter::RewriteSQLResponse *response);
+
+// Fail-closed preflight for SELECT subtrees embedded in a write statement
+// (CREATE TABLE AS SELECT / INSERT ... SELECT). Only SI sources are recorded;
+// ordinary write-target bookkeeping remains owned by writes.cc.
+bool rejectEmbeddedStorageIntegrityRead(
+  DB::ASTPtr body,
+  const TableRewriteSelection &selection,
+  rewriter::RewriteSQLResponse *response,
+  rewriter::RewriteCode code = rewriter::RewriteCode::UnsupportedStatement);
 
 } // namespace rewriter_handlers

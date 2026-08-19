@@ -228,6 +228,8 @@ struct AccessedTableResolution {
   bool is_remote = false;         // true iff this access maps to a `remote(...)`
                                   // table function call (static remote_table_map
                                   // hit or dynamic logical_database_to_remote_upstream_index hit).
+  bool is_storage_integrity = false; // true for logical SI hits and direct
+                                     // protocol-owned physical namespaces.
 };
 
 AccessedTableResolution resolveAccessedTable(

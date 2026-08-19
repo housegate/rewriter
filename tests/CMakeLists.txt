@@ -30,6 +30,9 @@ target_include_directories(rewriter_tests PRIVATE
     ${PROJECT_BINARY_DIR}/src
 )
 
+target_compile_definitions(rewriter_tests PRIVATE
+    REWRITER_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
 
 if (OS_DARWIN)
     target_compile_options(rewriter_tests PRIVATE -stdlib=libc++)

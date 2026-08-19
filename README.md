@@ -25,6 +25,29 @@ parsing key formats.
   Empty `extra_arguments` collapses the middle block so you don't get a double
   delim.
 
+### Storage-integrity v1
+
+An effective `dynamic_args.storage_integrity` with a non-empty table map must request `STORAGE_INTEGRITY_CONTRACT_V1`; the response echoes the same version only after the backend validated and activated the policy. Logical SI databases must also be authorized by `database_map`. A minimal safe-read payload looks like:
+
+```json
+{
+  "database_map": {"db1": "tenant_physical"},
+  "storage_integrity": {
+    "tables": {
+      "db1.t": {
+        "safe_table": "hg_safe.db1__t",
+        "unsafe_table": "hg_unsafe.db1__t"
+      }
+    },
+    "read_mode": "READ_MODE_SAFE",
+    "reserved_row_id_column": "_hg_row_id",
+    "contract_version": "STORAGE_INTEGRITY_CONTRACT_V1"
+  }
+}
+```
+
+SELECT-family reads use the safe table, or safe plus unpromoted unsafe parts in `READ_MODE_UNSAFE_LATEST`, while hiding and reserving the row-id column. `EXISTS TABLE` uses the safe table and `DESCRIBE TABLE` reads filtered `system.columns` metadata. INSERT remains an authorized ordinary physical rewrite marked `is_storage_integrity`; every other SI write/DDL/DCL is rejected for the caller's signed statement lane. Configured safe/unsafe physical databases are protocol-owned namespaces and cannot be addressed directly or indirectly through table functions, table engines, dictionary sources, or `IN <table>` forms. The cross-engine golden contract is [tests/testdata/storage_integrity_cases.json](tests/testdata/storage_integrity_cases.json); its rewriter-go copy must remain byte-identical.
+
 Responses carry two enums for programmatic dispatch: `statement_type`
 (`StatementType` — `STATEMENT_TYPE_SELECT`, `_INSERT`, `_ALTER_TABLE`, …) for
 routing / auth control, and `code` (`RewriteCode`) with a four-way rejection

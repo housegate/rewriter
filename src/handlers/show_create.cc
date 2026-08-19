@@ -7,6 +7,7 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -25,17 +26,44 @@ void rejectShowCreate(rewriter::RewriteSQLResponse *response,
 ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
                                                const rewriter::RewriteSQLRequest *request,
                                                rewriter::RewriteSQLResponse *response) {
-  if (ast->as<DB::ASTShowCreateDatabaseQuery>()) {
+  const auto sel = findActiveTableRewrite(request->options());
+  auto reject_non_table_physical = [&](const std::string &database,
+                                       const std::string &table) {
+    if (sel.mode != TableRewriteMode::Dynamic) return false;
+    const auto &args = *sel.dynamic_args;
+    const std::string effective = database.empty()
+      ? storageIntegrityExecutionDatabase(args) : database;
+    if (!isStorageIntegrityPhysicalDatabase(effective, args)) return false;
+    recordAccessedTable(response, database, table, sel);
+    rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
+      storageIntegrityPhysicalRejectMessage(effective + "." + table));
+    return true;
+  };
+  if (auto *database = ast->as<DB::ASTShowCreateDatabaseQuery>()) {
+    if (sel.mode == TableRewriteMode::Dynamic
+        && isStorageIntegrityPhysicalDatabase(
+          database->getDatabase(), *sel.dynamic_args)) {
+      recordPhysicalStorageIntegrityAccess(
+        response, database->getDatabase(), "", database->getDatabase());
+      rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
+        storageIntegrityPhysicalDatabaseRejectMessage(database->getDatabase()));
+      return ShowCreateDispatchResult::Handled;
+    }
     rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
       "SHOW CREATE DATABASE is not supported; only SHOW CREATE TABLE is allowed");
     return ShowCreateDispatchResult::Handled;
   }
-  if (ast->as<DB::ASTShowCreateViewQuery>()) {
+  if (auto *view = ast->as<DB::ASTShowCreateViewQuery>()) {
+    if (reject_non_table_physical(view->getDatabase(), view->getTable()))
+      return ShowCreateDispatchResult::Handled;
     rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
       "SHOW CREATE VIEW is not supported; only SHOW CREATE TABLE is allowed");
     return ShowCreateDispatchResult::Handled;
   }
-  if (ast->as<DB::ASTShowCreateDictionaryQuery>()) {
+  if (auto *dictionary = ast->as<DB::ASTShowCreateDictionaryQuery>()) {
+    if (reject_non_table_physical(
+          dictionary->getDatabase(), dictionary->getTable()))
+      return ShowCreateDispatchResult::Handled;
     rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
       "SHOW CREATE DICTIONARY is not supported; only SHOW CREATE TABLE is allowed");
     return ShowCreateDispatchResult::Handled;
@@ -47,7 +75,6 @@ ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
   const std::string origin_db = q->getDatabase();
   const std::string origin_table = q->getTable();
 
-  const auto sel = findActiveTableRewrite(request->options());
   // Record the access regardless of mode/outcome so callers see what target
   // the rewriter processed even on static-mode passthrough or eventual reject.
   recordAccessedTable(response, origin_db, origin_table, sel);
@@ -56,6 +83,27 @@ ShowCreateDispatchResult handleShowCreateQuery(DB::ASTPtr ast,
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_CREATE_TABLE);
     return ShowCreateDispatchResult::Handled;
   case TableRewriteMode::Dynamic: {
+    const auto &args = *sel.dynamic_args;
+    const std::string effective = origin_db.empty()
+      ? storageIntegrityExecutionDatabase(args) : origin_db;
+    if (isStorageIntegrityPhysicalDatabase(effective, args)) {
+      rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
+        storageIntegrityPhysicalRejectMessage(effective + "." + origin_table));
+      return ShowCreateDispatchResult::Handled;
+    }
+    if (auto hit = lookupStorageIntegrity(origin_db, origin_table, args)) {
+      std::string logical;
+      if (!authorizeStorageIntegrityLogical(origin_db, args, &logical)) {
+        rejectShowCreate(response,
+          rewriter::RewriteCode::InvalidRewriteRequest,
+          storageIntegrityUnauthorizedMessage(logical));
+      } else {
+        rejectShowCreate(response, rewriter::RewriteCode::UnsupportedStatement,
+          "SHOW CREATE TABLE on storage-integrity table "
+            + hit->logical_key + " is not supported");
+      }
+      return ShowCreateDispatchResult::Handled;
+    }
     const auto outcome = applyDynamicRewrite(
       origin_db, origin_table, *sel.dynamic_args, "SHOW CREATE TABLE");
     if (outcome.status == DynamicRewriteStatus::InvalidRequest) {

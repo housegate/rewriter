@@ -1,7 +1,12 @@
 #include "rewriter.grpc.pb.h"
 #include "rewriter-server.h"
+#include <Poco/Dynamic/Var.h>
+#include <Poco/JSON/Array.h>
+#include <Poco/JSON/Object.h>
+#include <Poco/JSON/Parser.h>
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <regex>
@@ -4360,6 +4365,334 @@ TEST(Materialize, ExtensionNowInBlockAndRandConstant) {
   EXPECT_EQ(resp.replacements(2).literal_sql(), "5");
   EXPECT_EQ(resp.replacements(2).value_type(), "UInt32");
 }
+
+// ---- Storage-integrity contract proof (pre-parse, active option only) -------
+namespace {
+
+rewriter::StorageIntegrityArgs *AddSIContractOption(
+  rewriter::RewriteSQLRequest &req,
+  rewriter::StorageIntegrityContractVersion version =
+    rewriter::STORAGE_INTEGRITY_CONTRACT_V1) {
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["db1"] = "phys";
+  dyn->add_known_physical_databases("phys");
+  auto *si = dyn->mutable_storage_integrity();
+  si->set_contract_version(version);
+  si->set_read_mode(rewriter::StorageIntegrityArgs::READ_MODE_SAFE);
+  auto &table = (*si->mutable_tables())["db1.t"];
+  table.set_safe_table("hg_safe.db1__t");
+  table.set_unsafe_table("hg_unsafe.db1__t");
+  return si;
+}
+
+void AddEmptyStaticOption(rewriter::RewriteSQLRequest &req) {
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  opt->mutable_table_name_args()->mutable_static_args();
+}
+
+rewriter::RewriteSQLResponse RunDirectRewrite(rewriter::RewriteSQLRequest req) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  EXPECT_TRUE(service.Rewrite(&ctx, &req, &resp).ok());
+  return resp;
+}
+
+} // namespace
+
+TEST(StorageIntegrityContract, AcknowledgesValidAndSyntaxErrorPaths) {
+  for (const std::string sql : {"SELECT 1", "SELECT ("}) {
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+    EXPECT_EQ(resp.code(), sql == "SELECT 1" ? rewriter::RewriteCode::Success
+                                             : rewriter::RewriteCode::SyntaxError);
+  }
+}
+
+TEST(StorageIntegrityContract, RejectsMissingAndUnknownBeforeAcknowledgement) {
+  for (const auto version : {
+         rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED,
+         static_cast<rewriter::StorageIntegrityContractVersion>(99)}) {
+    rewriter::RewriteSQLRequest req;
+    req.set_sql("SELECT 1");
+    AddSIContractOption(req, version);
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), "SELECT 1");
+  }
+}
+
+TEST(StorageIntegrityContract, EmptyOrAbsentSurfaceKeepsLegacyZero) {
+  rewriter::RewriteSQLRequest absent;
+  absent.set_sql("SELECT 1");
+  EXPECT_EQ(RunDirectRewrite(std::move(absent)).storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+
+  rewriter::RewriteSQLRequest empty;
+  empty.set_sql("SELECT 1");
+  auto *opt = empty.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  opt->mutable_table_name_args()->mutable_dynamic_args()
+    ->mutable_storage_integrity()->set_contract_version(
+      rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  EXPECT_EQ(RunDirectRewrite(std::move(empty)).storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+}
+
+TEST(StorageIntegrityContract, ActiveTableRewriteSelectionIsLastWins) {
+  rewriter::RewriteSQLRequest shadowed;
+  shadowed.set_sql("SELECT 1");
+  AddSIContractOption(shadowed, rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+  AddEmptyStaticOption(shadowed);
+  auto resp = RunDirectRewrite(std::move(shadowed));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+
+  rewriter::RewriteSQLRequest active;
+  active.set_sql("SELECT 1");
+  AddEmptyStaticOption(active);
+  AddSIContractOption(active);
+  resp = RunDirectRewrite(std::move(active));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+}
+
+TEST(StorageIntegrityContract, DBLevelUsesDynamicArgsButAcknowledgesOnlyActiveSI) {
+  rewriter::RewriteSQLRequest shadowed;
+  shadowed.set_sql("USE db1");
+  AddSIContractOption(shadowed);
+  AddEmptyStaticOption(shadowed);
+  auto resp = RunDirectRewrite(std::move(shadowed));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.sql_after_rewrite(), "USE phys");
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+
+  rewriter::RewriteSQLRequest active;
+  active.set_sql("USE db1");
+  AddEmptyStaticOption(active);
+  AddSIContractOption(active);
+  resp = RunDirectRewrite(std::move(active));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success);
+  EXPECT_EQ(resp.sql_after_rewrite(), "USE phys");
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+}
+
+// ============================================================================
+// Storage-integrity read surface (housegate Spec G) — shared golden corpus.
+// tests/testdata/storage_integrity_cases.json is a byte-identical copy of
+// rewriter-go/internal/harness/testdata/storage_integrity_cases.json; the Go
+// harness compares sql_after_rewrite semantically, this suite applies the
+// engine-agnostic want_sql_contains / want_sql_not_contains / sql_exact
+// checks plus every structured field.
+// ============================================================================
+
+namespace {
+
+struct SIAccessed {
+  std::string original_database, original_table, logical_database, physical_database;
+  bool is_remote = false, is_storage_integrity = false;
+};
+
+struct SIGoldenCase {
+  std::string name, sql, want_code, want_stmt, want_sql, want_message_contains;
+  bool has_dynamic = false, sql_exact = false, reject = false, want_no_contract_ack = false;
+  Poco::JSON::Object::Ptr dynamic; // raw; applied by applyStorageIntegrityArgs
+  std::map<std::string, std::string> want_table_rewrites;
+  bool has_table_rewrites = false, has_accessed = false;
+  std::vector<SIAccessed> want_accessed;
+  std::vector<std::string> want_sql_contains, want_sql_not_contains;
+};
+
+const std::map<std::string, rewriter::RewriteCode> kSICodeByName = {
+  {"Success", rewriter::RewriteCode::Success},
+  {"SyntaxError", rewriter::RewriteCode::SyntaxError},
+  {"RewriteError", rewriter::RewriteCode::RewriteError},
+  {"UnsupportedStatement", rewriter::RewriteCode::UnsupportedStatement},
+  {"InvalidRewriteRequest", rewriter::RewriteCode::InvalidRewriteRequest},
+};
+const std::map<std::string, rewriter::StatementType> kSIStmtByName = {
+  {"", rewriter::STATEMENT_TYPE_UNSPECIFIED}, {"SELECT", rewriter::STATEMENT_TYPE_SELECT},
+  {"INSERT", rewriter::STATEMENT_TYPE_INSERT}, {"EXISTS_TABLE", rewriter::STATEMENT_TYPE_EXISTS_TABLE},
+  {"SHOW_TABLES", rewriter::STATEMENT_TYPE_SHOW_TABLES}, {"DESCRIBE", rewriter::STATEMENT_TYPE_DESCRIBE},
+  {"CREATE_TABLE", rewriter::STATEMENT_TYPE_CREATE_TABLE},
+};
+
+std::vector<std::string> jsonStrings(const Poco::JSON::Object::Ptr &o, const std::string &key) {
+  std::vector<std::string> out;
+  if (!o || !o->has(key) || o->isNull(key)) return out;
+  auto arr = o->getArray(key);
+  for (size_t i = 0; i < arr->size(); ++i) out.push_back(arr->getElement<std::string>(i));
+  return out;
+}
+
+std::string normalizeSIIdentifierQuotes(std::string sql) {
+  // The Go oracle emits ANSI double quotes while ClickHouse's configured
+  // formatter emits backticks. Canonicalize only that syntactic spelling so
+  // corpus fragments still prove that a keyword/custom RID is actually quoted.
+  std::replace(sql.begin(), sql.end(), '`', '"');
+  return sql;
+}
+
+void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poco::JSON::Object::Ptr &d) {
+  if (d->has("database_map")) {
+    auto m = d->getObject("database_map");
+    for (const auto &k : *m) (*dyn->mutable_database_map())[k.first] = k.second.toString();
+  }
+  for (const auto &p : jsonStrings(d, "known_physical_databases")) dyn->add_known_physical_databases(p);
+  if (d->has("upstream_logical_database_in_context"))
+    dyn->set_upstream_logical_database_in_context(d->getValue<std::string>("upstream_logical_database_in_context"));
+  if (d->has("upstream_physical_database_in_context"))
+    dyn->set_upstream_physical_database_in_context(d->getValue<std::string>("upstream_physical_database_in_context"));
+  if (d->has("delim")) dyn->set_delim(d->getValue<std::string>("delim"));
+  if (d->has("logical_database_to_remote_upstream_index")) {
+    auto m = d->getObject("logical_database_to_remote_upstream_index");
+    for (const auto &k : *m)
+      (*dyn->mutable_logical_database_to_remote_upstream_index())[k.first] = k.second.toString();
+  }
+  if (d->has("remote_upstreams")) {
+    auto m = d->getObject("remote_upstreams");
+    for (const auto &k : *m) {
+      auto in = m->getObject(k.first);
+      auto &out = (*dyn->mutable_remote_upstreams())[k.first];
+      if (in->has("addr")) out.set_addr(in->getValue<std::string>("addr"));
+      if (in->has("user")) out.set_user(in->getValue<std::string>("user"));
+      if (in->has("password")) out.set_password(in->getValue<std::string>("password"));
+    }
+  }
+  if (!d->has("storage_integrity")) return;
+  auto si = d->getObject("storage_integrity");
+  auto *args = dyn->mutable_storage_integrity();
+  args->set_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  const std::string mode = si->has("read_mode") ? si->getValue<std::string>("read_mode") : "";
+  args->set_read_mode(mode == "UNSAFE_LATEST" ? rewriter::StorageIntegrityArgs::READ_MODE_UNSAFE_LATEST
+                    : mode == "SAFE" ? rewriter::StorageIntegrityArgs::READ_MODE_SAFE
+                    : mode == "INVALID_99" ? static_cast<rewriter::StorageIntegrityArgs::ReadMode>(99)
+                    : rewriter::StorageIntegrityArgs::READ_MODE_UNSPECIFIED);
+  if (si->has("reserved_row_id_column")) args->set_reserved_row_id_column(si->getValue<std::string>("reserved_row_id_column"));
+  auto tables = si->getObject("tables");
+  for (const auto &kv : *tables) {
+    auto t = tables->getObject(kv.first);
+    auto &out = (*args->mutable_tables())[kv.first];
+    out.set_safe_table(t->getValue<std::string>("safe_table"));
+    out.set_unsafe_table(t->getValue<std::string>("unsafe_table"));
+    for (const auto &p : jsonStrings(t, "excluded_unsafe_parts")) out.add_excluded_unsafe_parts(p);
+  }
+}
+
+std::vector<SIGoldenCase> loadSIGoldenCases() {
+  std::ifstream in(std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json");
+  std::stringstream buf; buf << in.rdbuf();
+  Poco::JSON::Parser parser;
+  auto arr = parser.parse(buf.str()).extract<Poco::JSON::Array::Ptr>();
+  std::vector<SIGoldenCase> out;
+  for (size_t i = 0; i < arr->size(); ++i) {
+    auto o = arr->getObject(i);
+    SIGoldenCase c;
+    c.name = o->getValue<std::string>("name");
+    c.sql = o->getValue<std::string>("sql");
+    if (o->has("want_code")) c.want_code = o->getValue<std::string>("want_code");
+    if (o->has("want_stmt")) c.want_stmt = o->getValue<std::string>("want_stmt");
+    if (o->has("want_sql")) c.want_sql = o->getValue<std::string>("want_sql");
+    if (o->has("want_message_contains")) c.want_message_contains = o->getValue<std::string>("want_message_contains");
+    if (o->has("sql_exact")) c.sql_exact = o->getValue<bool>("sql_exact");
+    if (o->has("reject")) c.reject = o->getValue<bool>("reject");
+    if (o->has("want_no_contract_ack")) c.want_no_contract_ack = o->getValue<bool>("want_no_contract_ack");
+    if (o->has("dynamic")) { c.has_dynamic = true; c.dynamic = o->getObject("dynamic"); }
+    if (o->has("want_table_rewrites")) {
+      c.has_table_rewrites = true;
+      auto m = o->getObject("want_table_rewrites");
+      for (const auto &kv : *m) c.want_table_rewrites[kv.first] = kv.second.toString();
+    }
+    if (o->has("want_accessed")) {
+      c.has_accessed = true;
+      auto a = o->getArray("want_accessed");
+      for (size_t j = 0; j < a->size(); ++j) {
+        auto e = a->getObject(j);
+        SIAccessed w;
+        if (e->has("original_database")) w.original_database = e->getValue<std::string>("original_database");
+        if (e->has("original_table")) w.original_table = e->getValue<std::string>("original_table");
+        if (e->has("logical_database")) w.logical_database = e->getValue<std::string>("logical_database");
+        if (e->has("physical_database")) w.physical_database = e->getValue<std::string>("physical_database");
+        if (e->has("is_remote")) w.is_remote = e->getValue<bool>("is_remote");
+        if (e->has("is_storage_integrity")) w.is_storage_integrity = e->getValue<bool>("is_storage_integrity");
+        c.want_accessed.push_back(w);
+      }
+    }
+    c.want_sql_contains = jsonStrings(o, "want_sql_contains");
+    c.want_sql_not_contains = jsonStrings(o, "want_sql_not_contains");
+    out.push_back(std::move(c));
+  }
+  return out;
+}
+
+class StorageIntegrityGolden : public ::testing::TestWithParam<SIGoldenCase> {};
+
+TEST_P(StorageIntegrityGolden, MatchesSharedCorpus) {
+  const auto &c = GetParam();
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(c.sql);
+  if (c.has_dynamic) {
+    auto *opt = req.add_options();
+    opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+    applyStorageIntegrityArgs(opt->mutable_table_name_args()->mutable_dynamic_args(), c.dynamic);
+  }
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  ASSERT_TRUE(service.Rewrite(&ctx, &req, &resp).ok());
+  SCOPED_TRACE("sql_after_rewrite: " + resp.sql_after_rewrite() + " | message: " + resp.message());
+
+  if (c.has_dynamic && c.dynamic->has("storage_integrity") &&
+      c.dynamic->getObject("storage_integrity")->getObject("tables")->size() != 0) {
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              c.want_no_contract_ack ? rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
+                                     : rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  } else {
+    EXPECT_EQ(resp.storage_integrity_contract_version(), rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+  }
+
+  if (!c.want_code.empty()) EXPECT_EQ(resp.code(), kSICodeByName.at(c.want_code));
+  EXPECT_EQ(resp.statement_type(), kSIStmtByName.at(c.want_stmt));
+  if (!c.want_message_contains.empty()) EXPECT_NE(resp.message().find(c.want_message_contains), std::string::npos);
+  if (c.has_table_rewrites) {
+    std::map<std::string, std::string> got(resp.table_rewrites().begin(), resp.table_rewrites().end());
+    EXPECT_EQ(got, c.want_table_rewrites);
+  }
+  if (c.has_accessed) {
+    ASSERT_EQ(static_cast<size_t>(resp.original_accessed_tables_size()), c.want_accessed.size());
+    for (const auto &w : c.want_accessed) {
+      const auto *g = FindAccessed(resp, w.original_database, w.original_table);
+      ASSERT_NE(g, nullptr) << w.original_database << "." << w.original_table;
+      EXPECT_EQ(g->logical_database(), w.logical_database);
+      EXPECT_EQ(g->physical_database(), w.physical_database);
+      EXPECT_EQ(g->is_remote(), w.is_remote);
+      EXPECT_EQ(g->is_storage_integrity(), w.is_storage_integrity);
+    }
+  }
+  if (c.reject) EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+  if (!c.reject && c.sql_exact) EXPECT_EQ(resp.sql_after_rewrite(), c.want_sql);
+  const std::string normalized_sql = normalizeSIIdentifierQuotes(resp.sql_after_rewrite());
+  for (const auto &s : c.want_sql_contains) EXPECT_NE(normalized_sql.find(s), std::string::npos) << "missing " << s;
+  for (const auto &s : c.want_sql_not_contains) EXPECT_EQ(normalized_sql.find(s), std::string::npos) << "unexpected " << s;
+}
+
+INSTANTIATE_TEST_SUITE_P(SpecG, StorageIntegrityGolden, ::testing::ValuesIn(loadSIGoldenCases()),
+  [](const ::testing::TestParamInfo<SIGoldenCase> &info) { return info.param.name; });
+
+} // namespace
 
 #if !REWRITER_RELEASE_MAIN
 int main(int argc, char **argv) {

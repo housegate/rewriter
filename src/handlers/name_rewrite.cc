@@ -3,6 +3,8 @@
 
 #include <sstream>
 
+#include "handlers/storage_integrity.h"
+
 namespace rewriter_handlers {
 
 namespace {
@@ -268,6 +270,24 @@ AccessedTableResolution resolveAccessedTable(
 
   // Dynamic mode.
   const auto &args = *selection.dynamic_args;
+  if (lookupStorageIntegrity(origin_db, origin_table, args)) {
+    const std::string logical = origin_db.empty()
+      ? args.upstream_logical_database_in_context() : origin_db;
+    out.logical_database = logical;
+    if (auto physical = resolvePhysicalDatabase(logical, args))
+      out.physical_database = *physical;
+    out.is_storage_integrity = true;
+    out.is_remote = false;
+    return out;
+  }
+  const std::string effective_physical = origin_db.empty()
+    ? storageIntegrityExecutionDatabase(args) : origin_db;
+  if (isStorageIntegrityPhysicalDatabase(effective_physical, args)) {
+    out.physical_database = effective_physical;
+    out.is_storage_integrity = true;
+    out.is_remote = false;
+    return out;
+  }
   const std::string logical = origin_db.empty()
     ? args.upstream_logical_database_in_context()
     : origin_db;
@@ -300,6 +320,7 @@ void recordAccessedTable(
   entry->set_logical_database(resolution.logical_database);
   entry->set_physical_database(resolution.physical_database);
   entry->set_is_remote(resolution.is_remote);
+  entry->set_is_storage_integrity(resolution.is_storage_integrity);
 }
 
 void recordAccessedDatabase(

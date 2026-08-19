@@ -1,0 +1,125 @@
+// src/handlers/storage_integrity.h — housegate Spec G policy helpers.
+#pragma once
+
+#include <Parsers/IAST.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "rewriter.grpc.pb.h"
+
+namespace rewriter_handlers {
+
+constexpr std::string_view kDefaultReservedRowIdColumn = "_hg_row_id";
+constexpr std::string_view kStorageIntegrityContractMessage =
+  "storage-integrity contract version V1 is required";
+constexpr std::string_view kStorageIntegrityWrapperMessage =
+  "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported";
+
+struct StorageIntegrityHit {
+  const rewriter::StorageIntegrityArgs::Table *table = nullptr;
+  std::string logical_key;
+  std::string logical_database;
+};
+
+// Validate every v1 proof field before acknowledgement. Empty SI table maps
+// are legacy/no-op and are intentionally not activated by the caller.
+bool validateStorageIntegrity(const rewriter::RewriteTableDynamicArgs &args, std::string *error);
+
+std::optional<StorageIntegrityHit> lookupStorageIntegrity(const std::string &origin_db,
+  const std::string &origin_table,
+  const rewriter::RewriteTableDynamicArgs &args);
+
+bool isStorageIntegrityPhysicalDatabase(
+  const std::string &database, const rewriter::RewriteTableDynamicArgs &args);
+bool isStorageIntegrityLogicalDatabase(
+  const std::string &database, const rewriter::RewriteTableDynamicArgs &args);
+std::vector<std::string> storageIntegrityPhysicalDatabases(
+  const rewriter::RewriteTableDynamicArgs &args);
+std::string storageIntegrityExecutionDatabase(const rewriter::RewriteTableDynamicArgs &args);
+
+bool authorizeStorageIntegrityLogical(const std::string &origin_db,
+  const rewriter::RewriteTableDynamicArgs &args,
+  std::string *logical_database);
+
+std::string reservedRowIdColumn(const rewriter::RewriteTableDynamicArgs &args);
+std::string storageIntegrityWriteRejectMessage(const std::string &logical_key);
+std::string storageIntegrityUnauthorizedMessage(const std::string &logical_database);
+std::string storageIntegrityPhysicalRejectMessage(const std::string &physical_name);
+std::string storageIntegrityPhysicalDatabaseRejectMessage(const std::string &physical_database);
+
+std::string storageIntegritySurfaceSQL(
+  const rewriter::StorageIntegrityArgs::Table &table, const rewriter::StorageIntegrityArgs &args);
+DB::ASTPtr buildStorageIntegrityDerivedTable(
+  const rewriter::StorageIntegrityArgs::Table &table, const rewriter::StorageIntegrityArgs &args);
+std::string restoreStorageIntegrityProjectionSyntax(
+  std::string sql, const std::string &reserved_column);
+bool astReferencesIdentifier(const DB::ASTPtr &ast, const std::string &name);
+std::string describeMetadataSQL(const std::string &safe_table, const std::string &reserved_column);
+
+// Response helpers keep SI classification present on every reject, including
+// direct protocol-owned physical namespaces and unresolved indirect targets.
+void recordStorageIntegrityAccess(rewriter::RewriteSQLResponse *response,
+  const std::string &original_database,
+  const std::string &original_table,
+  const std::string &logical_database,
+  const std::string &physical_database);
+void recordLogicalStorageIntegrityAccess(rewriter::RewriteSQLResponse *response,
+  const std::string &original_database,
+  const std::string &original_table,
+  const rewriter::RewriteTableDynamicArgs &args);
+void recordPhysicalStorageIntegrityAccess(rewriter::RewriteSQLResponse *response,
+  const std::string &original_database,
+  const std::string &original_table,
+  const std::string &physical_database);
+
+enum class NamespaceRefSource {
+  TableFunction,
+  InTable,
+  TableEngine,
+  DictionarySource,
+};
+
+struct NamespaceRef {
+  NamespaceRefSource source = NamespaceRefSource::TableFunction;
+  std::string name;
+  std::string database;
+  std::string table;
+  bool resolved = false;
+  bool uses_current_database = false;
+};
+
+// Compatibility shim for SI syntax accepted by the Go parser but absent from
+// the pinned ClickHouse parser (WITH OFFSET, table alias column lists, and
+// star RENAME). It tokenizes source SQL so literals/comments cannot trigger
+// policy, rejects SI-bound wrappers, and temporarily removes ordinary-bound
+// syntax so it can be restored after the AST rewrite.
+struct StorageIntegritySQLCompatibility {
+  struct Restore {
+    enum class Kind { WithOffset, AliasColumns } kind;
+    std::string database;
+    std::string table;
+    std::string alias;
+    std::string suffix;
+  };
+  std::string original_sql;
+  std::string parse_sql;
+  std::vector<Restore> restores;
+};
+
+bool prepareStorageIntegritySQL(const std::string &sql,
+  const rewriter::RewriteTableDynamicArgs &args,
+  rewriter::RewriteSQLResponse *response,
+  StorageIntegritySQLCompatibility *compatibility);
+void restoreStorageIntegritySQL(
+  rewriter::RewriteSQLResponse *response, const StorageIntegritySQLCompatibility &compatibility);
+
+std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast);
+bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
+  const std::vector<NamespaceRef> &refs,
+  const rewriter::RewriteTableDynamicArgs &args,
+  rewriter::RewriteCode code);
+
+} // namespace rewriter_handlers

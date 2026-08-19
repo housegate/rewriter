@@ -8,6 +8,7 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -17,6 +18,12 @@ void rejectInvalid(rewriter::RewriteSQLResponse *response, const std::string &ms
   std::cerr << "[show-tables-reject] " << msg << std::endl;
   response->set_message(msg);
   response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+}
+
+void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std::string &msg) {
+  std::cerr << "[show-tables-reject] " << msg << std::endl;
+  response->set_message(msg);
+  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
 }
 
 } // namespace
@@ -62,6 +69,13 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
       "SHOW TABLES has no FROM clause and no "
       "upstream_logical_database_in_context is set; caller must send "
       "`USE <db>` or use `SHOW TABLES FROM <db>`");
+    return true;
+  }
+
+  if (isStorageIntegrityPhysicalDatabase(logical, *dynamic)) {
+    recordPhysicalStorageIntegrityAccess(response, logical, "", logical);
+    rejectUnsupported(response,
+      storageIntegrityPhysicalDatabaseRejectMessage(logical));
     return true;
   }
 

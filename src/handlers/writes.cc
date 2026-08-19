@@ -8,6 +8,7 @@
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTInsertQuery.h>
+#include <Parsers/ASTOptimizeQuery.h>
 #include <Parsers/ASTRenameQuery.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTUpdateQuery.h>
@@ -15,12 +16,14 @@
 
 #include <Interpreters/StorageID.h>
 
+#include <cctype>
 #include <iostream>
 #include <string>
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/select.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -168,6 +171,188 @@ bool alterHasCrossTableRef(const DB::ASTAlterQuery &alter_query) {
   return false;
 }
 
+bool hasActiveStorageIntegrity(const TableRewriteSelection &sel) {
+  return sel.mode == TableRewriteMode::Dynamic
+    && sel.dynamic_args->has_storage_integrity()
+    && !sel.dynamic_args->storage_integrity().tables().empty();
+}
+
+bool rejectStorageIntegrityWriteTarget(
+  rewriter::RewriteSQLResponse *response,
+  const TableRewriteSelection &sel,
+  const std::string &database,
+  const std::string &table,
+  bool allow_authorized_insert) {
+  if (!hasActiveStorageIntegrity(sel) || table.empty()) return false;
+  const auto &args = *sel.dynamic_args;
+  if (auto hit = lookupStorageIntegrity(database, table, args)) {
+    recordAccessedTable(response, database, table, sel);
+    std::string logical;
+    if (!authorizeStorageIntegrityLogical(database, args, &logical)) {
+      rejectInvalidRequest(response, storageIntegrityUnauthorizedMessage(logical));
+      return true;
+    }
+    if (allow_authorized_insert) {
+      response->mutable_original_accessed_tables()->RemoveLast();
+      return false;
+    }
+    rejectUnsupported(response,
+      storageIntegrityWriteRejectMessage(hit->logical_key));
+    return true;
+  }
+  const std::string physical = database.empty()
+    ? storageIntegrityExecutionDatabase(args) : database;
+  if (!isStorageIntegrityPhysicalDatabase(physical, args)) return false;
+  recordAccessedTable(response, database, table, sel);
+  rejectUnsupported(response, storageIntegrityPhysicalRejectMessage(
+    physical + "." + table));
+  return true;
+}
+
+bool rejectStorageIntegrityWriteDatabase(
+  rewriter::RewriteSQLResponse *response,
+  const TableRewriteSelection &sel,
+  const std::string &database) {
+  if (!hasActiveStorageIntegrity(sel)
+      || !isStorageIntegrityPhysicalDatabase(database, *sel.dynamic_args)) {
+    return false;
+  }
+  recordPhysicalStorageIntegrityAccess(response, database, "", database);
+  rejectUnsupported(response,
+    storageIntegrityPhysicalDatabaseRejectMessage(database));
+  return true;
+}
+
+DB::ASTPtr ownedChild(const DB::IAST &parent, const DB::IAST *child) {
+  if (!child) return nullptr;
+  for (const auto &candidate : parent.children)
+    if (candidate.get() == child) return candidate;
+  return nullptr;
+}
+
+// Run before every statement-specific generic reject. A non-Success response
+// without SI metadata can be forwarded by legacy fail-open consumers, so the
+// protocol-owned target must win over multi-target/cross-table/bare rejects.
+bool preflightStorageIntegrityWrite(
+  const DB::ASTPtr &ast,
+  const TableRewriteSelection &sel,
+  rewriter::RewriteSQLResponse *response) {
+  if (!hasActiveStorageIntegrity(sel)) return false;
+  const auto &args = *sel.dynamic_args;
+
+  auto reject_namespaces = [&] {
+    return rejectStorageIntegrityNamespaces(
+      response, collectStorageIntegrityNamespaceRefs(ast), args,
+      rewriter::RewriteCode::UnsupportedStatement);
+  };
+
+  if (auto *create = ast->as<DB::ASTCreateQuery>()) {
+    if (reject_namespaces()) return true;
+    if (!create->table) {
+      return rejectStorageIntegrityWriteDatabase(
+        response, sel, create->getDatabase());
+    }
+    if (rejectStorageIntegrityWriteTarget(
+          response, sel, create->getDatabase(), create->getTable(), false)) {
+      return true;
+    }
+    if (!create->as_table.empty()
+        && rejectStorageIntegrityWriteTarget(
+          response, sel, create->as_database, create->as_table, false)) {
+      return true;
+    }
+    if (!create->is_ordinary_view && !create->is_materialized_view
+        && create->select) {
+      if (auto body = ownedChild(*create, create->select);
+          body && rejectEmbeddedStorageIntegrityRead(body, sel, response)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (auto *drop = ast->as<DB::ASTDropQuery>()) {
+    if (drop->database_and_tables) {
+      for (const auto &single : drop->getRewrittenASTsOfSingleTable()) {
+        const auto *one = single->as<DB::ASTDropQuery>();
+        if (one && rejectStorageIntegrityWriteTarget(
+              response, sel, one->getDatabase(), one->getTable(), false)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (!drop->table) {
+      return rejectStorageIntegrityWriteDatabase(
+        response, sel, drop->getDatabase());
+    }
+    return rejectStorageIntegrityWriteTarget(
+      response, sel, drop->getDatabase(), drop->getTable(), false);
+  }
+
+  if (auto *alter = ast->as<DB::ASTAlterQuery>()) {
+    if (rejectStorageIntegrityWriteTarget(
+          response, sel, alter->getDatabase(), alter->getTable(), false)) {
+      return true;
+    }
+    if (alter->command_list) {
+      for (const auto &raw : alter->command_list->children) {
+        const auto *command = raw->as<DB::ASTAlterCommand>();
+        if (!command) continue;
+        if (rejectStorageIntegrityWriteTarget(
+              response, sel, command->from_database,
+              command->from_table, false)
+            || rejectStorageIntegrityWriteTarget(
+              response, sel, command->to_database,
+              command->to_table, false)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  if (auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    if (reject_namespaces()) return true;
+    if (insert->table && rejectStorageIntegrityWriteTarget(
+          response, sel, insert->getDatabase(), insert->getTable(), true)) {
+      return true;
+    }
+    if (insert->select) {
+      if (rejectEmbeddedStorageIntegrityRead(
+            insert->select, sel, response)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (auto *rename = ast->as<DB::ASTRenameQuery>()) {
+    for (const auto &element : rename->getElements()) {
+      if (rename->database) {
+        if (rejectStorageIntegrityWriteDatabase(
+              response, sel, element.from.getDatabase())
+            || rejectStorageIntegrityWriteDatabase(
+              response, sel, element.to.getDatabase())) return true;
+      } else if (rejectStorageIntegrityWriteTarget(
+                   response, sel, element.from.getDatabase(),
+                   element.from.getTable(), false)
+                 || rejectStorageIntegrityWriteTarget(
+                   response, sel, element.to.getDatabase(),
+                   element.to.getTable(), false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (auto *optimize = ast->as<DB::ASTOptimizeQuery>()) {
+    return rejectStorageIntegrityWriteTarget(
+      response, sel, optimize->getDatabase(), optimize->getTable(), false);
+  }
+  return false;
+}
+
 // Rewrite one side of a RENAME element. Returns false on reject (response
 // already populated). Mutates side.database / side.table in place per the
 // active TableNameRewrite mode.
@@ -239,6 +424,8 @@ WriteDispatchResult handleViewCreate(
     }
     if (body) {
       rewriteEmbeddedViewBody(request->options(), body, response);
+      if (response->code() != rewriter::RewriteCode::Success)
+        return WriteDispatchResult::Rejected;
     }
   }
 
@@ -261,6 +448,9 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   // requests in the same call wouldn't expect static_args to suppress the
   // db-level dynamic_args validation.
   const auto *dynamic = findDynamicArgs(request->options());
+
+  if (preflightStorageIntegrityWrite(ast, sel, response))
+    return WriteDispatchResult::Rejected;
 
   if (auto *create_query = ast->as<DB::ASTCreateQuery>()) {
     if (create_query->is_live_view || create_query->is_window_view) {
@@ -529,6 +719,15 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     // wire-format data" mode and hang the client).
     std::string sql = formatAst(ast);
     if (insert_query->data && insert_query->end > insert_query->data) {
+      if (insert_query->format == "Values") {
+        const std::string suffix = " FORMAT Values";
+        if (sql.size() >= suffix.size()
+            && sql.compare(sql.size() - suffix.size(), suffix.size(), suffix) == 0) {
+          sql.replace(sql.size() - suffix.size(), suffix.size(), " VALUES");
+        }
+      }
+      if (!sql.empty()
+          && !std::isspace(static_cast<unsigned char>(sql.back()))) sql += ' ';
       sql.append(insert_query->data,
                  static_cast<size_t>(insert_query->end - insert_query->data));
     }

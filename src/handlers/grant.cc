@@ -13,6 +13,7 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -80,6 +81,54 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
   const bool is_revoke = grant->is_revoke;
   const std::string_view kind = is_revoke ? "REVOKE" : "GRANT";
 
+  // SI classification must precede every generic GRANT/REVOKE reject,
+  // including ATTACH GRANT and database scope. Legacy consumers fail closed
+  // only when the rejection carries an SI access marker.
+  const auto selection = findActiveTableRewrite(request->options());
+  const auto *dynamic = findDynamicArgs(request->options());
+  if (selection.mode == TableRewriteMode::Dynamic
+      && selection.dynamic_args->has_storage_integrity()
+      && !selection.dynamic_args->storage_integrity().tables().empty()) {
+    const auto &args = *selection.dynamic_args;
+    for (const auto &elem : grant->access_rights_elements) {
+      const std::string original_database = elem.default_database
+        ? std::string() : elem.database;
+      const std::string effective_database = original_database.empty()
+        ? args.upstream_logical_database_in_context() : original_database;
+      if (elem.anyTable()
+          && isStorageIntegrityPhysicalDatabase(effective_database, args)) {
+        recordPhysicalStorageIntegrityAccess(
+          response, effective_database, "", effective_database);
+        rejectUnsupported(response,
+          storageIntegrityPhysicalDatabaseRejectMessage(effective_database));
+        return GrantDispatchResult::Rejected;
+      }
+      if (elem.anyTable()) continue;
+      if (isStorageIntegrityPhysicalDatabase(effective_database, args)) {
+        recordAccessedTable(
+          response, original_database, elem.table, selection);
+        rejectUnsupported(response, storageIntegrityPhysicalRejectMessage(
+          effective_database + "." + elem.table));
+        return GrantDispatchResult::Rejected;
+      }
+      if (auto hit = lookupStorageIntegrity(
+            original_database, elem.table, args)) {
+        recordAccessedTable(
+          response, original_database, elem.table, selection);
+        std::string logical;
+        if (!authorizeStorageIntegrityLogical(
+              original_database, args, &logical)) {
+          rejectInvalidRequest(response,
+            storageIntegrityUnauthorizedMessage(logical));
+        } else {
+          rejectUnsupported(response,
+            storageIntegrityWriteRejectMessage(hit->logical_key));
+        }
+        return GrantDispatchResult::Rejected;
+      }
+    }
+  }
+
   // ATTACH GRANT is internal (CH loads users from disk). User SQL never
   // sets it, but reject defensively rather than treat as a regular grant.
   if (grant->attach_mode) {
@@ -107,7 +156,6 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
   }
 
   // Validation context.
-  const auto *dynamic = findDynamicArgs(request->options());
   if (!dynamic) {
     rejectUnsupported(response,
       std::string(kind)

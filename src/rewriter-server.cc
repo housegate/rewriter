@@ -21,12 +21,15 @@
 #include "handlers/common.h"
 #include "handlers/exists.h"
 #include "handlers/materialize.h"
+#include "handlers/name_rewrite.h"
 #include "handlers/grant.h"
 #include "handlers/join_swap.h"
 #include "handlers/select.h"
 #include "handlers/show_create.h"
 #include "handlers/show_databases.h"
 #include "handlers/show_tables.h"
+#include "handlers/storage_integrity.h"
+#include "handlers/describe.h"
 #include "handlers/use.h"
 #include "handlers/writes.h"
 #include "query_preprocessor.h"
@@ -326,10 +329,66 @@ void RewriterServiceImpl::doRewrite(
     }
   } _access_log{sql_id, response, t0, original_query.size()};
 
+  // Positive SI v1 proof is selected by the same last-wins table-rewrite
+  // option as the handlers. Validate the entire active contract before
+  // publishing acknowledgement, then stamp it before preprocessing/parsing so
+  // syntax errors and every handler rejection retain the proof.
+  const auto si_selection =
+    rewriter_handlers::findActiveTableRewrite(request->options());
+  const bool si_active =
+    si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+    && si_selection.dynamic_args->has_storage_integrity()
+    && !si_selection.dynamic_args->storage_integrity().tables().empty();
+  if (si_active) {
+    const auto &si = si_selection.dynamic_args->storage_integrity();
+    std::string validation_error;
+    if (si.contract_version()
+          != rewriter::STORAGE_INTEGRITY_CONTRACT_V1) {
+      response->set_sql_after_rewrite(original_query);
+      response->set_message(std::string(
+        rewriter_handlers::kStorageIntegrityContractMessage));
+      response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+      return;
+    }
+    if (!rewriter_handlers::validateStorageIntegrity(
+          *si_selection.dynamic_args, &validation_error)) {
+      response->set_sql_after_rewrite(original_query);
+      response->set_message(validation_error);
+      response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+      return;
+    }
+    response->set_storage_integrity_contract_version(
+      rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  }
+
+  // Every structured rejection must echo the original SQL. Successful
+  // handlers replace this value with their formatted rewrite, while the
+  // parser catch below retains its established diagnostic sentinel.
+  response->set_sql_after_rewrite(original_query);
+
+  // The Go contract accepts a small set of SELECT/ATTACH forms that the
+  // pinned ClickHouse parser predates. Token-aware preparation rejects SI
+  // wrappers before parsing and temporarily removes ordinary wrappers. The
+  // guard restores those ordinary semantics on every successful exit path.
+  rewriter_handlers::StorageIntegritySQLCompatibility si_compatibility;
+  si_compatibility.original_sql = original_query;
+  si_compatibility.parse_sql = original_query;
+  if (si_active && rewriter_handlers::prepareStorageIntegritySQL(
+        original_query, *si_selection.dynamic_args, response,
+        &si_compatibility)) return;
+  struct StorageIntegrityRestoreGuard {
+    RewriteSQLResponse *response;
+    const rewriter_handlers::StorageIntegritySQLCompatibility *compatibility;
+    ~StorageIntegrityRestoreGuard() {
+      rewriter_handlers::restoreStorageIntegritySQL(response, *compatibility);
+    }
+  } _si_restore{response, &si_compatibility};
+
   // Preprocess the query to split large IN clauses. The preprocessor logs a
   // single [preprocess] line only when it actually transformed the SQL; the
   // no-op path is silent and covered by the [access] line at function exit.
-  String query = QueryPreprocessor::preprocess(original_query, sql_id);
+  String query = QueryPreprocessor::preprocess(
+    si_compatibility.parse_sql, sql_id);
 
   const char *pos = query.data();
   const char *end = pos + query.size();
@@ -370,6 +429,7 @@ void RewriterServiceImpl::doRewrite(
         == rewriter_handlers::ShowCreateDispatchResult::Handled) {
       return;
     }
+    if (rewriter_handlers::handleDescribeQuery(ast, request, response)) return;
     switch (rewriter_handlers::handleGrantQuery(ast, request, response)) {
       case rewriter_handlers::GrantDispatchResult::Handled:
       case rewriter_handlers::GrantDispatchResult::Rejected:

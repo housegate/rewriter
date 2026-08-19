@@ -19,11 +19,13 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "ASTTransformers.h"
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/storage_integrity.h"
 
 namespace rewriter_handlers {
 
@@ -33,6 +35,148 @@ struct AccessedTablePair {
   std::string original_db;     // empty when the SQL didn't qualify the table.
   std::string original_table;
 };
+
+void populateAccessedTables(
+  const std::map<std::string, AccessedTablePair> &originals,
+  const TableRewriteSelection &selection,
+  rewriter::RewriteSQLResponse *response) {
+  for (const auto &[_, pair] : originals) {
+    auto *entry = response->add_original_accessed_tables();
+    entry->set_original_database(pair.original_db);
+    entry->set_original_table(pair.original_table);
+    const auto resolution = resolveAccessedTable(
+      pair.original_db, pair.original_table, selection);
+    entry->set_logical_database(resolution.logical_database);
+    entry->set_physical_database(resolution.physical_database);
+    entry->set_is_remote(resolution.is_remote);
+    entry->set_is_storage_integrity(resolution.is_storage_integrity);
+  }
+}
+
+bool validateStorageIntegritySelectTargets(
+  const std::map<std::string, AccessedTablePair> &originals,
+  const TableRewriteSelection &selection,
+  rewriter::RewriteSQLResponse *response,
+  rewriter::RewriteCode physical_code = rewriter::RewriteCode::RewriteError) {
+  if (selection.mode != TableRewriteMode::Dynamic) return true;
+  const auto &args = *selection.dynamic_args;
+  for (const auto &[_, pair] : originals) {
+    if (auto hit = lookupStorageIntegrity(
+          pair.original_db, pair.original_table, args)) {
+      std::string logical;
+      if (!authorizeStorageIntegrityLogical(pair.original_db, args, &logical)) {
+        response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+        response->set_message(storageIntegrityUnauthorizedMessage(logical));
+        return false;
+      }
+      continue;
+    }
+    const std::string physical = pair.original_db.empty()
+      ? storageIntegrityExecutionDatabase(args) : pair.original_db;
+    if (isStorageIntegrityPhysicalDatabase(physical, args)) {
+      response->set_code(physical_code);
+      response->set_message(storageIntegrityPhysicalRejectMessage(
+        pair.original_db.empty()
+          ? pair.original_table
+          : physical + "." + pair.original_table));
+      return false;
+    }
+  }
+  return true;
+}
+
+const DB::ASTTableExpression *lastTableExpression(
+  const DB::ASTSelectQuery &select) {
+  const auto tables = select.tables();
+  const auto *list = tables ? tables->as<DB::ASTTablesInSelectQuery>() : nullptr;
+  if (!list) return nullptr;
+  for (auto it = list->children.rbegin(); it != list->children.rend(); ++it) {
+    const auto *element = (*it)->as<DB::ASTTablesInSelectQueryElement>();
+    if (!element || !element->table_expression) continue;
+    return element->table_expression->as<DB::ASTTableExpression>();
+  }
+  return nullptr;
+}
+
+bool tableExpressionTouchesStorageIntegrity(
+  const DB::ASTTableExpression &table_expression,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  const auto *identifier = table_expression.database_and_table_name
+    ? table_expression.database_and_table_name->as<DB::ASTTableIdentifier>()
+    : nullptr;
+  if (!identifier) return false;
+  const std::string full = identifier->name();
+  std::string database;
+  std::string table = full;
+  if (const auto dot = full.find('.'); dot != std::string::npos) {
+    database = full.substr(0, dot);
+    table = full.substr(dot + 1);
+  }
+  return lookupStorageIntegrity(database, table, args).has_value();
+}
+
+bool hasUnsupportedStorageIntegrityWrapper(
+  const DB::ASTPtr &ast,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  if (!ast) return false;
+  if (const auto *table_expression = ast->as<DB::ASTTableExpression>()) {
+    if (tableExpressionTouchesStorageIntegrity(*table_expression, args)
+        && (table_expression->final || table_expression->sample_size
+            || table_expression->sample_offset)) return true;
+  }
+  if (const auto *select = ast->as<DB::ASTSelectQuery>()) {
+    if (select->aliases()) {
+      const auto *last = lastTableExpression(*select);
+      if (last && tableExpressionTouchesStorageIntegrity(*last, args))
+        return true;
+    }
+  }
+  for (const auto &child : ast->children)
+    if (hasUnsupportedStorageIntegrityWrapper(child, args)) return true;
+  return false;
+}
+
+bool responseTouchesStorageIntegrity(
+  const rewriter::RewriteSQLResponse &response) {
+  for (const auto &entry : response.original_accessed_tables())
+    if (entry.is_storage_integrity()) return true;
+  return false;
+}
+
+std::string recordLogicalStorageIntegrityRewrites(
+  const std::map<std::string, AccessedTablePair> &originals,
+  const rewriter::RewriteTableDynamicArgs &args,
+  rewriter::RewriteSQLResponse *response) {
+  std::string first_key;
+  for (const auto &[origin_name, pair] : originals) {
+    if (auto hit = lookupStorageIntegrity(
+          pair.original_db, pair.original_table, args)) {
+      (*response->mutable_table_rewrites())[origin_name] =
+        hit->table->safe_table();
+      if (first_key.empty()) first_key = hit->logical_key;
+    }
+  }
+  return first_key;
+}
+
+void recordStorageIntegrityPairUnique(
+  rewriter::RewriteSQLResponse *response,
+  const AccessedTablePair &pair,
+  const TableRewriteSelection &selection) {
+  for (const auto &entry : response->original_accessed_tables()) {
+    if (entry.original_database() == pair.original_db
+        && entry.original_table() == pair.original_table) return;
+  }
+  auto *entry = response->add_original_accessed_tables();
+  entry->set_original_database(pair.original_db);
+  entry->set_original_table(pair.original_table);
+  const auto resolved = resolveAccessedTable(
+    pair.original_db, pair.original_table, selection);
+  entry->set_logical_database(resolved.logical_database);
+  entry->set_physical_database(resolved.physical_database);
+  entry->set_is_remote(resolved.is_remote);
+  entry->set_is_storage_integrity(resolved.is_storage_integrity);
+}
 
 // Collect bare CTE aliases declared by the WITH clause of a SELECT into
 // `out_aliases`. Returns true when at least one alias was added — the caller
@@ -189,6 +333,24 @@ void dynamicRewriteWalk(
           origin_table = origin_full_name.substr(dot + 1);
         } else {
           origin_table = origin_full_name;
+        }
+
+        if (auto hit = lookupStorageIntegrity(origin_db, origin_table, args)) {
+          // Spec G: the SI physical mapping wins over database_map and remote
+          // routing. Replace only the table node and never descend into the
+          // synthesized hg_safe/hg_unsafe surface.
+          auto subquery = buildStorageIntegrityDerivedTable(
+            *hit->table, args.storage_integrity());
+          table_expression->children.clear();
+          table_expression->database_and_table_name = nullptr;
+          table_expression->table_function = nullptr;
+          table_expression->subquery = subquery;
+          table_expression->children.push_back(subquery);
+          subquery->setAlias(origin_alias.empty()
+            ? origin_full_name : origin_alias);
+          if (out_table_rewrites)
+            (*out_table_rewrites)[origin_full_name] = hit->table->safe_table();
+          return;
         }
 
         const auto outcome = applyDynamicRewrite(
@@ -790,6 +952,31 @@ void handleSelectQuery(DB::ASTPtr ast,
   // option-config, not AST state, so there's no ordering hazard.
   const auto selection = findActiveTableRewrite(request->options());
 
+  // Classification is established before any reject or AST mutation. This is
+  // the downstream fail-closed proof for unauthorized logical SI targets and
+  // direct protocol-owned physical namespace attempts.
+  populateAccessedTables(originals, selection, response);
+  if (!validateStorageIntegritySelectTargets(originals, selection, response))
+    return;
+  if (selection.mode == TableRewriteMode::Dynamic) {
+    const auto &args = *selection.dynamic_args;
+    if (rejectStorageIntegrityNamespaces(
+          response, collectStorageIntegrityNamespaceRefs(ast), args,
+          rewriter::RewriteCode::RewriteError)) return;
+    if (hasUnsupportedStorageIntegrityWrapper(ast, args)) {
+      response->set_code(rewriter::RewriteCode::RewriteError);
+      response->set_message(std::string(kStorageIntegrityWrapperMessage));
+      return;
+    }
+    if (responseTouchesStorageIntegrity(*response)
+        && astReferencesIdentifier(ast, reservedRowIdColumn(args))) {
+      const std::string rid = reservedRowIdColumn(args);
+      response->set_code(rewriter::RewriteCode::RewriteError);
+      response->set_message("reserved column " + rid + " is not addressable");
+      return;
+    }
+  }
+
   std::map<std::string, std::string> table_rewrites;
   ast = applyRewriteOptions(request->options(), ast, &preparsed_cte_ast_maps, &table_rewrites);
 
@@ -802,16 +989,6 @@ void handleSelectQuery(DB::ASTPtr ast,
     std::cout << "after forceGlobalForRemoteAsymmetry " << ast->dumpTree() << std::endl;
   }
 
-  for (const auto &[_, pair] : originals) {
-    auto *entry = response->add_original_accessed_tables();
-    entry->set_original_database(pair.original_db);
-    entry->set_original_table(pair.original_table);
-    const auto resolution = resolveAccessedTable(
-      pair.original_db, pair.original_table, selection);
-    entry->set_logical_database(resolution.logical_database);
-    entry->set_physical_database(resolution.physical_database);
-    entry->set_is_remote(resolution.is_remote);
-  }
   auto *resp_rewrites = response->mutable_table_rewrites();
   for (const auto &[k, v] : table_rewrites) {
     // Only record entries where the rewrite actually changed the name —
@@ -820,7 +997,57 @@ void handleSelectQuery(DB::ASTPtr ast,
       (*resp_rewrites)[k] = v;
     }
   }
-  setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SELECT);
+  std::string sql = formatAst(ast);
+  if (selection.mode == TableRewriteMode::Dynamic
+      && responseTouchesStorageIntegrity(*response)) {
+    sql = restoreStorageIntegrityProjectionSyntax(
+      std::move(sql), reservedRowIdColumn(*selection.dynamic_args));
+  }
+  setSuccessResponse(response, sql, rewriter::STATEMENT_TYPE_SELECT);
+}
+
+bool rejectEmbeddedStorageIntegrityRead(
+  DB::ASTPtr body,
+  const TableRewriteSelection &selection,
+  rewriter::RewriteSQLResponse *response,
+  rewriter::RewriteCode code) {
+  if (!body || selection.mode != TableRewriteMode::Dynamic
+      || !selection.dynamic_args->has_storage_integrity()
+      || selection.dynamic_args->storage_integrity().tables().empty()) {
+    return false;
+  }
+  const auto &args = *selection.dynamic_args;
+  std::map<std::string, AccessedTablePair> originals;
+  collectAccessedTablePairsFromAST(body, originals);
+  for (const auto &[_, pair] : originals) {
+    if (auto hit = lookupStorageIntegrity(
+          pair.original_db, pair.original_table, args)) {
+      recordStorageIntegrityPairUnique(response, pair, selection);
+      std::string logical;
+      if (!authorizeStorageIntegrityLogical(pair.original_db, args, &logical)) {
+        response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+        response->set_message(storageIntegrityUnauthorizedMessage(logical));
+      } else {
+        response->set_code(code);
+        response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+      }
+      return true;
+    }
+    const std::string physical = pair.original_db.empty()
+      ? storageIntegrityExecutionDatabase(args) : pair.original_db;
+    if (isStorageIntegrityPhysicalDatabase(physical, args)) {
+      recordStorageIntegrityPairUnique(response, pair, selection);
+      response->set_code(code);
+      response->set_message(storageIntegrityPhysicalRejectMessage(
+        physical + "." + pair.original_table));
+      return true;
+    }
+  }
+  if (rejectStorageIntegrityNamespaces(
+        response, collectStorageIntegrityNamespaceRefs(body), args, code)) {
+    return true;
+  }
+  return false;
 }
 
 void rewriteEmbeddedViewBody(
@@ -854,6 +1081,29 @@ void rewriteEmbeddedViewBody(
 
   const auto selection = findActiveTableRewrite(options);
 
+  populateAccessedTables(originals, selection, response);
+  if (!validateStorageIntegritySelectTargets(
+        originals, selection, response,
+        rewriter::RewriteCode::UnsupportedStatement)) return;
+  if (selection.mode == TableRewriteMode::Dynamic) {
+    const auto &args = *selection.dynamic_args;
+    if (rejectStorageIntegrityNamespaces(
+          response, collectStorageIntegrityNamespaceRefs(body), args,
+          rewriter::RewriteCode::UnsupportedStatement)) return;
+    if (const std::string key = recordLogicalStorageIntegrityRewrites(
+          originals, args, response);
+        !key.empty()) {
+      response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+      response->set_message(storageIntegrityWriteRejectMessage(key));
+      return;
+    }
+    if (hasUnsupportedStorageIntegrityWrapper(body, args)) {
+      response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+      response->set_message(std::string(kStorageIntegrityWrapperMessage));
+      return;
+    }
+  }
+
   std::map<std::string, std::string> table_rewrites;
   body = applyRewriteOptions(options, body, &preparsed_cte_ast_maps,
                              &table_rewrites);
@@ -862,16 +1112,6 @@ void rewriteEmbeddedViewBody(
   // with a local table would otherwise fail on the remote shard.
   forceGlobalForRemoteAsymmetry(body);
 
-  for (const auto &[_, pair] : originals) {
-    auto *entry = response->add_original_accessed_tables();
-    entry->set_original_database(pair.original_db);
-    entry->set_original_table(pair.original_table);
-    const auto resolution = resolveAccessedTable(
-      pair.original_db, pair.original_table, selection);
-    entry->set_logical_database(resolution.logical_database);
-    entry->set_physical_database(resolution.physical_database);
-    entry->set_is_remote(resolution.is_remote);
-  }
   auto *resp_rewrites = response->mutable_table_rewrites();
   for (const auto &[k, v] : table_rewrites) {
     if (k != v) (*resp_rewrites)[k] = v;
