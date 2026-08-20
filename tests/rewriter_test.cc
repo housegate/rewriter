@@ -4,6 +4,7 @@
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
 #include <Poco/JSON/Parser.h>
+#include <DataTypes/DataTypesDecimal.h>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <fstream>
@@ -2254,6 +2255,51 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
   };
 }
 
+// ============================================================================
+// ClickHouse 26.3 dependency coverage — Decimal512 syntax.
+//
+// Parser-only SQL tests cannot prove that Decimal512 is implemented: ClickHouse
+// accepts unknown type and function names syntactically. The first test therefore
+// references the fork-only C++ type directly; compiling this test is the actual
+// dependency-pin guard. The SQL cases protect the rewriter-facing syntax paths.
+// ============================================================================
+
+TEST(ClickHouseDependency, Decimal512TypeIsAvailable) {
+  DB::DataTypeDecimal512 type(/*precision=*/154, /*scale=*/18);
+
+  EXPECT_EQ(type.getTypeId(), DB::TypeIndex::Decimal512);
+  EXPECT_EQ(type.getPrecision(), 154u);
+  EXPECT_EQ(type.getScale(), 18u);
+  EXPECT_EQ(DB::DataTypeDecimal512::maxPrecision(), 154u);
+}
+
+TEST(ClickHouseDependency, Decimal512SelectParsesSuccessfully) {
+  auto resp = RunNoOptions(
+    "SELECT toDecimal512('123456789012345678901234567890.123456789012345678', 18)");
+
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SELECT);
+}
+
+TEST(ClickHouseDependency, CreateTableDecimal512ParsesSuccessfully) {
+  auto r = RunWriteOp(
+    "CREATE TABLE chain_events (amount Decimal512(18)) ENGINE=Memory");
+
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success) << r.message;
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_CREATE_TABLE);
+  EXPECT_EQ(r.original_accessed_count, 1);
+}
+
+TEST(ClickHouseDependency, InsertSelectDecimal512ParsesSuccessfully) {
+  auto r = RunWriteOp(
+    "INSERT INTO chain_events "
+    "SELECT toDecimal512('1000000.000000000000000001', 18)");
+
+  EXPECT_EQ(r.code, rewriter::RewriteCode::Success) << r.message;
+  EXPECT_EQ(r.statement_type, rewriter::STATEMENT_TYPE_INSERT);
+  EXPECT_EQ(r.original_accessed_count, 1);
+}
+
 // --- CREATE TABLE ---
 
 TEST(WriteOp, CreateTable_Simple) {
@@ -4034,6 +4080,41 @@ TEST(View, CreateLiveView_Unsupported) {
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
 }
 
+TEST(View, CreateLiveViewIfNotExists_ReportsExistenceClause) {
+  const std::string sql = "CREATE LIVE VIEW IF NOT EXISTS lv AS SELECT 1";
+  auto resp = RunNoOptions(sql);
+
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_EQ(resp.existence_clause(), rewriter::EXISTENCE_CLAUSE_IF_NOT_EXISTS);
+  EXPECT_EQ(resp.sql_after_rewrite(), sql);
+}
+
+TEST(View, CreateLiveViewWithSQLSecurity_Unsupported) {
+  auto resp = RunNoOptions(
+    "CREATE SQL SECURITY DEFINER LIVE VIEW lv AS SELECT 1");
+
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+}
+
+TEST(View, MaterializedViewColumnNamedLiveDoesNotTriggerCompatibility) {
+  auto resp = RunNoOptions(
+    "CREATE MATERIALIZED VIEW mv (live View) AS SELECT 1");
+
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.statement_type(),
+            rewriter::STATEMENT_TYPE_CREATE_MATERIALIZED_VIEW);
+}
+
+TEST(View, AttachLiveView_Unsupported) {
+  auto resp = RunNoOptions("ATTACH LIVE VIEW lv AS SELECT 1");
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+}
+
+TEST(View, MalformedCreateLiveView_RemainsSyntaxError) {
+  auto resp = RunNoOptions("CREATE LIVE VIEW");
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::SyntaxError);
+}
+
 TEST(View, CreateWindowView_Unsupported) {
   auto resp = RunNoOptions(
     "CREATE WINDOW VIEW wv AS "
@@ -4414,6 +4495,21 @@ TEST(StorageIntegrityContract, AcknowledgesValidAndSyntaxErrorPaths) {
     EXPECT_EQ(resp.code(), sql == "SELECT 1" ? rewriter::RewriteCode::Success
                                              : rewriter::RewriteCode::SyntaxError);
   }
+}
+
+TEST(StorageIntegrityContract, RemovedLiveViewPreservesPreflightMetadata) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("CREATE LIVE VIEW analytics.lv AS SELECT * FROM db1.t");
+  AddSIContractOption(req);
+
+  const auto resp = RunDirectRewrite(std::move(req));
+
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+  const auto *accessed = FindAccessed(resp, "db1", "t");
+  ASSERT_NE(accessed, nullptr);
+  EXPECT_TRUE(accessed->is_storage_integrity());
 }
 
 TEST(StorageIntegrityContract, RejectsMissingAndUnknownBeforeAcknowledgement) {

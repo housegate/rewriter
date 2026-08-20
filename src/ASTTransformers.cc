@@ -162,11 +162,11 @@ void ASTReplaceTransformer::transform(ASTPtr &ast) const {
       case TableRewriteKind::Remote: {
         // use remote() function to replace table identifier
         const auto &remote_table = plan.remote;
-        auto addr = std::make_shared<ASTLiteral>(remote_table.addr);
-        auto database_name = std::make_shared<ASTLiteral>(remote_table.database_name);
-        auto table_name = std::make_shared<ASTLiteral>(remote_table.table_name);
-        auto user_name = std::make_shared<ASTLiteral>(remote_table.user_name);
-        auto password = std::make_shared<ASTLiteral>(remote_table.password);
+        auto addr = makeRewriterAST<ASTLiteral>(remote_table.addr);
+        auto database_name = makeRewriterAST<ASTLiteral>(remote_table.database_name);
+        auto table_name = makeRewriterAST<ASTLiteral>(remote_table.table_name);
+        auto user_name = makeRewriterAST<ASTLiteral>(remote_table.user_name);
+        auto password = makeRewriterAST<ASTLiteral>(remote_table.password);
         table_expression->children.clear();
         table_expression->database_and_table_name = nullptr;
         table_expression->table_function =
@@ -265,7 +265,7 @@ std::unordered_set<String> ASTRewriteCTETransformer::collectCTEKeysForSelect(
 
     for (auto &ch : n->children) dfs(ch);
   };
-  const ASTPtr root = const_cast<DB::ASTSelectQuery *>(select_ast)->shared_from_this();
+  const ASTPtr root = const_cast<DB::ASTSelectQuery *>(select_ast)->ptr();
   dfs(root);
 
   return used;
@@ -275,7 +275,7 @@ std::unordered_set<String> ASTRewriteCTETransformer::collectCTEKeysForSelect(
 ASTPtr ASTRewriteCTETransformer::buildWithList(
   const DB::ASTSelectQuery *select_ast, const std::unordered_set<String> &used_key) const {
   if (!select_ast || used_key.empty()) return nullptr;
-  auto list = std::make_shared<ASTExpressionList>();
+  auto list = makeRewriterAST<ASTExpressionList>();
   const std::unordered_map<String, ASTPtr> *cte_ast_map_ptr = &cte_ast_map;
   std::unordered_map<String, ASTPtr> local_cte_ast_map;
   if (!cte_ast_map_set && cte_ast_map_ptr->empty()) {
@@ -291,11 +291,11 @@ ASTPtr ASTRewriteCTETransformer::buildWithList(
     ASTPtr sub_ast = it->second;
     if (!sub_ast) continue;
 
-    const auto sub = std::make_shared<ASTSubquery>();
+    const auto sub = makeRewriterAST<ASTSubquery>();
     sub->children.clear();
     sub->children.push_back(sub_ast);
 
-    auto elem = std::make_shared<ASTWithElement>();
+    auto elem = makeRewriterAST<ASTWithElement>();
     elem->name = alias;
     elem->subquery = sub;
     elem->children.clear();

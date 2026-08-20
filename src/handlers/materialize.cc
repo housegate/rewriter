@@ -20,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "ASTTransformers.h"
 #include "handlers/common.h"
 
 namespace rewriter_handlers {
@@ -42,10 +43,10 @@ std::string toLower(std::string s) {
 
 // Literal-node builders. Integers/strings render through ClickHouse's formatter
 // exactly as the rewriter-go contract expects (e.g. "1710000000", "'UTC'").
-ASTPtr litI(int64_t v)  { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<Int64>(v))); }
-ASTPtr litU(uint64_t v) { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<UInt64>(v))); }
-ASTPtr litF(double v)   { return std::make_shared<DB::ASTLiteral>(DB::Field(static_cast<Float64>(v))); }
-ASTPtr litS(const std::string &v) { return std::make_shared<DB::ASTLiteral>(DB::Field(v)); }
+ASTPtr litI(int64_t v)  { return DB::makeRewriterAST<DB::ASTLiteral>(DB::Field(static_cast<Int64>(v))); }
+ASTPtr litU(uint64_t v) { return DB::makeRewriterAST<DB::ASTLiteral>(DB::Field(static_cast<UInt64>(v))); }
+ASTPtr litF(double v)   { return DB::makeRewriterAST<DB::ASTLiteral>(DB::Field(static_cast<Float64>(v))); }
+ASTPtr litS(const std::string &v) { return DB::makeRewriterAST<DB::ASTLiteral>(DB::Field(v)); }
 
 constexpr int64_t kNanosPerSecond = 1'000'000'000;
 constexpr int64_t kNanosPerMilli = 1'000'000;

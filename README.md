@@ -79,7 +79,7 @@ Linux box. The `scripts.sh` wrapper handles dependency install and the
 submodule quirks.
 
 ```shell
-./scripts.sh prepare          # install toolchain (LLVM 19/20, cmake, ninja, mold, ...)
+./scripts.sh prepare          # install toolchain (LLVM 22+, cmake, ninja, mold, ...)
 ./scripts.sh build            # full clean build (first time, ~15-20 min)
 ./scripts.sh rebuild          # incremental (day-to-day, seconds to a few min)
 ./scripts.sh test             # build + ctest
@@ -194,7 +194,7 @@ image is built and pushed by the CI workflow; manual local builds use
 ## Build-box coordination
 
 There's a single dedicated build host. Both the CI workdir
-(`~/ci/sql-rewriter`) and the developer workdir share the same ClickHouse
+(`~/ci/rewriter`) and the developer workdir share the same ClickHouse
 submodule via a symlink to save disk. Two concurrent `./scripts.sh build` runs
 will race on submodule patches. If a release workflow is in flight, hold off
 on local builds on the same host until it's green — the CI job's

@@ -16,6 +16,9 @@
 // rejected — remote_table_map is SELECT-only.
 #pragma once
 #include <Parsers/IAST.h>
+
+#include <string>
+
 #include "rewriter.grpc.pb.h"
 
 namespace rewriter_handlers {
@@ -25,6 +28,14 @@ enum class WriteDispatchResult {
   Rejected,    // Rejected: response holds RewriteError + message. Caller returns.
   NotAWrite,   // Not a write statement - caller falls through to SELECT.
 };
+
+// ClickHouse 26.3 removed LIVE VIEW from ParserQuery. Preserve the rewriter's
+// established classification and storage-integrity preflight for syntactically
+// valid CREATE/ATTACH LIVE VIEW statements before the normal parse path.
+bool handleRemovedLiveViewCompatibility(
+  const std::string &query,
+  const rewriter::RewriteSQLRequest *request,
+  rewriter::RewriteSQLResponse *response);
 
 WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
                                      const rewriter::RewriteSQLRequest *request,

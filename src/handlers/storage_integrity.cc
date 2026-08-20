@@ -22,6 +22,7 @@
 #include <string_view>
 #include <utility>
 
+#include "ASTTransformers.h"
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
 
@@ -762,7 +763,7 @@ DB::ASTPtr buildStorageIntegrityDerivedTable(
   DB::ParserSelectWithUnionQuery parser;
   DB::ASTPtr select =
     DB::parseQuery(parser, sql.data(), sql.data() + sql.size(), /*description=*/"", 0, 0, 0);
-  return std::make_shared<DB::ASTSubquery>(select);
+  return DB::makeRewriterAST<DB::ASTSubquery>(select);
 }
 
 std::string restoreStorageIntegrityProjectionSyntax(

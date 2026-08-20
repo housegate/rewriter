@@ -65,9 +65,11 @@ prepare() {
                 git cmake ccache python3 ninja-build mold \
                 nasm yasm gawk lsb-release wget software-properties-common gnupg
             echo ">>> Installing LLVM via apt.llvm.org"
-            sudo bash -c "$(wget -qO- https://apt.llvm.org/llvm.sh)"
-            export CC=clang-20
-            export CXX=clang++-20
+            # ClickHouse 26.3 requires Clang >= 21 (cmake/tools.cmake). Install and
+            # use Clang 22, matching the reference sql-rewriter's 26.3 build.
+            wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
+            export CC=clang-22
+            export CXX=clang++-22
             ;;
         Darwin*)
             echo ">>> Detected macOS, using Homebrew"
@@ -76,11 +78,13 @@ prepare() {
                 exit 1
             fi
             brew update
-            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm@19 mold
-            export CC="/opt/homebrew/opt/llvm@19/bin/clang"
-            export CXX="/opt/homebrew/opt/llvm@19/bin/clang++"
-            export CPPFLAGS="-I/opt/homebrew/opt/llvm@19/include"
-            export PATH="/opt/homebrew/opt/llvm@19/bin:$PATH"
+            brew install ccache cmake ninja libtool gettext binutils grep findutils nasm bash llvm mold
+            local llvm_prefix
+            llvm_prefix="$(brew --prefix llvm)"
+            export CC="${llvm_prefix}/bin/clang"
+            export CXX="${llvm_prefix}/bin/clang++"
+            export CPPFLAGS="-I${llvm_prefix}/include"
+            export PATH="${llvm_prefix}/bin:$PATH"
             ;;
         *)
             echo "Unsupported OS: $(uname -s)"
@@ -112,12 +116,24 @@ build() {
     ensure_symlinks
 
     echo ">>> [3/5] Configure CMake (ThinLTO off, mold linker)"
+    local compiler_target_args=()
+    if [[ "$(uname -s)" == Linux* && "$(uname -m)" == "x86_64" ]]; then
+        compiler_target_args=(
+          -DCMAKE_C_COMPILER_TARGET=x86_64-linux-gnu
+          -DCMAKE_CXX_COMPILER_TARGET=x86_64-linux-gnu
+          -DCMAKE_ASM_COMPILER_TARGET=x86_64-linux-gnu
+        )
+    fi
     cmake -B build -S . -GNinja \
       -DENABLE_RUST=OFF \
       -DENABLE_TESTS=OFF \
       -DBUILD_TESTING=ON \
       -DENABLE_THINLTO=OFF \
+      -DENABLE_LLVM_LIBC_MATH=OFF \
+      -DENABLE_XRAY=OFF \
+      -DENABLE_WASMEDGE=OFF \
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      ${compiler_target_args[@]+"${compiler_target_args[@]}"} \
       -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 
     echo ">>> [4/5] Build OpenSSL libraries"
@@ -194,12 +210,24 @@ rebuild() {
     # previous tag's version string (CMakeCache is sticky across ninja-only
     # runs) — that's how v0.0.7 used to get stamped as v0.0.6.
     echo ">>> [1/3] Refresh cmake configure"
+    local compiler_target_args=()
+    if [[ "$(uname -s)" == Linux* && "$(uname -m)" == "x86_64" ]]; then
+        compiler_target_args=(
+          -DCMAKE_C_COMPILER_TARGET=x86_64-linux-gnu
+          -DCMAKE_CXX_COMPILER_TARGET=x86_64-linux-gnu
+          -DCMAKE_ASM_COMPILER_TARGET=x86_64-linux-gnu
+        )
+    fi
     cmake -B build -S . -GNinja \
       -DENABLE_RUST=OFF \
       -DENABLE_TESTS=OFF \
       -DBUILD_TESTING=ON \
       -DENABLE_THINLTO=OFF \
+      -DENABLE_LLVM_LIBC_MATH=OFF \
+      -DENABLE_XRAY=OFF \
+      -DENABLE_WASMEDGE=OFF \
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      ${compiler_target_args[@]+"${compiler_target_args[@]}"} \
       -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 
     JOBS=$(

@@ -2,9 +2,14 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include <Parsers/IAST.h>
 
@@ -16,6 +21,19 @@ class RE2;
 }
 
 namespace DB {
+// ClickHouse 26.3 switched ASTPtr from std::shared_ptr<IAST> to
+// boost::intrusive_ptr<IAST>, so std::make_shared<ASTFoo>() no longer converts
+// to ASTPtr. makeRewriterAST constructs the right smart pointer for whichever
+// ASTPtr the linked ClickHouse defines, keeping this code buildable on both.
+template <typename T, typename... Args>
+auto makeRewriterAST(Args &&... args) {
+  if constexpr (std::is_same_v<ASTPtr, std::shared_ptr<IAST>>) {
+    return std::make_shared<T>(std::forward<Args>(args)...);
+  } else {
+    return boost::intrusive_ptr<T>(new T(std::forward<Args>(args)...));
+  }
+}
+
 class ASTTransformerList : public IAST {
 public:
   String getID(char) const override {
@@ -23,7 +41,7 @@ public:
   }
 
   ASTPtr clone() const override {
-    auto clone = std::make_shared<ASTTransformerList>(*this);
+    auto clone = makeRewriterAST<ASTTransformerList>(*this);
     clone->cloneChildren();
     return clone;
   }
@@ -109,7 +127,7 @@ public:
   }
 
   ASTPtr clone() const override {
-    auto clone = std::make_shared<ASTReplaceTransformer>(*this);
+    auto clone = makeRewriterAST<ASTReplaceTransformer>(*this);
     clone->cloneChildren();
     return clone;
   }
@@ -148,7 +166,7 @@ public:
   }
 
   ASTPtr clone() const override {
-    auto clone = std::make_shared<ASTRewriteCTETransformer>(*this);
+    auto clone = makeRewriterAST<ASTRewriteCTETransformer>(*this);
     clone->cloneChildren();
     return clone;
   }

@@ -370,11 +370,11 @@ void dynamicRewriteWalk(
           // function call. Mirrors ASTReplaceTransformer's static
           // remote_table_map case so the SQL shape is identical regardless
           // of whether the remote routing came from static or dynamic args.
-          auto addr  = std::make_shared<DB::ASTLiteral>(outcome.remote_addr);
-          auto db    = std::make_shared<DB::ASTLiteral>(outcome.physical_db);
-          auto tbl   = std::make_shared<DB::ASTLiteral>(outcome.new_table);
-          auto user  = std::make_shared<DB::ASTLiteral>(outcome.remote_user);
-          auto pass  = std::make_shared<DB::ASTLiteral>(outcome.remote_password);
+          auto addr  = DB::makeRewriterAST<DB::ASTLiteral>(outcome.remote_addr);
+          auto db    = DB::makeRewriterAST<DB::ASTLiteral>(outcome.physical_db);
+          auto tbl   = DB::makeRewriterAST<DB::ASTLiteral>(outcome.new_table);
+          auto user  = DB::makeRewriterAST<DB::ASTLiteral>(outcome.remote_user);
+          auto pass  = DB::makeRewriterAST<DB::ASTLiteral>(outcome.remote_password);
           table_expression->children.clear();
           table_expression->database_and_table_name = nullptr;
           table_expression->table_function =
@@ -486,7 +486,7 @@ void applyPendingToSelect(DB::ASTSelectQuery *select, const PendingSelectTransfo
     if (action.limit == 0) continue;
     if (action.force) {
       select->setExpression(
-        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<DB::ASTLiteral>(action.limit));
+        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, DB::makeRewriterAST<DB::ASTLiteral>(action.limit));
       continue;
     }
 
@@ -502,19 +502,19 @@ void applyPendingToSelect(DB::ASTSelectQuery *select, const PendingSelectTransfo
         if (original_limit == 0 || original_limit > action.threshold) {
           select->setExpression(
             DB::ASTSelectQuery::Expression::LIMIT_LENGTH,
-            std::make_shared<DB::ASTLiteral>(action.limit));
+            DB::makeRewriterAST<DB::ASTLiteral>(action.limit));
         }
       }
     } else {
       select->setExpression(
-        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, std::make_shared<DB::ASTLiteral>(action.limit));
+        DB::ASTSelectQuery::Expression::LIMIT_LENGTH, DB::makeRewriterAST<DB::ASTLiteral>(action.limit));
     }
   }
 
   for (size_t offset : pending.offsets) {
     if (offset > 0) {
       select->setExpression(
-        DB::ASTSelectQuery::Expression::LIMIT_OFFSET, std::make_shared<DB::ASTLiteral>(offset));
+        DB::ASTSelectQuery::Expression::LIMIT_OFFSET, DB::makeRewriterAST<DB::ASTLiteral>(offset));
     }
   }
 
@@ -524,7 +524,7 @@ void applyPendingToSelect(DB::ASTSelectQuery *select, const PendingSelectTransfo
     if (settings_expr) {
       settings = settings_expr->as<DB::ASTSetQuery>();
     } else {
-      auto new_settings = std::make_shared<DB::ASTSetQuery>();
+      auto new_settings = DB::makeRewriterAST<DB::ASTSetQuery>();
       new_settings->is_standalone = false;
       settings = new_settings.get();
       select->setExpression(DB::ASTSelectQuery::Expression::SETTINGS, new_settings);

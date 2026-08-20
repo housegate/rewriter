@@ -390,6 +390,9 @@ void RewriterServiceImpl::doRewrite(
   String query = QueryPreprocessor::preprocess(
     si_compatibility.parse_sql, sql_id);
 
+  if (rewriter_handlers::handleRemovedLiveViewCompatibility(
+        query, request, response)) return;
+
   const char *pos = query.data();
   const char *end = pos + query.size();
   DB::ParserQuery parser(end, false);

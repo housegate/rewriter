@@ -1,6 +1,8 @@
 // src/handlers/writes.cc
 #include "handlers/writes.h"
 
+#include <Common/Exception.h>
+
 #include <Parsers/ASTAlterQuery.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTDeleteQuery.h>
@@ -13,13 +15,18 @@
 #include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTUpdateQuery.h>
 #include <Parsers/ASTViewTargets.h>
+#include <Parsers/Lexer.h>
+#include <Parsers/ParserQuery.h>
+#include <Parsers/parseQuery.h>
 
 #include <Interpreters/StorageID.h>
 
 #include <cctype>
 #include <iostream>
 #include <string>
+#include <string_view>
 
+#include "ASTTransformers.h"
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/select.h"
@@ -47,6 +54,41 @@ inline void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std:
 
 inline void rejectInvalidRequest(rewriter::RewriteSQLResponse *response, const std::string &msg) {
   rejectWrite(response, rewriter::RewriteCode::InvalidRewriteRequest, msg);
+}
+
+bool tokenEqualsKeyword(const DB::Token &token, std::string_view keyword) {
+  if (token.type != DB::TokenType::BareWord || token.size() != keyword.size())
+    return false;
+  for (size_t i = 0; i < keyword.size(); ++i) {
+    const auto actual = static_cast<unsigned char>(token.begin[i]);
+    if (std::toupper(actual) != keyword[i]) return false;
+  }
+  return true;
+}
+
+bool beginsNonLiveCreateObject(const DB::Token &token) {
+  return tokenEqualsKeyword(token, "OR")
+    || tokenEqualsKeyword(token, "TEMPORARY")
+    || tokenEqualsKeyword(token, "TABLE")
+    || tokenEqualsKeyword(token, "DATABASE")
+    || tokenEqualsKeyword(token, "MATERIALIZED")
+    || tokenEqualsKeyword(token, "VIEW")
+    || tokenEqualsKeyword(token, "DICTIONARY")
+    || tokenEqualsKeyword(token, "WINDOW")
+    || tokenEqualsKeyword(token, "USER")
+    || tokenEqualsKeyword(token, "ROLE")
+    || tokenEqualsKeyword(token, "QUOTA")
+    || tokenEqualsKeyword(token, "POLICY")
+    || tokenEqualsKeyword(token, "ROW")
+    || tokenEqualsKeyword(token, "MASKING")
+    || tokenEqualsKeyword(token, "SETTINGS")
+    || tokenEqualsKeyword(token, "PROFILE")
+    || tokenEqualsKeyword(token, "FUNCTION")
+    || tokenEqualsKeyword(token, "WORKLOAD")
+    || tokenEqualsKeyword(token, "RESOURCE")
+    || tokenEqualsKeyword(token, "NAMED")
+    || tokenEqualsKeyword(token, "UNIQUE")
+    || tokenEqualsKeyword(token, "INDEX");
 }
 
 void acceptWrite(const DB::ASTPtr &ast,
@@ -273,7 +315,7 @@ bool preflightStorageIntegrityWrite(
 
   if (auto *drop = ast->as<DB::ASTDropQuery>()) {
     if (drop->database_and_tables) {
-      for (const auto &single : drop->getRewrittenASTsOfSingleTable()) {
+      for (const auto &single : drop->getRewrittenASTsOfSingleTable(ast)) {
         const auto *one = single->as<DB::ASTDropQuery>();
         if (one && rejectStorageIntegrityWriteTarget(
               response, sel, one->getDatabase(), one->getTable(), false)) {
@@ -366,8 +408,8 @@ bool rewriteRenameSide(
 
   return rewriteOneTarget(
     response, sel, origin_db, origin_table, stmt_kind,
-    [&](const std::string &s){ side.database = std::make_shared<DB::ASTIdentifier>(s); },
-    [&](const std::string &s){ side.table    = std::make_shared<DB::ASTIdentifier>(s); });
+    [&](const std::string &s){ side.database = DB::makeRewriterAST<DB::ASTIdentifier>(s); },
+    [&](const std::string &s){ side.table    = DB::makeRewriterAST<DB::ASTIdentifier>(s); });
 }
 
 // CREATE VIEW / CREATE MATERIALIZED VIEW. Rewrites three things via the
@@ -437,6 +479,89 @@ WriteDispatchResult handleViewCreate(
 
 } // namespace
 
+bool handleRemovedLiveViewCompatibility(
+  const std::string &query,
+  const rewriter::RewriteSQLRequest *request,
+  rewriter::RewriteSQLResponse *response) {
+  DB::Lexer lexer(query.data(), query.data() + query.size());
+  auto nextSignificantToken = [&lexer] {
+    DB::Token token;
+    do {
+      token = lexer.nextToken();
+    } while (!token.isSignificant());
+    return token;
+  };
+
+  const DB::Token command = nextSignificantToken();
+  if (!tokenEqualsKeyword(command, "CREATE")
+      && !tokenEqualsKeyword(command, "ATTACH")) {
+    return false;
+  }
+
+  // LIVE VIEW used to allow SQL SECURITY / DEFINER clauses between the
+  // command and object kind. Search only the statement prefix (before AS),
+  // requiring adjacent significant LIVE + VIEW tokens; the full parser below
+  // remains the authority on whether the resulting legacy statement is valid.
+  DB::Token previous;
+  bool has_previous = false;
+  size_t live_offset = 0;
+  size_t live_size = 0;
+  while (true) {
+    const DB::Token token = nextSignificantToken();
+    if (token.isEnd() || token.isError()
+        || token.type == DB::TokenType::Semicolon
+        || tokenEqualsKeyword(token, "AS")) {
+      return false;
+    }
+    if (has_previous
+        && tokenEqualsKeyword(previous, "LIVE")
+        && tokenEqualsKeyword(token, "VIEW")) {
+      live_offset = static_cast<size_t>(previous.begin - query.data());
+      live_size = previous.size();
+      break;
+    }
+    if (beginsNonLiveCreateObject(token)) return false;
+    previous = token;
+    has_previous = true;
+  }
+
+  // Validate the complete statement with the current ClickHouse parser. A
+  // token-only match must not turn malformed legacy SQL into a structured
+  // UnsupportedStatement response.
+  std::string candidate = query;
+  candidate.replace(live_offset, live_size, "MATERIALIZED");
+
+  DB::ASTPtr ast;
+  try {
+    const char *begin = candidate.data();
+    const char *end = begin + candidate.size();
+    DB::ParserQuery parser(end, false);
+    ast = DB::parseQuery(parser, begin, end, /*description=*/"", 0, 0, 0);
+  } catch (const DB::Exception &) {
+    return false;
+  }
+
+  auto *create = ast->as<DB::ASTCreateQuery>();
+  if (!create || !create->is_materialized_view) return false;
+
+  if (create->if_not_exists) {
+    response->set_existence_clause(
+      rewriter::EXISTENCE_CLAUSE_IF_NOT_EXISTS);
+  }
+
+  // The removed LIVE VIEW AST was neither an ordinary nor a materialized
+  // view. Restore those flags before preflight so an embedded SELECT is
+  // checked with the same fail-closed storage-integrity policy as before.
+  create->is_materialized_view = false;
+  create->is_ordinary_view = false;
+  const auto sel = findActiveTableRewrite(request->options());
+  if (preflightStorageIntegrityWrite(ast, sel, response)) return true;
+
+  rejectUnsupported(
+    response, "CREATE LIVE VIEW / WINDOW VIEW is not supported");
+  return true;
+}
+
 WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
                                      const rewriter::RewriteSQLRequest *request,
                                      rewriter::RewriteSQLResponse *response) {
@@ -453,7 +578,10 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     return WriteDispatchResult::Rejected;
 
   if (auto *create_query = ast->as<DB::ASTCreateQuery>()) {
-    if (create_query->is_live_view || create_query->is_window_view) {
+    // LIVE VIEW is handled by the pre-parse compatibility path because
+    // ClickHouse 26.3 removed it from ParserQuery and ASTCreateQuery. WINDOW
+    // VIEW is still parsed and rejected here.
+    if (create_query->is_window_view) {
       rejectUnsupported(response, "CREATE LIVE VIEW / WINDOW VIEW is not supported");
       return WriteDispatchResult::Rejected;
     }
