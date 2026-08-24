@@ -1,0 +1,40 @@
+name: PR source policy (base-controlled)
+
+# SECURITY: pull_request_target loads this workflow from the base branch. It
+# must never check out or execute pull-request code and must never reference a
+# secret. A fork therefore cannot edit the workflow that decides its policy.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  policy:
+    # In an organization/enterprise ruleset targeting housegate/rewriter,
+    # select this file from main under "Require workflows to pass"; the current
+    # repository ruleset cannot enforce a base-selected workflow. Separately,
+    # its main-branch rule must require `Build & test (build box)`. An operator
+    # with org-admin scope must live-prove both before D2 is considered complete.
+    name: PR source policy
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reject forks without checkout, code execution, or secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != pull_request_target ]; then
+            echo '::error::Unexpected event for the base-controlled PR source policy.'
+            exit 1
+          fi
+          if [ -z "$HEAD_REPOSITORY" ] || [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
+            echo '::error::Fork pull requests cannot access the private build box.'
+            echo 'Mirror the fork branch into housegate/rewriter and open a same-repository pull request, or ask a maintainer to mirror it.'
+            exit 1
+          fi
+          echo 'Same-repository PR source is eligible for the private build-box gate.'

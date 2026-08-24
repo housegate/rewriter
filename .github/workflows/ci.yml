@@ -1,0 +1,1417 @@
+name: Build & test (build box)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  remote-build:
+    name: Remote build and test (build box)
+    # Forks never enter this queued job, so no secret-bearing step is created.
+    # The org/enterprise base-selected workflow in pr-source-policy.yml fails them.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # GitHub Actions supports queue:max as of 2026-08; actionlint 1.7.12's
+    # schema lags. Local validation ignores only its exact unknown-queue-key
+    # diagnostic. Queue wait occurs before this job and its timeout start.
+    concurrency:
+      group: build-box
+      queue: max
+      cancel-in-progress: false
+
+    # SECURITY: same-repository PR code and its CMake graph execute over SSH in
+    # a persistent remote worktree. Repository write access therefore implies
+    # build-host code execution, persistent-cache poisoning, and mutation of
+    # the shared ClickHouse checkout. Forks fail the base-selected required
+    # source-policy workflow; this same-repo risk is accepted for the frozen
+    # Task 12 design and must be called out in the pull request.
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.BUILD_HOST_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BUILD_HOST_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Build and test the exact event commit on the build host
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              # Bind to the immutable event payload instead of re-reading the
+              # mutable refs/pull/N/merge after a potentially long queue wait.
+              SHA=$PR_HEAD_SHA
+              ;;
+            push)
+              SHA=$EVENT_SHA
+              ;;
+            *)
+              echo 'error: unsupported workflow event' >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'error: event commit is not a lowercase 40-hex SHA' >&2
+            exit 1
+          fi
+
+          ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes sentio@BUILD_HOST \
+            "bash -s -- '$EVENT_NAME' '$SHA'" <<'REMOTE'
+          set -euo pipefail
+          export GIT_NO_REPLACE_OBJECTS=1
+          event_name=$1
+          expected_sha=$2
+
+          [[ "$expected_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'error: expected SHA is not lowercase 40-hex' >&2
+            exit 1
+          }
+          case "$event_name" in
+            pull_request | push) ;;
+            *)
+              echo 'error: unsupported workflow event' >&2
+              exit 1
+              ;;
+          esac
+
+          lock_path=/home/sentio/ci/rewriter-build-box.lock
+          echo 'Waiting up to 120s for the defensive build-host lock.'
+          if ! flock --exclusive --wait 120 --close "$lock_path" \
+            timeout --signal=TERM --kill-after=30s 85m \
+            bash -s -- "$event_name" "$expected_sha" <<'CRITICAL'
+          set -euo pipefail
+          export GIT_NO_REPLACE_OBJECTS=1
+          event_name=$1
+          expected_sha=$2
+          echo 'Acquired the shared build-box lock.'
+
+          ci_root=/home/sentio/ci/rewriter-ci
+          if [ "$(readlink -f "$HOME/ci/rewriter-ci")" != "$ci_root" ]; then
+            echo 'error: CI worktree path does not resolve to the approved location' >&2
+            exit 1
+          fi
+          cd "$ci_root"
+          if [ "$(git rev-parse --show-toplevel)" != "$ci_root" ]; then
+            echo 'error: approved CI path is not the repository root' >&2
+            exit 1
+          fi
+          if [ "$(git remote get-url origin)" != git@github.com:housegate/rewriter.git ]; then
+            echo 'error: build-host origin is not the authenticated private repository' >&2
+            exit 1
+          fi
+          if [ -n "$(git for-each-ref --format='%(refname)' refs/replace/)" ] || \
+             [ -e "$(git rev-parse --git-path info/grafts)" ]; then
+            echo 'error: replacement refs or legacy grafts exist in the CI repository' >&2
+            exit 1
+          fi
+          # The only fetch input is the validated event-object SHA. This avoids
+          # a queued run racing a later update of main or the PR merge ref.
+          git fetch --force --no-tags origin "$expected_sha"
+          fetched_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          [[ "$fetched_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'error: fetched object did not resolve to a lowercase 40-hex commit' >&2
+            exit 1
+          }
+          if [ "$fetched_sha" != "$expected_sha" ]; then
+            echo 'error: fetched commit does not match the workflow commit' >&2
+            exit 1
+          fi
+
+          git checkout --detach --force "$expected_sha"
+          git clean -ffdx -e /build/ -e /clickHouse -e /contrib
+
+          shared_clickhouse=/home/sentio/chen/rewriter-grpc/clickHouse
+          if [ ! -L clickHouse ] || [ "$(readlink -f clickHouse)" != "$shared_clickhouse" ]; then
+            rm -rf clickHouse
+            ln -s "$shared_clickhouse" clickHouse
+          fi
+          if [ ! -L contrib ] || [ "$(readlink -f contrib)" != "$(readlink -f clickHouse/contrib)" ]; then
+            rm -rf contrib
+            ln -s clickHouse/contrib contrib
+          fi
+          git submodule sync -- third_party/rewriter-proto
+          git submodule update --init --depth=1 third_party/rewriter-proto
+          if [ ! -d third_party/rewriter-proto ] || \
+             [ -L third_party/rewriter-proto ]; then
+            echo 'error: rewriter-proto gitlink is not a real directory' >&2
+            exit 1
+          fi
+          expected_proto="$(git ls-tree "$expected_sha" -- third_party/rewriter-proto | awk '$1 == "160000" && $2 == "commit" { print $3 }')"
+          actual_proto="$(git -C third_party/rewriter-proto rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$expected_proto" =~ ^[0-9a-f]{40}$ ]] || [ "$actual_proto" != "$expected_proto" ]; then
+            echo 'error: rewriter-proto does not match the commit gitlink' >&2
+            exit 1
+          fi
+          git -C third_party/rewriter-proto reset --hard "$expected_proto" >/dev/null
+          git -C third_party/rewriter-proto clean -ffdx >/dev/null
+
+          expected_clickhouse="$(git ls-tree "$expected_sha" -- clickHouse | awk '$1 == "160000" && $2 == "commit" { print $3 }')"
+          if [[ ! "$expected_clickhouse" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'error: commit does not contain a valid ClickHouse gitlink' >&2
+            exit 1
+          fi
+          git -C clickHouse fetch --force --no-tags origin "$expected_clickhouse"
+          fetched_clickhouse="$(git -C clickHouse rev-parse --verify 'FETCH_HEAD^{commit}')"
+          if [ "$fetched_clickhouse" != "$expected_clickhouse" ]; then
+            echo 'error: fetched ClickHouse commit does not match the gitlink' >&2
+            exit 1
+          fi
+          git -C clickHouse checkout --detach --force "$expected_clickhouse" >/dev/null
+
+          # A same-repository PR can mutate the persistent shared checkout.
+          # Return it and every initialized child to the exact gitlinks before
+          # scripts.sh applies its two known compatibility patches.
+          git -C clickHouse reset --hard "$expected_clickhouse" >/dev/null
+          git -C clickHouse submodule sync --recursive >/dev/null
+          git -C clickHouse submodule update --init --recursive --force >/dev/null
+          git -C clickHouse submodule foreach --quiet --recursive \
+            'git reset --hard >/dev/null && git clean -ffdx >/dev/null'
+          git -C clickHouse reset --hard "$expected_clickhouse" >/dev/null
+          git -C clickHouse clean -ffdx >/dev/null
+          # Each four-argument root spec is path, pinned commit, allowed
+          # persistent filesystem boundary, and separately verified gitlinks.
+          # The top-level checkout is verified too: build/ is the only
+          # untracked cache boundary; contrib remains a pinned tracked symlink.
+          integrity_roots=(
+            . "$expected_sha" build 'clickHouse,third_party/rewriter-proto'
+            clickHouse "$expected_clickhouse" '' ''
+            third_party/rewriter-proto "$expected_proto" '' ''
+          )
+          # Keep this verifier byte-for-byte identical in ci.yml and release.yml;
+          # historical release refs cannot safely supply the verifier themselves.
+          python3 - --rematerialize "${integrity_roots[@]}" <<'PY'
+          import hashlib
+          import os
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+          import time
+
+
+          class VerificationError(Exception):
+              pass
+
+
+          if os.environ.get("GIT_NO_REPLACE_OBJECTS") != "1":
+              print(
+                  "error: GIT_NO_REPLACE_OBJECTS=1 is required",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          started = time.monotonic()
+          visited = set()
+          rematerialized = set()
+          repair_totals = {
+              "repositories": 0,
+              "blobs": 0,
+              "rewritten": 0,
+              "bytes": 0,
+          }
+          authentication_totals = {
+              "repositories": 0,
+              "objects": 0,
+              "bytes": 0,
+              "seconds": 0.0,
+          }
+          totals = {
+              "repositories": 0,
+              "blobs": 0,
+              "gitlinks": 0,
+              "bytes": 0,
+          }
+
+
+          def fail(message):
+              raise VerificationError(message)
+
+
+          def display(path):
+              return (
+                  os.fsdecode(path)
+                  .encode("unicode_escape", "backslashreplace")
+                  .decode("ascii", "backslashreplace")
+              )
+
+
+          def git_output(root_arg, *args, ok=(0,)):
+              result = subprocess.run(
+                  ["git", "-C", root_arg, *args],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              if result.returncode not in ok:
+                  detail = result.stderr.decode(
+                      "utf-8", "backslashreplace"
+                  ).strip()
+                  fail(
+                      "%s: git %s failed (%d): %s"
+                      % (
+                          display(os.fsencode(root_arg)),
+                          " ".join(args),
+                          result.returncode,
+                          detail,
+                      )
+                  )
+              return result.stdout, result.returncode
+
+
+          def split_nul(data, label):
+              if data and not data.endswith(b"\0"):
+                  fail(label + " is not NUL-terminated")
+              records = data.split(b"\0")
+              if records and records[-1] == b"":
+                  records.pop()
+              if any(record == b"" for record in records):
+                  fail(label + " contains an empty record")
+              return records
+
+
+          def valid_oid(oid):
+              return (
+                  len(oid) == 40
+                  and all(byte in b"0123456789abcdef" for byte in oid)
+              )
+
+
+          def require_oid(oid, label):
+              if not valid_oid(oid):
+                  fail("%s: invalid lowercase SHA-1 object ID %r" % (label, oid))
+
+
+          def check_head(root_arg, expected_head, label, phase):
+              require_oid(expected_head, label + " expected commit")
+              direct = git_output(
+                  root_arg, "rev-parse", "--verify", "HEAD"
+              )[0].strip()
+              peeled = git_output(
+                  root_arg, "rev-parse", "--verify", "HEAD^{commit}"
+              )[0].strip()
+              if direct != expected_head or peeled != expected_head:
+                  fail(
+                      "%s: %s HEAD is %s/%s, expected pinned commit %s"
+                      % (
+                          label,
+                          phase,
+                          direct.decode("ascii", "replace"),
+                          peeled.decode("ascii", "replace"),
+                          expected_head.decode("ascii", "replace"),
+                      )
+                  )
+
+
+          def check_repository_policy(root, root_arg, expected_head, label, phase):
+              root_stat = os.lstat(root)
+              if not stat.S_ISDIR(root_stat.st_mode):
+                  fail("%s: repository root is not a directory" % label)
+              object_format = git_output(
+                  root_arg, "rev-parse", "--show-object-format"
+              )[0].strip()
+              if object_format != b"sha1":
+                  fail(
+                      "%s: unsupported Git object format %r (expected sha1)"
+                      % (label, object_format)
+                  )
+              check_head(root_arg, expected_head, label, phase)
+              replace_refs = git_output(
+                  root_arg,
+                  "for-each-ref",
+                  "--format=%(refname)",
+                  "refs/replace/",
+              )[0]
+              if replace_refs.strip():
+                  fail("%s: replacement refs are forbidden" % label)
+              graft_name = git_output(
+                  root_arg, "rev-parse", "--git-path", "info/grafts"
+              )[0].rstrip(b"\n")
+              graft_path = (
+                  graft_name
+                  if os.path.isabs(graft_name)
+                  else os.path.join(root, graft_name)
+              )
+              if os.path.lexists(graft_path):
+                  fail("%s: legacy grafts file is forbidden" % label)
+
+
+          def authenticated_batch(
+              root_arg, label, requests, capture, expected_type=None
+          ):
+              requests = list(requests)
+              if not requests:
+                  return {}
+              for oid in requests:
+                  require_oid(oid, label + " object request")
+              with tempfile.TemporaryFile() as request_file, \
+                   tempfile.TemporaryFile() as error_file:
+                  for oid in requests:
+                      request_file.write(oid + b"\n")
+                  request_file.seek(0)
+                  process = subprocess.Popen(
+                      ["git", "-C", root_arg, "cat-file", "--batch"],
+                      stdin=request_file,
+                      stdout=subprocess.PIPE,
+                      stderr=error_file,
+                  )
+                  results = {}
+                  try:
+                      for requested_oid in requests:
+                          header = process.stdout.readline()
+                          fields = header.rstrip(b"\n").split(b" ")
+                          if len(fields) != 3:
+                              fail(
+                                  "%s: malformed cat-file header for %s: %r"
+                                  % (
+                                      label,
+                                      requested_oid.decode("ascii"),
+                                      header,
+                                  )
+                              )
+                          returned_oid, object_type, size_text = fields
+                          if returned_oid != requested_oid:
+                              fail(
+                                  "%s: cat-file returned %s for requested %s"
+                                  % (
+                                      label,
+                                      returned_oid.decode("ascii", "replace"),
+                                      requested_oid.decode("ascii"),
+                                  )
+                              )
+                          if (
+                              expected_type is not None
+                              and object_type != expected_type
+                          ):
+                              fail(
+                                  "%s: object %s has type %s, expected %s"
+                                  % (
+                                      label,
+                                      requested_oid.decode("ascii"),
+                                      object_type.decode("ascii", "replace"),
+                                      expected_type.decode("ascii"),
+                                  )
+                              )
+                          try:
+                              size = int(size_text)
+                          except ValueError:
+                              fail("%s: invalid cat-file object size" % label)
+                          if size < 0:
+                              fail("%s: negative cat-file object size" % label)
+                          digest = hashlib.sha1()
+                          digest.update(
+                              object_type
+                              + b" "
+                              + str(size).encode("ascii")
+                              + b"\0"
+                          )
+                          remaining = size
+                          pieces = []
+                          while remaining:
+                              chunk = process.stdout.read(min(1024 * 1024, remaining))
+                              if not chunk:
+                                  fail("%s: truncated cat-file object" % label)
+                              digest.update(chunk)
+                              if capture:
+                                  pieces.append(chunk)
+                              remaining -= len(chunk)
+                          if process.stdout.read(1) != b"\n":
+                              fail("%s: cat-file object lacks record terminator" % label)
+                          calculated = digest.hexdigest().encode("ascii")
+                          if calculated != requested_oid:
+                              fail(
+                                  "%s: object database hash mismatch: requested %s, calculated %s"
+                                  % (
+                                      label,
+                                      requested_oid.decode("ascii"),
+                                      calculated.decode("ascii"),
+                                  )
+                              )
+                          authentication_totals["objects"] += 1
+                          authentication_totals["bytes"] += size
+                          if capture:
+                              results[requested_oid] = (
+                                  object_type,
+                                  b"".join(pieces),
+                              )
+                      if process.stdout.read(1):
+                          fail("%s: cat-file returned unexpected extra data" % label)
+                      return_code = process.wait()
+                      if return_code != 0:
+                          error_file.seek(0)
+                          detail = error_file.read().decode(
+                              "utf-8", "backslashreplace"
+                          ).strip()
+                          fail(
+                              "%s: git cat-file failed (%d): %s"
+                              % (label, return_code, detail)
+                          )
+                  finally:
+                      if process.poll() is None:
+                          process.kill()
+                          process.wait()
+                  return results
+
+
+          authenticated_trees = {}
+
+
+          def authenticate_expected_tree(root, root_arg, expected_head, label):
+              cache_key = (root, expected_head)
+              if cache_key in authenticated_trees:
+                  return authenticated_trees[cache_key]
+              authentication_started = time.monotonic()
+
+              commit_type, commit_content = authenticated_batch(
+                  root_arg,
+                  label,
+                  [expected_head],
+                  True,
+                  expected_type=b"commit",
+              )[expected_head]
+              if commit_type != b"commit":
+                  fail("%s: pinned object is not a commit" % label)
+              first_line = commit_content.split(b"\n", 1)[0]
+              if not first_line.startswith(b"tree "):
+                  fail("%s: pinned commit lacks a leading tree header" % label)
+              root_tree = first_line[5:]
+              require_oid(root_tree, label + " root tree")
+
+              leaves = {}
+              directory_paths = set()
+              pending = [(root_tree, b"")]
+              seen_trees = set()
+              tree_objects = {}
+              blob_oids = set()
+              while pending:
+                  level_oids = []
+                  for tree_oid, _prefix in pending:
+                      if tree_oid not in seen_trees:
+                          seen_trees.add(tree_oid)
+                          level_oids.append(tree_oid)
+                  tree_objects.update(
+                      authenticated_batch(
+                          root_arg,
+                          label,
+                          level_oids,
+                          True,
+                          expected_type=b"tree",
+                      )
+                  )
+                  next_pending = []
+                  for tree_oid, prefix in pending:
+                      object_type, content = tree_objects[tree_oid]
+                      if object_type != b"tree":
+                          fail("%s: tree graph contains a non-tree object" % label)
+                      offset = 0
+                      names = set()
+                      while offset < len(content):
+                          space = content.find(b" ", offset)
+                          nul = content.find(b"\0", space + 1)
+                          if space <= offset or nul < 0 or nul + 21 > len(content):
+                              fail("%s: malformed raw tree object" % label)
+                          mode = content[offset:space]
+                          name = content[space + 1:nul]
+                          raw_oid = content[nul + 1:nul + 21]
+                          offset = nul + 21
+                          if (
+                              not name
+                              or name in (b".", b"..")
+                              or b"/" in name
+                              or name in names
+                          ):
+                              fail("%s: unsafe or duplicate raw tree name" % label)
+                          names.add(name)
+                          oid = raw_oid.hex().encode("ascii")
+                          full_path = prefix + name
+                          if mode == b"40000":
+                              if full_path in leaves or full_path in directory_paths:
+                                  fail("%s: duplicate raw tree path %s" % (label, display(full_path)))
+                              directory_paths.add(full_path)
+                              next_pending.append((oid, full_path + b"/"))
+                          elif mode in (b"100644", b"100755", b"120000"):
+                              if full_path in leaves or full_path in directory_paths:
+                                  fail("%s: duplicate raw tree path %s" % (label, display(full_path)))
+                              leaves[full_path] = (mode, oid)
+                              blob_oids.add(oid)
+                          elif mode == b"160000":
+                              if full_path in leaves or full_path in directory_paths:
+                                  fail("%s: duplicate raw tree path %s" % (label, display(full_path)))
+                              leaves[full_path] = (mode, oid)
+                          else:
+                              fail(
+                                  "%s: unsupported raw tree mode %s for %s"
+                                  % (
+                                      label,
+                                      mode.decode("ascii", "replace"),
+                                      display(full_path),
+                                  )
+                              )
+                  pending = next_pending
+
+              authenticated_batch(
+                  root_arg,
+                  label,
+                  sorted(blob_oids),
+                  False,
+                  expected_type=b"blob",
+              )
+              authentication_totals["repositories"] += 1
+              authentication_totals["seconds"] += (
+                  time.monotonic() - authentication_started
+              )
+              authenticated_trees[cache_key] = leaves
+              return leaves
+
+
+          def parse_boundaries(text, label):
+              if not text:
+                  return set()
+              values = set()
+              for value in os.fsencode(text).split(b","):
+                  parts = value.split(b"/")
+                  if (
+                      not value
+                      or value.startswith(b"/")
+                      or any(
+                          not part or part in (b".", b"..", b".git")
+                          for part in parts
+                      )
+                  ):
+                      fail("%s: unsafe boundary %s" % (label, display(value)))
+                  values.add(value)
+              for left in values:
+                  for right in values:
+                      if left != right and right.startswith(left + b"/"):
+                          fail("%s: overlapping boundaries" % label)
+              return values
+
+
+          def validate_boundaries(tree, allowed, external, root, label):
+              for allowed_path in allowed:
+                  for external_path in external:
+                      if (
+                          allowed_path == external_path
+                          or allowed_path.startswith(external_path + b"/")
+                          or external_path.startswith(allowed_path + b"/")
+                      ):
+                          fail(
+                              "%s: allowed and external boundaries overlap"
+                              % label
+                          )
+              for boundary in allowed:
+                  if any(
+                      path == boundary or path.startswith(boundary + b"/")
+                      for path in tree
+                  ):
+                      fail(
+                          "%s: allowed cache boundary is tracked: %s"
+                          % (label, display(boundary))
+                      )
+                  boundary_path = os.path.join(root, boundary)
+                  boundary_stat = os.lstat(boundary_path)
+                  if not stat.S_ISDIR(boundary_stat.st_mode):
+                      fail(
+                          "%s: allowed cache boundary is not a real directory: %s"
+                          % (label, display(boundary))
+                      )
+              for boundary in external:
+                  if boundary not in tree or tree[boundary][0] != b"160000":
+                      fail(
+                          "%s: external boundary is not a pinned gitlink: %s"
+                          % (label, display(boundary))
+                      )
+                  if not os.path.lexists(os.path.join(root, boundary)):
+                      fail(
+                          "%s: external gitlink boundary is absent: %s"
+                          % (label, display(boundary))
+                      )
+
+
+          def rematerialize_repository(
+              root_path,
+              expected_head,
+              allowed=frozenset(),
+              external=frozenset(),
+          ):
+              root = os.path.realpath(os.fsencode(root_path))
+              root_arg = os.fsdecode(root)
+              label = display(root)
+              if root in rematerialized:
+                  fail("%s: recursive gitlink cycle or duplicate" % label)
+              rematerialized.add(root)
+              check_repository_policy(
+                  root, root_arg, expected_head, label, "begin"
+              )
+              tree = authenticate_expected_tree(
+                  root, root_arg, expected_head, label
+              )
+              validate_boundaries(tree, allowed, external, root, label)
+
+              index = {}
+              index_data = git_output(
+                  root_arg, "ls-files", "--stage", "-z"
+              )[0]
+              for record in split_nul(
+                  index_data, label + " rematerialization index"
+              ):
+                  try:
+                      metadata, path = record.split(b"\t", 1)
+                      mode, oid, stage = metadata.split(b" ")
+                  except ValueError:
+                      fail(
+                          "%s: cannot parse rematerialization index record %r"
+                          % (label, record)
+                      )
+                  if stage != b"0":
+                      fail(
+                          "%s: non-stage-zero index entry for %s"
+                          % (label, display(path))
+                      )
+                  if not path or path in index:
+                      fail(
+                          "%s: empty or duplicate index path %s"
+                          % (label, display(path))
+                      )
+                  index[path] = (mode, oid)
+              if index != tree:
+                  fail(
+                      "%s: HEAD/index mismatch before raw rematerialization"
+                      % label
+                  )
+
+              blob_entries = {
+                  path: value
+                  for path, value in tree.items()
+                  if value[0] != b"160000"
+              }
+              gitlinks = {
+                  path: value[1]
+                  for path, value in tree.items()
+                  if value[0] == b"160000"
+              }
+              for path in sorted(gitlinks):
+                  if path in external:
+                      continue
+                  child_path = os.path.join(root, path)
+                  child_stat = os.lstat(child_path)
+                  if not stat.S_ISDIR(child_stat.st_mode):
+                      fail(
+                          "%s: gitlink worktree is not a real directory: %s"
+                          % (label, display(path))
+                      )
+
+              for path in sorted(blob_entries):
+                  mode, expected_oid = blob_entries[path]
+                  full_path = os.path.join(root, path)
+                  entry_stat = os.lstat(full_path)
+                  if mode == b"120000":
+                      if not stat.S_ISLNK(entry_stat.st_mode):
+                          fail(
+                              "%s: worktree type differs before rematerialization: %s"
+                              % (label, display(path))
+                          )
+                      content = os.readlink(full_path)
+                      if isinstance(content, str):
+                          content = os.fsencode(content)
+                  else:
+                      if not stat.S_ISREG(entry_stat.st_mode):
+                          fail(
+                              "%s: worktree type differs before rematerialization: %s"
+                              % (label, display(path))
+                          )
+                      expected_exec = mode == b"100755"
+                      actual_exec = bool(
+                          entry_stat.st_mode & stat.S_IXUSR
+                      )
+                      if actual_exec != expected_exec:
+                          fail(
+                              "%s: executable bit differs before rematerialization: %s"
+                              % (label, display(path))
+                          )
+                      descriptor = os.open(
+                          full_path,
+                          os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                      )
+                      try:
+                          chunks = []
+                          while True:
+                              chunk = os.read(descriptor, 1024 * 1024)
+                              if not chunk:
+                                  break
+                              chunks.append(chunk)
+                          content = b"".join(chunks)
+                      finally:
+                          os.close(descriptor)
+
+                  current_oid = hashlib.sha1(
+                      b"blob "
+                      + str(len(content)).encode("ascii")
+                      + b"\0"
+                      + content
+                  ).hexdigest().encode("ascii")
+                  repair_totals["blobs"] += 1
+                  repair_totals["bytes"] += len(content)
+                  if current_oid == expected_oid:
+                      continue
+
+                  expected_content = git_output(
+                      root_arg,
+                      "cat-file",
+                      "blob",
+                      expected_oid.decode("ascii"),
+                  )[0]
+                  recovered_oid = hashlib.sha1(
+                      b"blob "
+                      + str(len(expected_content)).encode("ascii")
+                      + b"\0"
+                      + expected_content
+                  ).hexdigest().encode("ascii")
+                  if recovered_oid != expected_oid:
+                      fail(
+                          "%s: object database returned wrong blob for %s"
+                          % (label, display(path))
+                      )
+
+                  directory = os.path.dirname(full_path)
+                  descriptor, temporary = tempfile.mkstemp(
+                      prefix=b".rewriter-raw-",
+                      dir=directory,
+                  )
+                  os.close(descriptor)
+                  try:
+                      if mode == b"120000":
+                          os.unlink(temporary)
+                          os.symlink(expected_content, temporary)
+                      else:
+                          descriptor = os.open(
+                              temporary,
+                              os.O_WRONLY | os.O_TRUNC,
+                          )
+                          try:
+                              offset = 0
+                              while offset < len(expected_content):
+                                  offset += os.write(
+                                      descriptor,
+                                      expected_content[offset:],
+                                  )
+                              os.fsync(descriptor)
+                          finally:
+                              os.close(descriptor)
+                          os.chmod(
+                              temporary,
+                              0o755 if mode == b"100755" else 0o644,
+                          )
+                      os.replace(temporary, full_path)
+                  finally:
+                      if os.path.lexists(temporary):
+                          os.unlink(temporary)
+                  repair_totals["rewritten"] += 1
+
+              repair_totals["repositories"] += 1
+              check_head(
+                  root_arg, expected_head, label, "end of rematerialization"
+              )
+              for path in sorted(gitlinks):
+                  if path in external:
+                      continue
+                  rematerialize_repository(
+                      os.path.join(root, path),
+                      gitlinks[path],
+                  )
+
+
+
+          def verify_repository(
+              root_path,
+              expected_head,
+              allowed=frozenset(),
+              external=frozenset(),
+          ):
+              root = os.path.realpath(os.fsencode(root_path))
+              root_arg = os.fsdecode(root)
+              label = display(root)
+              if root in visited:
+                  fail("%s: recursive gitlink cycle or duplicate" % label)
+              visited.add(root)
+              check_repository_policy(
+                  root, root_arg, expected_head, label, "begin"
+              )
+
+              required_bool = (
+                  ("core.fileMode", "true"),
+                  ("core.symlinks", "true"),
+                  ("core.trustctime", "true"),
+              )
+              disabled_bool = (
+                  ("core.ignoreCase", "false"),
+                  ("core.ignoreStat", "false"),
+                  ("core.sparseCheckout", "false"),
+                  ("core.sparseCheckoutCone", "false"),
+              )
+              for key, expected in required_bool + disabled_bool:
+                  value = git_output(
+                      root_arg,
+                      "config",
+                      "--bool",
+                      "--get",
+                      "--default",
+                      expected,
+                      key,
+                  )[0].strip().decode("ascii")
+                  if value != expected:
+                      fail(
+                          "%s: config %s must resolve to %s (got %s)"
+                          % (label, key, expected, value)
+                      )
+              check_stat = git_output(
+                  root_arg,
+                  "config",
+                  "--get",
+                  "--default",
+                  "default",
+                  "core.checkStat",
+              )[0].strip()
+              if check_stat != b"default":
+                  fail(
+                      "%s: config core.checkStat must resolve to default"
+                      % label
+                  )
+              fsmonitor, fsmonitor_rc = git_output(
+                  root_arg,
+                  "config",
+                  "--get-all",
+                  "core.fsmonitor",
+                  ok=(0, 1),
+              )
+              if fsmonitor_rc == 0 and fsmonitor.strip() != b"false":
+                  fail(
+                      "%s: core.fsmonitor must be absent or false" % label
+                  )
+
+              tree = authenticate_expected_tree(
+                  root, root_arg, expected_head, label
+              )
+              validate_boundaries(tree, allowed, external, root, label)
+
+              index = {}
+              index_data = git_output(
+                  root_arg, "ls-files", "--stage", "-z"
+              )[0]
+              for record in split_nul(index_data, label + " index"):
+                  try:
+                      metadata, path = record.split(b"\t", 1)
+                      mode, oid, stage = metadata.split(b" ")
+                  except ValueError:
+                      fail("%s: cannot parse index record %r" % (label, record))
+                  if stage != b"0":
+                      fail(
+                          "%s: non-stage-zero index entry for %s"
+                          % (label, display(path))
+                      )
+                  if not path or path in index:
+                      fail(
+                          "%s: empty or duplicate index path %s"
+                          % (label, display(path))
+                      )
+                  index[path] = (mode, oid)
+              if index != tree:
+                  missing = sorted(set(tree) - set(index))
+                  extra = sorted(set(index) - set(tree))
+                  changed = sorted(
+                      path
+                      for path in set(tree) & set(index)
+                      if tree[path] != index[path]
+                  )
+                  fail(
+                      "%s: HEAD/index mismatch missing=%s extra=%s changed=%s"
+                      % (
+                          label,
+                          [display(path) for path in missing[:5]],
+                          [display(path) for path in extra[:5]],
+                          [display(path) for path in changed[:5]],
+                      )
+                  )
+
+              flag_modes = (
+                  (
+                      "-v",
+                      lambda tag: tag == b"S" or b"a" <= tag <= b"z",
+                  ),
+                  ("-f", lambda tag: b"a" <= tag <= b"z"),
+              )
+              flag_snapshots = {}
+              for option, unsafe in flag_modes:
+                  tagged = {}
+                  flag_data = git_output(
+                      root_arg, "ls-files", option, "-z"
+                  )[0]
+                  flag_snapshots[option] = flag_data
+                  for record in split_nul(
+                      flag_data, label + " index flags " + option
+                  ):
+                      if len(record) < 3 or record[1:2] != b" ":
+                          fail(
+                              "%s: cannot parse index flag record %r"
+                              % (label, record)
+                          )
+                      tag, path = record[:1], record[2:]
+                      if unsafe(tag):
+                          fail(
+                              "%s: unsafe index flag tag %r for %s"
+                              % (label, tag, display(path))
+                          )
+                      tagged[path] = tag
+                  if set(tagged) != set(index):
+                      fail(
+                          "%s: index flag scan %s did not cover the exact index"
+                          % (label, option)
+                      )
+
+              blob_entries = {
+                  path: value
+                  for path, value in tree.items()
+                  if value[0] != b"160000"
+              }
+              gitlinks = {
+                  path: value[1]
+                  for path, value in tree.items()
+                  if value[0] == b"160000"
+              }
+              total_bytes = 0
+
+              for path in sorted(gitlinks):
+                  if path in external:
+                      continue
+                  full_path = os.path.join(root, path)
+                  entry_stat = os.lstat(full_path)
+                  if not stat.S_ISDIR(entry_stat.st_mode):
+                      fail(
+                          "%s: gitlink worktree is not a real directory: %s"
+                          % (label, display(path))
+                      )
+
+              for path in sorted(blob_entries):
+                  mode, expected_oid = blob_entries[path]
+                  full_path = os.path.join(root, path)
+                  entry_stat = os.lstat(full_path)
+                  if mode == b"120000":
+                      if not stat.S_ISLNK(entry_stat.st_mode):
+                          fail(
+                              "%s: worktree type differs from symlink HEAD entry: %s"
+                              % (label, display(path))
+                          )
+                      content = os.readlink(full_path)
+                      if isinstance(content, str):
+                          content = os.fsencode(content)
+                      size = len(content)
+                      digest = hashlib.sha1(
+                          b"blob "
+                          + str(size).encode("ascii")
+                          + b"\0"
+                          + content
+                      ).hexdigest().encode("ascii")
+                  else:
+                      if not stat.S_ISREG(entry_stat.st_mode):
+                          fail(
+                              "%s: worktree type differs from regular-file HEAD entry: %s"
+                              % (label, display(path))
+                          )
+                      expected_exec = mode == b"100755"
+                      actual_exec = bool(
+                          entry_stat.st_mode & stat.S_IXUSR
+                      )
+                      if actual_exec != expected_exec:
+                          fail(
+                              "%s: worktree executable bit differs from HEAD: %s"
+                              % (label, display(path))
+                          )
+                      size = entry_stat.st_size
+                      digest_state = hashlib.sha1()
+                      digest_state.update(
+                          b"blob "
+                          + str(size).encode("ascii")
+                          + b"\0"
+                      )
+                      flags = os.O_RDONLY | getattr(
+                          os, "O_NOFOLLOW", 0
+                      )
+                      descriptor = os.open(full_path, flags)
+                      try:
+                          opened_stat = os.fstat(descriptor)
+                          if (
+                              not stat.S_ISREG(opened_stat.st_mode)
+                              or opened_stat.st_size != size
+                          ):
+                              fail(
+                                  "%s: worktree file changed before hashing: %s"
+                                  % (label, display(path))
+                              )
+                          while True:
+                              chunk = os.read(
+                                  descriptor, 1024 * 1024
+                              )
+                              if not chunk:
+                                  break
+                              digest_state.update(chunk)
+                          final_stat = os.fstat(descriptor)
+                          opened_identity = (
+                              opened_stat.st_dev,
+                              opened_stat.st_ino,
+                              opened_stat.st_size,
+                              opened_stat.st_mtime_ns,
+                              opened_stat.st_ctime_ns,
+                          )
+                          final_identity = (
+                              final_stat.st_dev,
+                              final_stat.st_ino,
+                              final_stat.st_size,
+                              final_stat.st_mtime_ns,
+                              final_stat.st_ctime_ns,
+                          )
+                          if opened_identity != final_identity:
+                              fail(
+                                  "%s: worktree file changed while hashing: %s"
+                                  % (label, display(path))
+                              )
+                      finally:
+                          os.close(descriptor)
+                      digest = digest_state.hexdigest().encode(
+                          "ascii"
+                      )
+                  total_bytes += size
+                  if digest != expected_oid:
+                      fail(
+                          "%s: raw worktree bytes differ from HEAD for %s"
+                          % (label, display(path))
+                      )
+
+              seen = set()
+              expected_directories = set()
+              for expected_path in (
+                  set(blob_entries) | set(gitlinks) | allowed | external
+              ):
+                  components = expected_path.split(b"/")
+                  for count in range(1, len(components)):
+                      expected_directories.add(
+                          b"/".join(components[:count])
+                      )
+
+              def walk_error(error):
+                  raise error
+
+              for directory, dirnames, filenames in os.walk(
+                  root,
+                  topdown=True,
+                  onerror=walk_error,
+                  followlinks=False,
+              ):
+                  at_root = directory == root
+                  if at_root:
+                      dirnames[:] = [
+                          name for name in dirnames if name != b".git"
+                      ]
+                      filenames = [
+                          name for name in filenames if name != b".git"
+                      ]
+                  for name in list(dirnames):
+                      full_path = os.path.join(directory, name)
+                      relative = os.path.relpath(full_path, root)
+                      if (
+                          relative in allowed
+                          or relative in external
+                          or relative in gitlinks
+                      ):
+                          dirnames.remove(name)
+                          continue
+                      entry_stat = os.lstat(full_path)
+                      if stat.S_ISLNK(entry_stat.st_mode):
+                          dirnames.remove(name)
+                          if relative not in blob_entries:
+                              fail(
+                                  "%s: extra worktree symlink %s"
+                                  % (label, display(relative))
+                              )
+                          seen.add(relative)
+                      elif not stat.S_ISDIR(entry_stat.st_mode):
+                          fail(
+                              "%s: unexpected worktree directory entry type %s"
+                              % (label, display(relative))
+                          )
+                      elif relative not in expected_directories:
+                          fail(
+                              "%s: extra worktree directory %s"
+                              % (label, display(relative))
+                          )
+                  for name in filenames:
+                      relative = os.path.relpath(
+                          os.path.join(directory, name), root
+                      )
+                      if relative in external:
+                          continue
+                      if relative not in blob_entries:
+                          fail(
+                              "%s: extra worktree entry %s"
+                              % (label, display(relative))
+                          )
+                      seen.add(relative)
+              if seen != set(blob_entries):
+                  missing = sorted(set(blob_entries) - seen)
+                  fail(
+                      "%s: tracked worktree entries were not observed: %s"
+                      % (
+                          label,
+                          [display(path) for path in missing[:5]],
+                      )
+                  )
+
+              if git_output(
+                  root_arg, "ls-files", "--stage", "-z"
+              )[0] != index_data:
+                  fail("%s: index changed during verification" % label)
+              for option, _unsafe in flag_modes:
+                  if git_output(
+                      root_arg, "ls-files", option, "-z"
+                  )[0] != flag_snapshots[option]:
+                      fail(
+                          "%s: index flags changed during verification"
+                          % label
+                      )
+              check_head(
+                  root_arg, expected_head, label, "end of verification"
+              )
+
+              totals["repositories"] += 1
+              totals["blobs"] += len(blob_entries)
+              totals["gitlinks"] += len(gitlinks)
+              totals["bytes"] += total_bytes
+
+              for path in sorted(gitlinks):
+                  if path in external:
+                      continue
+                  verify_repository(
+                      os.path.join(root, path),
+                      gitlinks[path],
+                  )
+
+
+          try:
+              arguments = sys.argv[1:]
+              do_rematerialize = bool(
+                  arguments
+                  and arguments[0] == "--rematerialize"
+              )
+              if do_rematerialize:
+                  arguments = arguments[1:]
+              if not arguments or len(arguments) % 4:
+                  fail("repository roots require four arguments per root")
+              root_specs = []
+              for offset in range(0, len(arguments), 4):
+                  repository_root, expected_text, allowed_text, external_text = (
+                      arguments[offset:offset + 4]
+                  )
+                  expected_head = expected_text.encode("ascii")
+                  require_oid(expected_head, "root expected commit")
+                  label = display(os.fsencode(repository_root))
+                  allowed = parse_boundaries(allowed_text, label)
+                  external = parse_boundaries(external_text, label)
+                  root_specs.append(
+                      (repository_root, expected_head, allowed, external)
+                  )
+              if do_rematerialize:
+                  repair_started = time.monotonic()
+                  for root_spec in root_specs:
+                      rematerialize_repository(*root_spec)
+                  print(
+                      "Raw rematerialization completed: "
+                      "%d repositories, %d blobs scanned, "
+                      "%d blobs rewritten, %d bytes, %.3fs."
+                      % (
+                          repair_totals["repositories"],
+                          repair_totals["blobs"],
+                          repair_totals["rewritten"],
+                          repair_totals["bytes"],
+                          time.monotonic() - repair_started,
+                      )
+                  )
+              verification_started = time.monotonic()
+              for root_spec in root_specs:
+                  verify_repository(*root_spec)
+              verification_elapsed = time.monotonic() - verification_started
+              print(
+                  "Pinned object authentication passed: "
+                  "%d repositories, %d commit/tree/blob objects, "
+                  "%d bytes, %.3fs."
+                  % (
+                      authentication_totals["repositories"],
+                      authentication_totals["objects"],
+                      authentication_totals["bytes"],
+                      authentication_totals["seconds"],
+                  )
+              )
+              print(
+                  "Recursive raw integrity verification passed: "
+                  "%d repositories, %d tracked blobs, %d gitlinks, "
+                  "%d bytes, %.3fs."
+                  % (
+                      totals["repositories"],
+                      totals["blobs"],
+                      totals["gitlinks"],
+                      totals["bytes"],
+                      verification_elapsed,
+                  )
+              )
+          except (VerificationError, OSError, UnicodeError) as error:
+              print(
+                  "error: recursive raw integrity verification failed: %s"
+                  % error,
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+          clickhouse_submodules="$(git -C clickHouse submodule status --recursive)"
+          if [ -n "$clickhouse_submodules" ] && \
+             printf '%s\n' "$clickhouse_submodules" | grep -Evq '^ '; then
+            echo 'error: a shared ClickHouse submodule is not at its pinned gitlink' >&2
+            exit 1
+          fi
+
+          [ "$(git rev-parse HEAD)" = "$expected_sha" ]
+          [ -z "$(git symbolic-ref -q --short HEAD || true)" ] || {
+            echo 'error: build-host checkout is not detached' >&2
+            exit 1
+          }
+          if ! git diff --quiet --ignore-submodules=all -- . ':(exclude)clickHouse'; then
+            echo 'error: tracked source differs after checkout/cleanup' >&2
+            git diff --stat --ignore-submodules=all -- . ':(exclude)clickHouse' >&2
+            exit 1
+          fi
+          if ! git diff --cached --quiet; then
+            echo 'error: build-host index is dirty' >&2
+            exit 1
+          fi
+          unexpected_untracked="$({
+            git ls-files --others --exclude-standard |
+              grep -Ev '^(build|contrib)(/|$)' || true
+          })"
+          if [ -n "$unexpected_untracked" ]; then
+            echo 'error: unexpected untracked files remain after cleanup' >&2
+            printf '%s\n' "$unexpected_untracked" >&2
+            exit 1
+          fi
+          if ! git submodule status third_party/rewriter-proto | grep -q '^ '; then
+            echo 'error: rewriter-proto is not at the pinned gitlink' >&2
+            exit 1
+          fi
+
+          require_cache_policy() {
+            local cache=build/CMakeCache.txt
+            local cxx arch
+            [ -f "$cache" ] || {
+              echo 'error: isolated CI CMake cache is missing' >&2
+              exit 1
+            }
+            cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$cache")"
+            arch="$(sed -n 's/^X86_ARCH_LEVEL:[^=]*=//p' "$cache")"
+            if [ "$cxx" != /usr/bin/clang++-22 ]; then
+              echo 'error: CI cache is not configured with /usr/bin/clang++-22' >&2
+              exit 1
+            fi
+            if [ "$arch" != 2 ]; then
+              echo 'error: CI cache X86_ARCH_LEVEL is not 2' >&2
+              exit 1
+            fi
+          }
+
+          require_cache_policy
+          CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
+          # scripts.sh currently logs and swallows a rewriter_tests Ninja
+          # failure. Re-run the target without that fallback so stale cached
+          # test executables cannot make this workflow green.
+          ninja -C build rewriter_tests
+          require_cache_policy
+          test -x build/tests/rewriter_tests || {
+            echo 'error: build/tests/rewriter_tests was not produced' >&2
+            exit 1
+          }
+          if [ ! -L clickHouse/src/clickHouse ] || \
+             [ "$(readlink -f clickHouse/src/clickHouse)" != "$(readlink -f clickHouse/src)" ] || \
+             [ ! -L contrib ] || \
+             [ "$(readlink -f contrib)" != "$(readlink -f clickHouse/contrib)" ]; then
+            echo 'error: scripts.sh did not restore the required ClickHouse symlinks' >&2
+            exit 1
+          fi
+
+          ctest --test-dir build --output-on-failure
+          filter='SpecG/StorageIntegrityGolden.*:StorageIntegrityCorpus.*:SINormalize.*'
+          build/tests/rewriter_tests --gtest_filter="$filter"
+          require_test_count() {
+            local family=$1
+            local expected=$2
+            local count
+            count="$(
+              build/tests/rewriter_tests \
+                --gtest_filter="$family" \
+                --gtest_list_tests |
+                awk '/^  / { count++ } END { print count + 0 }'
+            )"
+            echo "$family cases: $count"
+            if [ "$count" -ne "$expected" ]; then
+              echo "error: expected exactly $expected tests for $family, found $count" >&2
+              exit 1
+            fi
+          }
+          require_test_count 'SpecG/StorageIntegrityGolden.*' 178
+          require_test_count 'StorageIntegrityCorpus.*' 2
+          require_test_count 'SINormalize.*' 11
+          CRITICAL
+          then
+            echo 'error: build-host lock wait or 85-minute critical section failed' >&2
+            exit 1
+          fi
+          REMOTE
+
+  required-check:
+    name: Build & test (build box)
+    needs: remote-build
+    # This plan-named ruleset context must run even when a dependency failed or
+    # skipped. The repository main ruleset requires this status; an org/enterprise
+    # ruleset must separately base-select the policy workflow from main. An
+    # org-admin must live-prove both before D2/merge-policy completion.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require eligible source and successful remote build
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          REMOTE_BUILD_RESULT: ${{ needs.remote-build.result }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
+            echo '::error::Fork changes must be mirrored into housegate/rewriter.'
+            exit 1
+          fi
+          if [ "$REMOTE_BUILD_RESULT" != success ]; then
+            echo '::error::The private build-box job did not pass.'
+            exit 1
+          fi
+          echo 'Eligible source and build-box validation both passed.'

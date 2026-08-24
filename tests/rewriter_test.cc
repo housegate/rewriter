@@ -1,10 +1,10 @@
 #include "rewriter.grpc.pb.h"
 #include "rewriter-server.h"
-#include <Poco/Dynamic/Var.h>
-#include <Poco/JSON/Array.h>
+#include "si_corpus.h"
+#include "si_normalize.h"
 #include <Poco/JSON/Object.h>
-#include <Poco/JSON/Parser.h>
 #include <DataTypes/DataTypesDecimal.h>
+#include <google/protobuf/util/json_util.h>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <fstream>
@@ -4482,7 +4482,56 @@ rewriter::RewriteSQLResponse RunDirectRewrite(rewriter::RewriteSQLRequest req) {
   return resp;
 }
 
+void ExpectRoundTrippedSIRewrite(const rewriter::RewriteSQLRequest &req) {
+  const auto &tables = req.options(0)
+                         .table_name_args()
+                         .dynamic_args()
+                         .storage_integrity()
+                         .tables();
+  ASSERT_NE(tables.find("db1.t"), tables.end());
+
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLResponse resp;
+  service.doRewrite(&req, &resp);
+
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  EXPECT_EQ(resp.sql_after_rewrite(),
+            "SELECT * FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS `db1.t`");
+}
+
 } // namespace
+
+TEST(StorageIntegrityContract, BinaryRoundTripPreservesMapAndRewrite) {
+  rewriter::RewriteSQLRequest original;
+  original.set_sql("SELECT * FROM db1.t");
+  AddSIContractOption(original);
+
+  std::string wire;
+  ASSERT_TRUE(original.SerializeToString(&wire));
+  rewriter::RewriteSQLRequest parsed;
+  ASSERT_TRUE(parsed.ParseFromString(wire));
+
+  ExpectRoundTrippedSIRewrite(parsed);
+}
+
+TEST(StorageIntegrityContract, JsonRoundTripPreservesMapAndRewrite) {
+  rewriter::RewriteSQLRequest original;
+  original.set_sql("SELECT * FROM db1.t");
+  AddSIContractOption(original);
+
+  std::string json;
+  const auto write_status =
+    google::protobuf::util::MessageToJsonString(original, &json);
+  ASSERT_TRUE(write_status.ok()) << write_status.ToString();
+  rewriter::RewriteSQLRequest parsed;
+  const auto read_status =
+    google::protobuf::util::JsonStringToMessage(json, &parsed);
+  ASSERT_TRUE(read_status.ok()) << read_status.ToString();
+
+  ExpectRoundTrippedSIRewrite(parsed);
+}
 
 TEST(StorageIntegrityContract, AcknowledgesValidAndSyntaxErrorPaths) {
   for (const std::string sql : {"SELECT 1", "SELECT ("}) {
@@ -4590,27 +4639,154 @@ TEST(StorageIntegrityContract, DBLevelUsesDynamicArgsButAcknowledgesOnlyActiveSI
 // Storage-integrity read surface (housegate Spec G) — shared golden corpus.
 // tests/testdata/storage_integrity_cases.json is a byte-identical copy of
 // rewriter-go/internal/harness/testdata/storage_integrity_cases.json; the Go
-// harness compares sql_after_rewrite semantically, this suite applies the
-// engine-agnostic want_sql_contains / want_sql_not_contains / sql_exact
-// checks plus every structured field.
+// and C++ runners compare every successful sql_after_rewrite exactly after
+// the shared identifier-quote normalization, plus every structured field.
 // ============================================================================
+
+TEST(StorageIntegrityCorpus, SatisfiesTheFrozenContract) {
+  std::vector<std::string> violations;
+  const auto cases = si_corpus::LoadCases(
+      std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json", &violations);
+  ASSERT_FALSE(cases.empty()) << "the shared behaviour contract cannot be empty";
+  for (const auto &v : si_corpus::ValidateCorpus(cases)) violations.push_back(v);
+  std::string report;
+  for (const auto &v : violations) report += "\n  " + v;
+  EXPECT_TRUE(violations.empty())
+      << "corpus contract violations (" << violations.size() << "):" << report;
+}
+
+TEST(StorageIntegrityCorpus, IsBytePinnedToRewriterGo) {
+  std::ifstream in(std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json",
+                   std::ios::binary);
+  std::stringstream buf;
+  buf << in.rdbuf();
+  const std::string raw = buf.str();
+  EXPECT_EQ(raw.size(), si_corpus::kCorpusBytes);
+  EXPECT_EQ(si_corpus::Fingerprint(raw), si_corpus::kCorpusFingerprint)
+      << "The shared corpus changed. Copy rewriter-go's file verbatim and update the pinned "
+         "constants in BOTH tests/si_corpus.h and rewriter-go internal/harness/sicorpus_test.go.";
+  std::vector<std::string> ignored;
+  EXPECT_EQ(si_corpus::LoadCases(
+                std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json", &ignored)
+                .size(),
+            si_corpus::kCorpusCases);
+}
+
+TEST(SINormalize, SupportedCanonicalOutput) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT 1"), "SELECT 1");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT a FROM `db1.t`"),
+            "SELECT a FROM \"db1.t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT a FROM \"db1.t\""), "SELECT a FROM \"db1.t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT * FROM phys.`db1.t` AS `db1.t`"),
+            "SELECT * FROM phys.\"db1.t\" AS \"db1.t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT '`raw`' FROM `t`"),
+            "SELECT '`raw`' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT '\"' FROM \"t\""),
+            "SELECT '\"' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT '-- /* # // `raw`' FROM `t`"),
+            "SELECT '-- /* # // `raw`' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT 'INSERT FORMAT `raw`' FROM `t`"),
+            "SELECT 'INSERT FORMAT `raw`' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT FORMAT FROM `t`"),
+            "SELECT FORMAT FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("INSERT INTO `t` VALUES ('`raw`')"),
+            "INSERT INTO \"t\" VALUES ('`raw`')");
+}
+
+TEST(SINormalize, DoubledBacktickEscapeMatchesPolyglot) {
+  EXPECT_EQ(si_corpus::NormalizeSIIdentifierQuotes("SELECT * FROM `a``b`"),
+            "SELECT * FROM \"a`b\"");
+}
+
+TEST(SINormalize, BackslashBacktickEscapeMatchesPolyglot) {
+  EXPECT_EQ(si_corpus::NormalizeSIIdentifierQuotes("SELECT * FROM `a\\`b`"),
+            "SELECT * FROM \"a`b\"");
+}
+
+TEST(SINormalize, ReencodesANSIIdentifierDelimiter) {
+  EXPECT_EQ(si_corpus::NormalizeSIIdentifierQuotes("SELECT * FROM `a\"b`"),
+            "SELECT * FROM \"a\"\"b\"");
+}
+
+TEST(SINormalize, SupportedLiteralAndANSIEscapes) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT 'a\\'`raw`' FROM `t`"),
+            "SELECT 'a\\'`raw`' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT 'a''`raw`' FROM `t`"),
+            "SELECT 'a''`raw`' FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT \"a\"\"`raw`\" FROM `t`"),
+            "SELECT \"a\"\"`raw`\" FROM \"t\"");
+  EXPECT_EQ(NormalizeSIIdentifierQuotes("SELECT \"a\\\" FROM `t`"),
+            "SELECT \"a\\\" FROM \"t\"");
+}
+
+TEST(SINormalize, UnsupportedCommentsReturnOriginal) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  const std::vector<std::string> cases = {
+    "SELECT `t` -- keep `raw`\n",
+    "SELECT `t` # keep `raw`\n",
+    "SELECT `t` // keep `raw`\n",
+    "SELECT `t` /* keep `raw` */",
+    "SELECT `t` /*+ keep `raw` */",
+  };
+  for (const auto &sql : cases) EXPECT_EQ(NormalizeSIIdentifierQuotes(sql), sql);
+}
+
+TEST(SINormalize, UnsupportedDollarQuotesReturnOriginal) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  const std::vector<std::string> cases = {
+    "SELECT `t`, $$`raw`$$",
+    "SELECT `t`, $tag$`raw`$tag$",
+    "SELECT `t`, $name",
+  };
+  for (const auto &sql : cases) EXPECT_EQ(NormalizeSIIdentifierQuotes(sql), sql);
+}
+
+TEST(SINormalize, UnsupportedQuoteFormsReturnOriginal) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  const std::vector<std::string> cases = {
+    "SELECT `t`, \"\"\"`raw`\"\"\"",
+    "SELECT `t`, '''`raw`'''",
+    "SELECT `t`, ‘`raw`’",
+    "SELECT `t`, “`raw`”",
+    "SELECT `t`, E'`raw`'",
+    "SELECT `t`, N'`raw`'",
+    "SELECT `t`, U&'`raw`'",
+  };
+  for (const auto &sql : cases) EXPECT_EQ(NormalizeSIIdentifierQuotes(sql), sql);
+}
+
+TEST(SINormalize, InsertFormatReturnsOriginal) {
+  const std::string sql =
+    "INSERT INTO `db.t` FORMAT CSV\n1,`raw`\n\nSELECT `still_payload`";
+  EXPECT_EQ(si_corpus::NormalizeSIIdentifierQuotes(sql), sql);
+}
+
+TEST(SINormalize, MalformedDelimitersReturnOriginal) {
+  using si_corpus::NormalizeSIIdentifierQuotes;
+  const std::vector<std::string> cases = {
+    "SELECT `a",
+    "SELECT `ok`, `bad",
+    "SELECT `ok`, `a\\`b",
+    "SELECT `ok`, \"bad",
+    "SELECT `ok`, 'bad",
+    "SELECT `ok`, 'bad\\",
+  };
+  for (const auto &sql : cases) EXPECT_EQ(NormalizeSIIdentifierQuotes(sql), sql);
+}
+
+// The comparison guard may deliberately leave a harmless identifier-style
+// difference visible when it encounters unsupported syntax. It must never
+// erase a semantic difference inside a literal and produce a false equality.
+TEST(SINormalize, LiteralQuotingBugIsNotHidden) {
+  EXPECT_NE(si_corpus::NormalizeSIIdentifierQuotes("SELECT * FROM t WHERE s = '`raw`'"),
+            si_corpus::NormalizeSIIdentifierQuotes("SELECT * FROM t WHERE s = '\"raw\"'"));
+}
 
 namespace {
 
-struct SIAccessed {
-  std::string original_database, original_table, logical_database, physical_database;
-  bool is_remote = false, is_storage_integrity = false;
-};
-
-struct SIGoldenCase {
-  std::string name, sql, want_code, want_stmt, want_sql, want_message_contains;
-  bool has_dynamic = false, sql_exact = false, reject = false, want_no_contract_ack = false;
-  Poco::JSON::Object::Ptr dynamic; // raw; applied by applyStorageIntegrityArgs
-  std::map<std::string, std::string> want_table_rewrites;
-  bool has_table_rewrites = false, has_accessed = false;
-  std::vector<SIAccessed> want_accessed;
-  std::vector<std::string> want_sql_contains, want_sql_not_contains;
-};
+using SIGoldenCase = si_corpus::Case;
 
 const std::map<std::string, rewriter::RewriteCode> kSICodeByName = {
   {"Success", rewriter::RewriteCode::Success},
@@ -4626,28 +4802,13 @@ const std::map<std::string, rewriter::StatementType> kSIStmtByName = {
   {"CREATE_TABLE", rewriter::STATEMENT_TYPE_CREATE_TABLE},
 };
 
-std::vector<std::string> jsonStrings(const Poco::JSON::Object::Ptr &o, const std::string &key) {
-  std::vector<std::string> out;
-  if (!o || !o->has(key) || o->isNull(key)) return out;
-  auto arr = o->getArray(key);
-  for (size_t i = 0; i < arr->size(); ++i) out.push_back(arr->getElement<std::string>(i));
-  return out;
-}
-
-std::string normalizeSIIdentifierQuotes(std::string sql) {
-  // The Go oracle emits ANSI double quotes while ClickHouse's configured
-  // formatter emits backticks. Canonicalize only that syntactic spelling so
-  // corpus fragments still prove that a keyword/custom RID is actually quoted.
-  std::replace(sql.begin(), sql.end(), '`', '"');
-  return sql;
-}
-
 void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poco::JSON::Object::Ptr &d) {
   if (d->has("database_map")) {
     auto m = d->getObject("database_map");
     for (const auto &k : *m) (*dyn->mutable_database_map())[k.first] = k.second.toString();
   }
-  for (const auto &p : jsonStrings(d, "known_physical_databases")) dyn->add_known_physical_databases(p);
+  for (const auto &p : si_corpus::JsonStrings(d, "known_physical_databases"))
+    dyn->add_known_physical_databases(p);
   if (d->has("upstream_logical_database_in_context"))
     dyn->set_upstream_logical_database_in_context(d->getValue<std::string>("upstream_logical_database_in_context"));
   if (d->has("upstream_physical_database_in_context"))
@@ -4684,54 +4845,15 @@ void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poc
     auto &out = (*args->mutable_tables())[kv.first];
     out.set_safe_table(t->getValue<std::string>("safe_table"));
     out.set_unsafe_table(t->getValue<std::string>("unsafe_table"));
-    for (const auto &p : jsonStrings(t, "excluded_unsafe_parts")) out.add_excluded_unsafe_parts(p);
+    for (const auto &p : si_corpus::JsonStrings(t, "excluded_unsafe_parts"))
+      out.add_excluded_unsafe_parts(p);
   }
 }
 
 std::vector<SIGoldenCase> loadSIGoldenCases() {
-  std::ifstream in(std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json");
-  std::stringstream buf; buf << in.rdbuf();
-  Poco::JSON::Parser parser;
-  auto arr = parser.parse(buf.str()).extract<Poco::JSON::Array::Ptr>();
-  std::vector<SIGoldenCase> out;
-  for (size_t i = 0; i < arr->size(); ++i) {
-    auto o = arr->getObject(i);
-    SIGoldenCase c;
-    c.name = o->getValue<std::string>("name");
-    c.sql = o->getValue<std::string>("sql");
-    if (o->has("want_code")) c.want_code = o->getValue<std::string>("want_code");
-    if (o->has("want_stmt")) c.want_stmt = o->getValue<std::string>("want_stmt");
-    if (o->has("want_sql")) c.want_sql = o->getValue<std::string>("want_sql");
-    if (o->has("want_message_contains")) c.want_message_contains = o->getValue<std::string>("want_message_contains");
-    if (o->has("sql_exact")) c.sql_exact = o->getValue<bool>("sql_exact");
-    if (o->has("reject")) c.reject = o->getValue<bool>("reject");
-    if (o->has("want_no_contract_ack")) c.want_no_contract_ack = o->getValue<bool>("want_no_contract_ack");
-    if (o->has("dynamic")) { c.has_dynamic = true; c.dynamic = o->getObject("dynamic"); }
-    if (o->has("want_table_rewrites")) {
-      c.has_table_rewrites = true;
-      auto m = o->getObject("want_table_rewrites");
-      for (const auto &kv : *m) c.want_table_rewrites[kv.first] = kv.second.toString();
-    }
-    if (o->has("want_accessed")) {
-      c.has_accessed = true;
-      auto a = o->getArray("want_accessed");
-      for (size_t j = 0; j < a->size(); ++j) {
-        auto e = a->getObject(j);
-        SIAccessed w;
-        if (e->has("original_database")) w.original_database = e->getValue<std::string>("original_database");
-        if (e->has("original_table")) w.original_table = e->getValue<std::string>("original_table");
-        if (e->has("logical_database")) w.logical_database = e->getValue<std::string>("logical_database");
-        if (e->has("physical_database")) w.physical_database = e->getValue<std::string>("physical_database");
-        if (e->has("is_remote")) w.is_remote = e->getValue<bool>("is_remote");
-        if (e->has("is_storage_integrity")) w.is_storage_integrity = e->getValue<bool>("is_storage_integrity");
-        c.want_accessed.push_back(w);
-      }
-    }
-    c.want_sql_contains = jsonStrings(o, "want_sql_contains");
-    c.want_sql_not_contains = jsonStrings(o, "want_sql_not_contains");
-    out.push_back(std::move(c));
-  }
-  return out;
+  std::vector<std::string> ignored;
+  return si_corpus::LoadCases(
+    std::string(REWRITER_TEST_DATA_DIR) + "/storage_integrity_cases.json", &ignored);
 }
 
 class StorageIntegrityGolden : public ::testing::TestWithParam<SIGoldenCase> {};
@@ -4778,11 +4900,20 @@ TEST_P(StorageIntegrityGolden, MatchesSharedCorpus) {
       EXPECT_EQ(g->is_storage_integrity(), w.is_storage_integrity);
     }
   }
-  if (c.reject) EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
-  if (!c.reject && c.sql_exact) EXPECT_EQ(resp.sql_after_rewrite(), c.want_sql);
-  const std::string normalized_sql = normalizeSIIdentifierQuotes(resp.sql_after_rewrite());
-  for (const auto &s : c.want_sql_contains) EXPECT_NE(normalized_sql.find(s), std::string::npos) << "missing " << s;
-  for (const auto &s : c.want_sql_not_contains) EXPECT_EQ(normalized_sql.find(s), std::string::npos) << "unexpected " << s;
+  const std::string normalized_sql = si_corpus::NormalizeSIIdentifierQuotes(resp.sql_after_rewrite());
+  if (c.reject) {
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql) << "a rejected statement must echo the input SQL";
+  } else {
+    // Spec J D3: every non-reject case is compared exactly after the shared
+    // normalization. There is no sql_exact opt-in; twelve of the thirteen
+    // want_sql strings used to be dead here.
+    EXPECT_EQ(normalized_sql, si_corpus::NormalizeSIIdentifierQuotes(c.ExpectedSQL()))
+      << "SQL pin mismatch for " << c.name;
+  }
+  for (const auto &s : c.want_sql_contains)
+    EXPECT_NE(normalized_sql.find(s), std::string::npos) << "missing " << s;
+  for (const auto &s : c.want_sql_not_contains)
+    EXPECT_EQ(normalized_sql.find(s), std::string::npos) << "unexpected " << s;
 }
 
 INSTANTIATE_TEST_SUITE_P(SpecG, StorageIntegrityGolden, ::testing::ValuesIn(loadSIGoldenCases()),

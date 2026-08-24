@@ -22,7 +22,8 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 
 - **SSH:** `ssh -p 30100 sentio@BUILD_HOST`
 - **Dev workdir (has build cache):** `/home/sentio/chen/rewriter-grpc/`
-- **CI workdir (used by `.github/workflows/release.yml`):** `~/ci/rewriter/`
+- **Release CI workdir (used by `.github/workflows/release.yml`):** `~/ci/rewriter/`
+- **Pull-request CI workdir (used by `.github/workflows/ci.yml`):** `~/ci/rewriter-ci/`
 - Other directories like `~/chen/sql-rewriter/` or `~/limengyu/sql-rewriter/` are stale — ignore them.
 
 ### Typical dev loop
@@ -129,7 +130,7 @@ new_table := logical + (delim + extra_arguments joined by delim, iff extras non-
 
 Every database used by a configured `safe_table` or `unsafe_table` is a protocol-owned namespace. Direct access is rejected across qualified and current-database table nodes, database-scope USE/SHOW/DDL/DCL, table-valued namespace functions (including remote/cluster/merge and local MergeTree inspection functions), `IN`/`GLOBAL IN` table RHS forms, namespace-bearing table engines, and local ClickHouse dictionary sources. Namespace arguments that cannot be resolved safely reject conservatively. CTAS/INSERT SELECT/view-body source trees run the same preflight. Any use of the reserved row-id as an SI-statement identifier or alias rejects; wrappers that the rewrite cannot preserve (`FINAL`, `SAMPLE`, `WITH OFFSET`, table alias column lists) reject only when bound to the actual SI table expression, leaving ordinary or mixed ordinary wrappers unchanged.
 
-The Go/C++ behavioral contract lives in [tests/testdata/storage_integrity_cases.json](tests/testdata/storage_integrity_cases.json), byte-identical to `rewriter-go/internal/harness/testdata/storage_integrity_cases.json`. Change both copies atomically and run the Go harness with this server as `REWRITER_ORACLE_ADDR` before publishing either engine.
+The Go/C++ behavioral contract lives in [tests/testdata/storage_integrity_cases.json](tests/testdata/storage_integrity_cases.json), byte-identical to `rewriter-go/internal/harness/testdata/storage_integrity_cases.json`. The frozen schema, exact-SQL comparison, local byte pins, and paired-copy procedure are documented under **Storage-integrity parity contract** below. Change both copies through paired PRs and run the Go harness with this server as `REWRITER_ORACLE_ADDR` before publishing either engine.
 
 The trailing separator between the prefix and `origin_table` is **always** a literal `.` — it is NOT the configurable `delim`. The CH formatter wraps the resulting table name in backticks via `IdentifierQuotingRule::WhenNecessary` because it contains a dot, so callers see SQL like `` physical_db_1.`tenant1.events` ``. Examples (`delim="_"`):
 
@@ -214,6 +215,61 @@ A third top-level RPC, separate from `Rewrite`. The **Phase-1 signing normalizer
 ### Tests ([tests/rewriter_test.cc](tests/rewriter_test.cc))
 
 GoogleTest v1.14 fetched via `FetchContent`. Tests link the full server implementation (`rewriter-server.cc` + `ASTTransformers.cc`) and call `RewriterServiceImpl::Rewrite` directly (`main()` is excluded by `REWRITER_RELEASE_MAIN=0` for the test target). Use `RewriterServiceImpl::RewriteForTest` if you need to go through the public-looking entrypoint.
+
+#### Build-box CI
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. It
+binds the build to the immutable event commit, verifies the remote repository,
+gitlinks, tracked files, compiler, and `X86_ARCH_LEVEL=2` cache policy, then
+runs `./scripts.sh rebuild`, a fail-closed `ninja -C build rewriter_tests`,
+`ctest`, and the named storage-integrity suites from
+`build/tests/rewriter_tests`. The suite guard requires exactly 178
+`SpecG/StorageIntegrityGolden` cases, two `StorageIntegrityCorpus` tests, and
+eleven `SINormalize` tests. Do not use `./scripts.sh test` in this persistent
+worktree: it calls the clean `build` path and discards the incremental cache.
+
+PR and release jobs share `concurrency: group: build-box`; GitHub's queued
+concurrency is backed by a host-side `flock`, so neither concurrent PRs nor a
+tag release can mutate the shared checkout together. PR builds use
+`~/ci/rewriter-ci`; releases use `~/ci/rewriter`.
+
+This is a trusted same-repository lane. A repository writer can make PR code
+and its CMake graph execute on the persistent private host, so repository write
+access implies build-host code execution and cache/shared-ClickHouse mutation
+risk. Fork PRs never enter the secret-bearing job: the base-controlled
+`.github/workflows/pr-source-policy.yml` rejects them without checkout, code
+execution, or secrets, and the required `Build & test (build box)` wrapper also
+fails when the remote job is skipped or fails. Never change that policy to
+execute an untrusted head under `pull_request_target`. Repository ruleset
+`15503770` is live in strict mode and requires the terminal
+`Build & test (build box)` context from the GitHub Actions app (app ID `15368`;
+updated 2026-08-24). The base-selected source-policy workflow is not yet an
+enforced required workflow: the organization plan does not enforce
+organization rulesets until it is upgraded. Treat that as an explicit
+plan/licensing blocker tracked as P1 in
+[housegate/housegate#137](https://github.com/housegate/housegate/issues/137).
+The source-policy enforcement is not complete; do not create an ineffective
+disabled organization rule or claim that half is enforced.
+
+#### Storage-integrity parity contract
+
+`tests/si_corpus.h` owns the strict JSON loader, the semantic validator, and
+the local FNV-1a/64 fingerprint, byte-count, and case-count pins.
+`StorageIntegrityCorpus.SatisfiesTheFrozenContract` enforces the schema and
+rules, while `StorageIntegrityCorpus.IsBytePinnedToRewriterGo` verifies this
+repository's local bytes against its pins. That local test cannot read the Go
+repository: cross-repository identity requires paired PRs, an explicit
+byte-for-byte comparison, and the same SHA-256 recorded in both descriptions.
+
+Every reject has a non-Success code and message substring and pins no SQL.
+Every success is compared exactly after
+`si_corpus::NormalizeSIIdentifierQuotes`; `allow_sql_divergence` selects the
+engine-specific `want_sql_cpp`, and there is no `sql_exact`. The literal-aware
+normalizer in `tests/si_normalize.h` preserves string literals and returns the
+original SQL for unsupported or malformed forms instead of globally replacing
+backticks. When the corpus changes, update `kCorpusFingerprint`,
+`kCorpusBytes`, and `kCorpusCases` together with Go's corresponding three
+constants, and record `cmp` plus SHA-256 evidence in both PRs.
 
 ## Development workflow
 

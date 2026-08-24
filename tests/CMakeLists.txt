@@ -28,6 +28,7 @@ target_include_directories(rewriter_tests PRIVATE
     ${REWRITER_PROTO_GENERATED_DIR}
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_BINARY_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_compile_definitions(rewriter_tests PRIVATE

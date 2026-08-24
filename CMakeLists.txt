@@ -145,6 +145,37 @@ set(CMAKE_MODULE_LINKER_FLAGS
 add_subdirectory(clickHouse)
 no_warning(enum-constexpr-conversion)
 
+# Protobuf's generated map accessors and its runtime both instantiate Abseil
+# hashing code.  Those translation units must therefore use the same x86 ISA
+# policy: mixing ClickHouse's x86-64-v2/PCLMUL runtime with generic generated
+# or consumer code changes the inline hash selected for the same map.
+#
+# Mirror ClickHouse's supported AMD64 policy from cpu_features.cmake on every
+# supported OS, including Intel macOS.  The cache variable is the source of
+# truth so -DX86_ARCH_LEVEL=1 remains a valid compatibility build, while
+# levels 2-4 carry ClickHouse's extra PCLMUL baseline.  The target is
+# intentionally empty on non-x86 architectures, where these flags are invalid.
+add_library(rewriter_clickhouse_x86_policy INTERFACE)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(amd64|AMD64|x86_64|X86_64)$")
+    if (NOT DEFINED X86_ARCH_LEVEL OR NOT X86_ARCH_LEVEL MATCHES "^[1-4]$")
+        message(FATAL_ERROR
+            "ClickHouse X86_ARCH_LEVEL must be one of 1, 2, 3, or 4; got "
+            "'${X86_ARCH_LEVEL}'")
+    endif ()
+
+    if (X86_ARCH_LEVEL VERSION_GREATER_EQUAL 2)
+        target_compile_options(rewriter_clickhouse_x86_policy INTERFACE
+            "-march=x86-64-v${X86_ARCH_LEVEL}"
+            -mpclmul)
+    endif ()
+    message(STATUS
+        "Rewriter protobuf consumers use ClickHouse x86 ISA level ${X86_ARCH_LEVEL}")
+else ()
+    message(STATUS
+        "Rewriter protobuf x86 ISA policy is not applicable to "
+        "${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}")
+endif ()
+
 set(REWRITER_PROTO_PATH "third_party/rewriter-proto/proto/rewriter.proto")
 if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${REWRITER_PROTO_PATH}")
     message(FATAL_ERROR
@@ -167,7 +198,11 @@ add_library(rewriter_grpc_protos ${rewriter_grpc_proto_headers} ${rewriter_grpc_
 target_include_directories(rewriter_grpc_protos SYSTEM PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}
     ${REWRITER_PROTO_GENERATED_DIR})
-target_link_libraries(rewriter_grpc_protos PUBLIC ch_contrib::grpc)
+# Publish the ISA policy with the generated-message target so every protobuf
+# consumer inherits it through the normal dependency graph.
+target_link_libraries(rewriter_grpc_protos PUBLIC
+    ch_contrib::grpc
+    rewriter_clickhouse_x86_policy)
 
 message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 
