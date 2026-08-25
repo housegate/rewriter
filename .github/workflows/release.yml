@@ -1284,7 +1284,54 @@ jobs:
             echo 'error: a shared ClickHouse submodule is not at its pinned gitlink' >&2
             exit 1
           fi
-          ./scripts.sh rebuild
+
+          # ClickHouse 26.3 requires Clang >= 21. The release worktree keeps a
+          # persistent CMake cache, so CC/CXX alone cannot move a cache that was
+          # configured with the old Clang 20 toolchain. Invalidate only CMake's
+          # compiler/configuration state when migration is needed; keep the
+          # object cache so historical tags remain practical to rebuild.
+          migrate_release_cache() {
+            local cache=build/CMakeCache.txt
+            local cc='' cxx=''
+            if [ -f "$cache" ]; then
+              cc="$(sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p' "$cache")"
+              cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$cache")"
+            fi
+            if [ -f "$cache" ] && \
+               { [ "$cc" != /usr/bin/clang-22 ] || \
+                 [ "$cxx" != /usr/bin/clang++-22 ]; }; then
+              echo "Migrating release CMake cache from $cc / $cxx to Clang 22."
+              rm -f "$cache"
+              rm -rf build/CMakeFiles
+            fi
+          }
+
+          require_release_cache_policy() {
+            local cache=build/CMakeCache.txt
+            local cc cxx arch
+            [ -f "$cache" ] || {
+              echo 'error: release CMake cache is missing' >&2
+              exit 1
+            }
+            cc="$(sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p' "$cache")"
+            cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$cache")"
+            arch="$(sed -n 's/^X86_ARCH_LEVEL:[^=]*=//p' "$cache")"
+            if [ "$cc" != /usr/bin/clang-22 ] || \
+               [ "$cxx" != /usr/bin/clang++-22 ]; then
+              echo 'error: release cache is not configured with Clang 22' >&2
+              exit 1
+            fi
+            if [ "$arch" != 2 ]; then
+              echo 'error: release cache X86_ARCH_LEVEL is not 2' >&2
+              exit 1
+            fi
+          }
+
+          test -x /usr/bin/clang-22
+          test -x /usr/bin/clang++-22
+          migrate_release_cache
+          CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
+          require_release_cache_policy
           if [ ! -L clickHouse/src/clickHouse ] || \
              [ "$(readlink -f clickHouse/src/clickHouse)" != "$(readlink -f clickHouse/src)" ] || \
              [ ! -L contrib ] || \
