@@ -1378,7 +1378,7 @@ jobs:
               exit 1
             fi
           }
-          require_test_count 'SpecG/StorageIntegrityGolden.*' 210
+          require_test_count 'SpecG/StorageIntegrityGolden.*' 237
           require_test_count 'StorageIntegrityCorpus.*' 2
           require_test_count 'SINormalize.*' 11
           CRITICAL

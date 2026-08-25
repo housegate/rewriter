@@ -440,6 +440,10 @@ void RewriterServiceImpl::doRewrite(
     if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
     if (rewriter_handlers::handleShowTablesQuery(ast, request, response)) return;
+    // Database-level SHOW dispatch stays ahead of EXISTS / SHOW CREATE, mirroring
+    // rewriter-go's order. SHOW COLUMNS / INDEXES parse into their own AST
+    // classes, so they need their own entry here (Spec N D2).
+    if (rewriter_handlers::handleShowColumnsQuery(ast, request, response)) return;
     if (rewriter_handlers::handleExistsQuery(ast, request, response)
         == rewriter_handlers::ExistsDispatchResult::Handled) {
       return;

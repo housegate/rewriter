@@ -31,4 +31,20 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
                            const rewriter::RewriteSQLRequest *request,
                            rewriter::RewriteSQLResponse *response);
 
+// SHOW [EXTENDED] [FULL] COLUMNS|FIELDS {FROM|IN} <table> [{FROM|IN} <database>]
+// and SHOW [EXTENDED] INDEX|INDEXES|INDICES|KEYS with the same shape. ClickHouse
+// parses them into ASTShowColumnsQuery / ASTShowIndexesQuery, which
+// handleShowTablesQuery's ASTShowTablesQuery cast never matched — so under an
+// active storage-integrity contract they used to reach the Spec I D1 catch-all
+// (accidentally fail-closed, with the generic unmodelled-statement message) and
+// without one they fell all the way through to the SELECT dispatch.
+//
+// This family names BOTH a database and a table, so Spec N D2 gates it
+// deliberately: the resolved (database, table) pair for a reserved physical
+// database, the database alone for a storage-integrity logical database, and a
+// verbatim pass-through once the namespace is proved ordinary.
+bool handleShowColumnsQuery(DB::ASTPtr ast,
+                            const rewriter::RewriteSQLRequest *request,
+                            rewriter::RewriteSQLResponse *response);
+
 } // namespace rewriter_handlers

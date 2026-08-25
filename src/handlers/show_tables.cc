@@ -1,6 +1,8 @@
 // src/handlers/show_tables.cc
 #include "handlers/show_tables.h"
 
+#include <Parsers/ASTShowColumnsQuery.h>
+#include <Parsers/ASTShowIndexesQuery.h>
 #include <Parsers/ASTShowTablesQuery.h>
 
 #include <iostream>
@@ -36,6 +38,32 @@ std::string showDatabase(const DB::ASTShowTablesQuery &show_query) {
 bool storageIntegrityActive(const rewriter::RewriteTableDynamicArgs *dynamic) {
   return dynamic && dynamic->has_storage_integrity()
     && !dynamic->storage_integrity().tables().empty();
+}
+
+// The SHOW COLUMNS / INDEXES family's target, read straight off the AST.
+// ClickHouse's parsers resolve both clauses eagerly into plain strings:
+// ParserShowColumnsQuery / ParserShowIndexesQuery take a compound identifier
+// for the table and split its qualifier into `database`, or read a second
+// FROM/IN clause into `database` when the table is unqualified.
+//
+// `database` is empty exactly when the statement names no database: both
+// parsers require an identifier after the second FROM/IN and fail the whole
+// parse otherwise, and neither passes allow_query_parameter, so — unlike
+// SHOW TABLES / SHOW DICTIONARIES — an explicit-but-unresolvable database
+// target (`FROM {db:Identifier}`) is a SyntaxError before any handler runs and
+// cannot be observed here. `table` is always set for a statement that parsed.
+struct ShowColumnsTarget {
+  bool matched = false;
+  std::string database;
+  std::string table;
+};
+
+ShowColumnsTarget showColumnsTarget(const DB::ASTPtr &ast) {
+  if (const auto *columns = ast->as<DB::ASTShowColumnsQuery>())
+    return {true, columns->database, columns->table};
+  if (const auto *indexes = ast->as<DB::ASTShowIndexesQuery>())
+    return {true, indexes->database, indexes->table};
+  return {};
 }
 
 } // namespace
@@ -211,6 +239,70 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   // already encoded into the output SQL, so callers only need the logical
   // -> physical mapping out of band.
   recordDatabaseRewrite(response, logical, *physical);
+  return true;
+}
+
+bool handleShowColumnsQuery(DB::ASTPtr ast,
+                            const rewriter::RewriteSQLRequest *request,
+                            rewriter::RewriteSQLResponse *response) {
+  const auto target = showColumnsTarget(ast);
+  if (!target.matched) return false;
+
+  const auto *dynamic = findDynamicArgs(request->options());
+  if (storageIntegrityActive(dynamic)) {
+    std::string database = target.database;
+    if (database.empty()) {
+      // A bare SHOW COLUMNS FROM <table> executes in the configured physical
+      // context. Guard reserved physical databases before consulting the
+      // logical context; an explicit clause remains authoritative over both.
+      // Context values are already semantic names and must not be fed through
+      // SQL identifier decoding.
+      const std::string &physical_context = dynamic->upstream_physical_database_in_context();
+      if (isStorageIntegrityPhysicalDatabase(physical_context, *dynamic)) {
+        recordPhysicalStorageIntegrityAccess(response, physical_context, "", physical_context);
+        rejectUnsupported(
+          response, storageIntegrityPhysicalDatabaseRejectMessage(physical_context));
+        return true;
+      }
+      database = dynamic->upstream_logical_database_in_context();
+    }
+    if (isStorageIntegrityPhysicalDatabase(database, *dynamic)) {
+      // Unlike the database-only SHOW families this one also names a table, so
+      // reject the pair and record the reserved (database, table) object — the
+      // caller's storage-integrity flag path then sees the object rather than
+      // only its database.
+      if (!target.table.empty()) {
+        recordPhysicalStorageIntegrityAccess(response, database, target.table, database);
+        rejectUnsupported(
+          response, storageIntegrityPhysicalRejectMessage(database + "." + target.table));
+        return true;
+      }
+      recordPhysicalStorageIntegrityAccess(response, database, "", database);
+      rejectUnsupported(response, storageIntegrityPhysicalDatabaseRejectMessage(database));
+      return true;
+    }
+    if (isStorageIntegrityLogicalDatabase(database, *dynamic)) {
+      std::string physical;
+      if (auto resolved = resolvePhysicalDatabase(database, *dynamic)) physical = *resolved;
+      recordStorageIntegrityAccess(response, database, "", database, physical);
+      std::string authorized_logical;
+      if (!authorizeStorageIntegrityLogical(database, *dynamic, &authorized_logical)) {
+        rejectInvalid(response, storageIntegrityUnauthorizedMessage(authorized_logical));
+      } else {
+        rejectUnsupported(response,
+          "storage-integrity logical database " + database + " is not directly addressable");
+      }
+      return true;
+    }
+  }
+
+  // The namespace is ordinary (or no storage-integrity contract is active):
+  // echo the original text instead of formatAst(ast). ASTShowColumnsQuery and
+  // ASTShowIndexesQuery do not round-trip — the formatter canonicalizes
+  // SHOW INDEX / KEYS to SHOW INDEXES and IN to FROM — and rewriter-go echoes
+  // this family verbatim, so echoing is what keeps the two engines equal on
+  // every spelling rather than only on the canonical ones the corpus pins.
+  setSuccessResponse(response, request->sql(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
   return true;
 }
 

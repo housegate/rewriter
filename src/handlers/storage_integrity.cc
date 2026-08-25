@@ -165,6 +165,14 @@ NamespaceRef decodePair(
   return ref;
 }
 
+// argAt returns the argument at `index`, or a null ASTPtr when the call is
+// shorter. decodeSingle treats a null argument as neither a current-database
+// marker nor a resolvable value — the unresolved path — so a short call is
+// refused rather than indexed out of range.
+DB::ASTPtr argAt(const DB::ASTs &args, size_t index) {
+  return index < args.size() ? args[index] : DB::ASTPtr{};
+}
+
 std::optional<NamespaceRef> decodeNamespaceFunction(
   const DB::ASTFunction &fn, NamespaceRefSource source) {
   const std::string name = fn.name;
@@ -196,6 +204,41 @@ std::optional<NamespaceRef> decodeNamespaceFunction(
   }
   if (lname != "mergetree" && lname.starts_with("mergetree"))
     return decodePair(source, name, args, 0);
+  // Foreign-connector table functions whose signature carries a
+  // (database|schema, table) pair reachable by a ClickHouse loopback:
+  // ClickHouse ships its own MySQL (9004) and PostgreSQL (9005) wire listeners,
+  // and a JDBC/ODBC datasource can point back at ClickHouse itself (Spec N D4).
+  // Signatures read from the ClickHouse documentation on 2026-08-25; the decode
+  // is by ARITY because several have a short form whose index 1 is the table
+  // rather than the database, and all five also accept a named-collection form
+  // that names nothing statically and therefore resolves as unresolved.
+  //
+  // sqlite() and redis() are deliberately absent: sqlite's second argument is a
+  // table inside a SQLite FILE and redis's is a COLUMN name, so neither names a
+  // ClickHouse namespace and gating them would only manufacture false positives
+  // (plan deviation D-2). Object-storage and file connectors (s3, url, hdfs,
+  // azureBlobStorage, file, iceberg, deltaLake) address paths, not
+  // (database, table) pairs, and are out of scope for the same reason.
+  if (lname == "mysql" || lname == "postgresql") {
+    // mysql(host:port, database, table, user, password[, ...])
+    // postgresql(host:port, database, table, user, password[, schema[, on_conflict]])
+    return decodePair(source, name, args, 1);
+  }
+  if (lname == "mongodb") {
+    // mongodb(host:port, database, collection, user, password, structure[,
+    // options[, oid_columns]]) versus the URI form
+    // mongodb(uri, collection, structure[, oid_columns]), which carries its
+    // database inside the connection string and so names no ClickHouse
+    // namespace at index 1.
+    if (args.size() >= 6) return decodePair(source, name, args, 1);
+    return decodeSingle(source, name, argAt(args, 1));
+  }
+  if (lname == "jdbc" || lname == "odbc") {
+    // f(datasource, external_database, external_table) versus the short
+    // f(datasource, external_table).
+    if (args.size() == 3) return decodePair(source, name, args, 1);
+    return decodeSingle(source, name, argAt(args, 1));
+  }
   return std::nullopt;
 }
 

@@ -4748,6 +4748,91 @@ TEST(StorageIntegrityShowDictionaries, GuardsDatabaseBeforePassthrough) {
   }
 }
 
+// ClickHouse spells this family with more keywords than polyglot does: FIELDS is
+// a synonym of COLUMNS and INDICES joins INDEX / INDEXES / KEYS. rewriter-go
+// classifies those two spellings as unknown SHOW kinds and refuses them through
+// the Spec I D1 catch-all, so both engines fail closed but with different
+// messages and the shared corpus cannot pin them. Keep the C++ behaviour pinned
+// here instead.
+//
+// Pre-fix (measured on the unmodified tree with the CLI): both answered
+// UnsupportedStatement with "storage-integrity physical database hg_safe is not
+// directly addressable" — the Spec I D2 annotator naming only the database,
+// after ASTShowColumnsQuery / ASTShowIndexesQuery fell through every handler to
+// rejectUnmodelledStorageIntegrityStatement. The pair message below is new.
+TEST(StorageIntegrityShowColumns, ClickHouseOnlySpellingsAreGatedAsThePair) {
+  for (const char *sql : {"SHOW FIELDS FROM db1__t FROM hg_safe",
+                          "SHOW INDICES FROM db1__t FROM hg_safe"}) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.message(),
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable");
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "hg_safe");
+    EXPECT_EQ(resp.original_accessed_tables(0).original_table(), "db1__t");
+    EXPECT_TRUE(resp.original_accessed_tables(0).is_storage_integrity());
+  }
+}
+
+// An ordinary namespace passes through with the ORIGINAL text, not formatAst.
+// ASTShowIndexesQuery's formatter canonicalizes SHOW INDEX / KEYS to
+// SHOW INDEXES and IN to FROM, which would make the two engines disagree on
+// every non-canonical spelling.
+//
+// Pre-fix: Success but STATEMENT_TYPE_SELECT with the canonicalized SQL
+// "SHOW INDEXES FROM u FROM other", because the statement reached the SELECT
+// dispatch tail.
+TEST(StorageIntegrityShowColumns, OrdinaryNamespacePassesThroughVerbatim) {
+  for (const char *sql : {"SHOW INDEX FROM other.u", "SHOW FULL COLUMNS FROM u IN other"}) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+  }
+}
+
+// Two inputs where ClickHouse's parser is strictly narrower than polyglot's, so
+// the statement never reaches a handler and the engines answer different codes.
+// Both refuse — this is a fail-closed divergence, not a bypass — but the corpus
+// schema carries one want_code per case, so neither can be pinned there (plan
+// deviation D-4). This test is the C++ half of that record.
+//
+//   SHOW SOMETHINGNEW FROM hg_safe            rewriter-go: UnsupportedStatement
+//     (ParserShowTablesQuery takes a fixed keyword set; polyglot reports
+//      ShowWhat=SOMETHINGNEW and the Go classifier refuses it as unknown)
+//   SHOW COLUMNS FROM db1__t FROM {db:Ident}  rewriter-go: UnsupportedStatement
+//     (ParserShowColumnsQuery parses the second clause with ParserIdentifier()
+//      and never allows a query parameter)
+//
+// Neither is a new guard: both already answered SyntaxError before this change.
+TEST(StorageIntegrityShowColumns, ParserNarrowerThanPolyglotStillFailsClosed) {
+  for (const char *sql : {"SHOW SOMETHINGNEW FROM hg_safe",
+                          "SHOW COLUMNS FROM db1__t FROM {db:Identifier}",
+                          "SHOW COLUMNS FROM {t:Identifier} FROM hg_safe"}) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::SyntaxError) << resp.message();
+  }
+}
+
 TEST(StorageIntegrityShowPrefixes, LegalPrefixesPreserveTargetSemantics) {
   const std::vector<std::string> prefixes = {
     "FULL ",
