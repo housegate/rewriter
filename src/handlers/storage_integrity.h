@@ -16,7 +16,9 @@ constexpr std::string_view kDefaultReservedRowIdColumn = "_hg_row_id";
 constexpr std::string_view kStorageIntegrityContractMessage =
   "storage-integrity contract version V1 is required";
 constexpr std::string_view kStorageIntegrityWrapperMessage =
-  "FINAL/SAMPLE/WITH OFFSET/column aliases on storage-integrity tables are not supported";
+  "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported";
+constexpr std::string_view kStorageIntegrityUnmodelledMessage =
+  "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded";
 
 struct StorageIntegrityHit {
   const rewriter::StorageIntegrityArgs::Table *table = nullptr;
@@ -57,6 +59,13 @@ DB::ASTPtr buildStorageIntegrityDerivedTable(
 std::string restoreStorageIntegrityProjectionSyntax(
   std::string sql, const std::string &reserved_column);
 bool astReferencesIdentifier(const DB::ASTPtr &ast, const std::string &name);
+// Scope-aware variant of astReferencesIdentifier: a reference counts only when
+// the query block owning it reads a storage-integrity table, or when its
+// qualifier is bound to one in that block or an enclosing one. An identically
+// named column on an ordinary table is legitimate (Spec I D7a).
+bool astReferencesIdentifierInScope(const DB::ASTPtr &ast,
+  const std::string &name,
+  const rewriter::RewriteTableDynamicArgs &args);
 std::string describeMetadataSQL(const std::string &safe_table, const std::string &reserved_column);
 
 // Response helpers keep SI classification present on every reject, including
@@ -91,6 +100,16 @@ struct NamespaceRef {
   bool uses_current_database = false;
 };
 
+// One read-bearing AST event in grammar/source order. Keeping ordinary table
+// nodes and indirect namespace refs in one stream makes the first SI object
+// win even when the two source kinds are interleaved (Spec I D2).
+struct StorageIntegrityReadRef {
+  enum class Kind { Table, Namespace } kind = Kind::Table;
+  std::string database;
+  std::string table;
+  NamespaceRef namespace_ref;
+};
+
 // Compatibility shim for SI syntax accepted by the Go parser but absent from
 // the pinned ClickHouse parser (WITH OFFSET, table alias column lists, and
 // star RENAME). It tokenizes source SQL so literals/comments cannot trigger
@@ -117,9 +136,29 @@ void restoreStorageIntegritySQL(
   rewriter::RewriteSQLResponse *response, const StorageIntegritySQLCompatibility &compatibility);
 
 std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast);
+std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast);
 bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
   const std::vector<NamespaceRef> &refs,
   const rewriter::RewriteTableDynamicArgs &args,
   rewriter::RewriteCode code);
+
+// Refuse any statement whose root is not a SELECT-family node while the v1
+// storage-integrity contract is active: reaching the SELECT dispatch tail with
+// such a root means no handler modelled the statement, so nothing checked it
+// against the protocol-owned namespaces (Spec I D1). Returns true when the
+// response was turned into a rejection.
+bool rejectUnmodelledStorageIntegrityStatement(const DB::ASTPtr &ast,
+  const rewriter::RewriteTableDynamicArgs &args,
+  rewriter::RewriteSQLResponse *response);
+
+// Upgrade an already-rejected response's message so it names the
+// storage-integrity object the statement addressed (Spec I D2). Message-only:
+// Success is never touched, a response that already carries an SI-flagged
+// accessed table keeps its own message, and a statement that names nothing
+// storage-integrity keeps the caller's message.
+void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
+  const DB::ASTPtr &ast,
+  const std::string &sql,
+  const rewriter::RewriteTableDynamicArgs &args);
 
 } // namespace rewriter_handlers

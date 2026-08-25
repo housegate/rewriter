@@ -36,14 +36,15 @@ inline void setSuccessResponse(rewriter::RewriteSQLResponse *response,
 }
 
 // Escape `s` so it can be embedded inside a single-quoted ClickHouse string
-// literal. Doubles every single quote (CH accepts both '' and \' as escapes;
-// the doubled form is portable). Backslashes and other characters pass
-// through unchanged — callers should not pass arbitrary binary.
+// literal. ClickHouse honours BOTH '' and \' as an escaped quote, so a value
+// ending in a backslash would otherwise escape the closing quote and swallow
+// whatever follows. Backslashes are doubled BEFORE quotes (Spec I D4).
 inline std::string escapeSqlLiteral(const std::string &s) {
   std::string out;
   out.reserve(s.size());
   for (char c : s) {
-    if (c == '\'') out += "''";
+    if (c == '\\') out += "\\\\";
+    else if (c == '\'') out += "''";
     else out += c;
   }
   return out;

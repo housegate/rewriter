@@ -26,6 +26,18 @@ void rejectUnsupported(rewriter::RewriteSQLResponse *response, const std::string
   response->set_code(rewriter::RewriteCode::UnsupportedStatement);
 }
 
+std::string showDatabase(const DB::ASTShowTablesQuery &show_query) {
+  std::string database = show_query.getFrom();
+  if (const auto dot = database.find('.'); dot != std::string::npos)
+    database = database.substr(0, dot);
+  return database;
+}
+
+bool storageIntegrityActive(const rewriter::RewriteTableDynamicArgs *dynamic) {
+  return dynamic && dynamic->has_storage_integrity()
+    && !dynamic->storage_integrity().tables().empty();
+}
+
 } // namespace
 
 bool handleShowTablesQuery(DB::ASTPtr ast,
@@ -34,17 +46,83 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   auto *show_query = ast->as<DB::ASTShowTablesQuery>();
   if (!show_query) return false;
 
+  const auto *dynamic = findDynamicArgs(request->options());
+  const bool has_explicit_database = show_query->from != nullptr;
+  const std::string explicit_database = showDatabase(*show_query);
+
+  // ASTQueryParameter is a syntactically explicit database target, but
+  // ASTShowTablesQuery::getFrom() cannot resolve it to a semantic name. Under
+  // active SI it must not fall through to the session context as if no clause
+  // were present.
+  if (storageIntegrityActive(dynamic) && has_explicit_database
+      && explicit_database.empty()) {
+    const std::string family = show_query->dictionaries
+      ? "SHOW DICTIONARIES" : "SHOW TABLES";
+    rejectUnsupported(response,
+      "storage-integrity " + family + " database is not statically resolvable");
+    return true;
+  }
+
+  // SHOW DICTIONARIES is otherwise a modeled passthrough, but its FROM/IN
+  // database is still an addressable namespace. Guard that structured target
+  // before the passthrough so an SI physical/logical database cannot escape
+  // through this early return. Other SHOW families have no database target
+  // and retain their legacy behavior.
+  if (show_query->dictionaries && dynamic) {
+    std::string logical = explicit_database;
+    if (!has_explicit_database) {
+      // Context values are already semantic names. Do not feed them through
+      // SQL identifier decoding. The actual execution database is the first
+      // contextual guard, ahead of the logical session name.
+      const std::string &physical_context =
+        dynamic->upstream_physical_database_in_context();
+      if (isStorageIntegrityPhysicalDatabase(physical_context, *dynamic)) {
+        recordPhysicalStorageIntegrityAccess(
+          response, physical_context, "", physical_context);
+        rejectUnsupported(
+          response, storageIntegrityPhysicalDatabaseRejectMessage(physical_context));
+        return true;
+      }
+      logical = dynamic->upstream_logical_database_in_context();
+    }
+    if (isStorageIntegrityPhysicalDatabase(logical, *dynamic)) {
+      recordPhysicalStorageIntegrityAccess(response, logical, "", logical);
+      rejectUnsupported(response, storageIntegrityPhysicalDatabaseRejectMessage(logical));
+      return true;
+    }
+    if (isStorageIntegrityLogicalDatabase(logical, *dynamic)) {
+      std::string physical;
+      if (auto resolved = resolvePhysicalDatabase(logical, *dynamic)) physical = *resolved;
+      recordStorageIntegrityAccess(response, logical, "", logical, physical);
+      std::string authorized_logical;
+      if (!authorizeStorageIntegrityLogical(logical, *dynamic, &authorized_logical)) {
+        rejectInvalid(response, storageIntegrityUnauthorizedMessage(authorized_logical));
+      } else {
+        rejectUnsupported(response,
+          "storage-integrity logical database " + logical + " is not directly addressable");
+      }
+      return true;
+    }
+  }
+
   // SHOW CLUSTERS / SHOW DICTIONARIES / SHOW SETTINGS / ... — the rewrite
   // policy here only covers SHOW TABLES proper; SHOW DATABASES is handled
   // by handleShowDatabasesQuery, which dispatches before us.
   if (show_query->clusters || show_query->cluster
       || show_query->dictionaries || show_query->m_settings
       || show_query->merges || show_query->caches) {
-    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    // DICTIONARIES is an exact passthrough family. ASTShowTablesQuery's
+    // formatter omits the legal FULL prefix, so formatting here would
+    // silently change SHOW FULL [TEMPORARY] DICTIONARIES after its namespace
+    // guard has succeeded. Other legacy SHOW families keep their normalized
+    // AST output.
+    const std::string result_sql = show_query->dictionaries
+      ? request->sql()
+      : formatAst(ast);
+    setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
     return true;
   }
 
-  const auto *dynamic = findDynamicArgs(request->options());
   if (!dynamic) {
     // No rewrite config → passthrough.
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
@@ -54,10 +132,7 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   // "FROM <db>" / "IN <db>" in the original SQL. `getFrom()` returns
   // "database.table" or "database"; keep the leading db part only — the
   // SHOW TABLES semantics treat the FROM clause as the logical db.
-  std::string from_logical = show_query->getFrom();
-  if (auto dot = from_logical.find('.'); dot != std::string::npos) {
-    from_logical = from_logical.substr(0, dot);
-  }
+  std::string from_logical = explicit_database;
 
   // SQL qualifier wins over upstream context, same as applyDynamicRewrite.
   const std::string logical = from_logical.empty()

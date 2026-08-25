@@ -69,7 +69,8 @@ jobs:
           printf -v ref_q '%q' "$REF"
           printf -v version_q '%q' "$VERSION"
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes sentio@BUILD_HOST \
+            -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 sentio@BUILD_HOST \
             "bash -s -- $ref_q $version_q" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1

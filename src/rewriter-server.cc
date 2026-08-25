@@ -383,6 +383,21 @@ void RewriterServiceImpl::doRewrite(
       rewriter_handlers::restoreStorageIntegritySQL(response, *compatibility);
     }
   } _si_restore{response, &si_compatibility};
+  DB::ASTPtr parsed_ast;
+  // Spec I D2: one place upgrades every reject's message to name the SI object
+  // it touched, on every exit path, so no handler has to grow its own SI
+  // branch. Mirrors rewriter-go's finalize() hook.
+  struct StorageIntegrityRejectAnnotator {
+    RewriteSQLResponse *response;
+    const DB::ASTPtr *ast;
+    const std::string *sql;
+    const rewriter::RewriteTableDynamicArgs *args;  // null when SI is inactive
+    ~StorageIntegrityRejectAnnotator() {
+      if (!args) return;
+      rewriter_handlers::annotateStorageIntegrityReject(response, *ast, *sql, *args);
+    }
+  } _si_annotate{response, &parsed_ast, &original_query,
+                 si_active ? si_selection.dynamic_args : nullptr};
 
   // Preprocess the query to split large IN clauses. The preprocessor logs a
   // single [preprocess] line only when it actually transformed the SQL; the
@@ -407,7 +422,8 @@ void RewriterServiceImpl::doRewrite(
     // form, which converts `pos` and `end` to temporary strings whose
     // buffers die on return — leaving INSERT inline payload pointers
     // dangling. See doRewriteErrorMessage below for the same pattern.
-    DB::ASTPtr ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    parsed_ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    DB::ASTPtr &ast = parsed_ast;
 
     // Surface the existence-check clause (IF NOT EXISTS / IF EXISTS) as a
     // pure syntactic property of the AST, before any handler runs — so it's
@@ -447,6 +463,9 @@ void RewriterServiceImpl::doRewrite(
       case rewriter_handlers::WriteDispatchResult::NotAWrite:
         break;  // fall through to SELECT
     }
+    if (si_active && rewriter_handlers::rejectUnmodelledStorageIntegrityStatement(
+          ast, *si_selection.dynamic_args, response))
+      return;
     rewriter_handlers::handleSelectQuery(ast, request, response);
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real

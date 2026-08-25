@@ -73,7 +73,8 @@ jobs:
           fi
 
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes sentio@BUILD_HOST \
+            -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 sentio@BUILD_HOST \
             "bash -s -- '$EVENT_NAME' '$SHA'" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
@@ -1377,7 +1378,7 @@ jobs:
               exit 1
             fi
           }
-          require_test_count 'SpecG/StorageIntegrityGolden.*' 178
+          require_test_count 'SpecG/StorageIntegrityGolden.*' 210
           require_test_count 'StorageIntegrityCorpus.*' 2
           require_test_count 'SINormalize.*' 11
           CRITICAL

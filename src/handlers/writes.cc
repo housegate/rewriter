@@ -303,6 +303,17 @@ bool preflightStorageIntegrityWrite(
           response, sel, create->as_database, create->as_table, false)) {
       return true;
     }
+    // Column declarations and table constraints are expression-bearing AST
+    // carriers too: DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL and CHECK may contain
+    // subqueries. Walk the owned definitions as one ordered subtree so the
+    // first embedded logical/physical SI read is rejected before CREATE can
+    // reach ClickHouse.
+    if (auto definitions = ownedChild(*create, create->columns_list);
+        definitions && rejectEmbeddedStorageIntegrityRead(
+          definitions, sel, response,
+          rewriter::RewriteCode::UnsupportedStatement)) {
+      return true;
+    }
     if (!create->is_ordinary_view && !create->is_materialized_view
         && create->select) {
       if (auto body = ownedChild(*create, create->select);
@@ -349,6 +360,44 @@ bool preflightStorageIntegrityWrite(
               command->to_table, false)) {
           return true;
         }
+        // Mutations may read tables from their assignment/predicate
+        // subqueries even though the outer target is ordinary. Preserve the
+        // grammar order shared with Go: UPDATE assignments before predicate;
+        // DELETE predicate only (Spec I Task 2a).
+        if (command->type == DB::ASTAlterCommand::UPDATE) {
+          if (auto assignments = ownedChild(*command, command->update_assignments);
+              assignments && rejectEmbeddedStorageIntegrityRead(
+                assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+            return true;
+          }
+          if (auto predicate = ownedChild(*command, command->predicate);
+              predicate && rejectEmbeddedStorageIntegrityRead(
+                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+            return true;
+          }
+        } else if (command->type == DB::ASTAlterCommand::DELETE) {
+          if (auto predicate = ownedChild(*command, command->predicate);
+              predicate && rejectEmbeddedStorageIntegrityRead(
+                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+            return true;
+          }
+        } else if (command->type == DB::ASTAlterCommand::MODIFY_QUERY) {
+          if (auto body = ownedChild(*command, command->select);
+              body && rejectEmbeddedStorageIntegrityRead(
+                body, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+            return true;
+          }
+        } else if (rejectEmbeddedStorageIntegrityRead(
+                     raw, sel, response,
+                     rewriter::RewriteCode::UnsupportedStatement)) {
+          // ALTER has several expression-bearing command carriers besides
+          // mutations and MODIFY QUERY. In particular, compound column
+          // declarations (DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL), constraints,
+          // indexes, projections, ORDER BY, SAMPLE BY and TTL expressions may
+          // contain subqueries. Walk the complete command subtree in source
+          // order so new or less-common carriers cannot bypass SI preflight.
+          return true;
+        }
       }
     }
     return false;
@@ -365,6 +414,34 @@ bool preflightStorageIntegrityWrite(
             insert->select, sel, response)) {
         return true;
       }
+    }
+    return false;
+  }
+
+  if (auto *update = ast->as<DB::ASTUpdateQuery>()) {
+    if (rejectStorageIntegrityWriteTarget(
+          response, sel, update->getDatabase(), update->getTable(), false)) {
+      return true;
+    }
+    if (update->assignments && rejectEmbeddedStorageIntegrityRead(
+          update->assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+      return true;
+    }
+    if (update->predicate && rejectEmbeddedStorageIntegrityRead(
+          update->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+      return true;
+    }
+    return false;
+  }
+
+  if (auto *delete_query = ast->as<DB::ASTDeleteQuery>()) {
+    if (rejectStorageIntegrityWriteTarget(
+          response, sel, delete_query->getDatabase(), delete_query->getTable(), false)) {
+      return true;
+    }
+    if (delete_query->predicate && rejectEmbeddedStorageIntegrityRead(
+          delete_query->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+      return true;
     }
     return false;
   }

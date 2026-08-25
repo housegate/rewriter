@@ -1,5 +1,7 @@
 #include "rewriter.grpc.pb.h"
 #include "rewriter-server.h"
+#include "handlers/common.h"
+#include "handlers/storage_integrity.h"
 #include "si_corpus.h"
 #include "si_normalize.h"
 #include <Poco/JSON/Object.h>
@@ -4633,6 +4635,905 @@ TEST(StorageIntegrityContract, DBLevelUsesDynamicArgsButAcknowledgesOnlyActiveSI
   EXPECT_EQ(resp.sql_after_rewrite(), "USE phys");
   EXPECT_EQ(resp.storage_integrity_contract_version(),
             rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+}
+
+TEST(StorageIntegrityCatchAll, UnmodelledStatementPassesThroughWithoutStorageIntegrity) {
+  RewriterServiceImpl service;
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SYSTEM RELOAD CONFIG");
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["db1"] = "phys";
+  dyn->add_known_physical_databases("phys");
+  dyn->set_delim("_");
+
+  rewriter::RewriteSQLResponse resp;
+  grpc::ServerContext ctx;
+  ASSERT_TRUE(service.Rewrite(&ctx, &req, &resp).ok());
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+}
+
+TEST(StorageIntegrityCatchAll, StructuredSystemTargetsSkipClusterDecoys) {
+  struct Case {
+    const char *sql;
+    const char *message;
+  };
+  const std::vector<Case> cases = {
+    {"SYSTEM STOP PULLING REPLICATION LOG ON CLUSTER hg_safe hg_unsafe.db1__t",
+      "storage-integrity physical table hg_unsafe.db1__t is not directly addressable"},
+    {"SYSTEM RELOAD CONFIG ON CLUSTER hg_safe",
+      "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+  }
+}
+
+TEST(StorageIntegrityCatchAll, SyntaxErrorMessageIsNeverLexicallyAnnotated) {
+  constexpr const char *sql = "SELECT * FROM hg_safe.db1__t WHERE (";
+
+  rewriter::RewriteSQLRequest plain;
+  plain.set_sql(sql);
+  const auto plain_resp = RunDirectRewrite(std::move(plain));
+  ASSERT_EQ(plain_resp.code(), rewriter::RewriteCode::SyntaxError);
+
+  rewriter::RewriteSQLRequest protected_req;
+  protected_req.set_sql(sql);
+  AddSIContractOption(protected_req);
+  const auto protected_resp = RunDirectRewrite(std::move(protected_req));
+  EXPECT_EQ(protected_resp.code(), rewriter::RewriteCode::SyntaxError);
+  EXPECT_EQ(protected_resp.message(), plain_resp.message());
+  EXPECT_EQ(protected_resp.sql_after_rewrite(), "Error parsing query");
+}
+
+TEST(StorageIntegrityShowDictionaries, GuardsDatabaseBeforePassthrough) {
+  struct Case {
+    const char *sql;
+    rewriter::RewriteCode code;
+    const char *message;
+    const char *original_database;
+    const char *logical_database;
+    const char *physical_database;
+  };
+  const std::vector<Case> cases = {
+    {"SHOW DICTIONARIES FROM hg_safe", rewriter::RewriteCode::UnsupportedStatement,
+      "storage-integrity physical database hg_safe is not directly addressable",
+      "hg_safe", "", "hg_safe"},
+    {"SHOW DICTIONARIES FROM db1", rewriter::RewriteCode::UnsupportedStatement,
+      "storage-integrity logical database db1 is not directly addressable",
+      "db1", "db1", "phys"},
+    {"SHOW DICTIONARIES FROM other", rewriter::RewriteCode::Success,
+      "success", "", "", ""},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), c.code) << resp.message();
+    EXPECT_EQ(resp.message(), c.message);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    if (c.code == rewriter::RewriteCode::Success) {
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+      continue;
+    }
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.original_database);
+    EXPECT_TRUE(access.original_table().empty());
+    EXPECT_EQ(access.logical_database(), c.logical_database);
+    EXPECT_EQ(access.physical_database(), c.physical_database);
+    EXPECT_TRUE(access.is_storage_integrity());
+    EXPECT_FALSE(access.is_remote());
+  }
+}
+
+TEST(StorageIntegrityShowPrefixes, LegalPrefixesPreserveTargetSemantics) {
+  const std::vector<std::string> prefixes = {
+    "FULL ",
+    "TEMPORARY ",
+    "FULL TEMPORARY ",
+  };
+
+  auto rewrite = [](const std::string &sql) {
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+    return RunDirectRewrite(std::move(req));
+  };
+
+  const auto logical_tables_baseline = rewrite("SHOW TABLES FROM db1");
+  ASSERT_EQ(logical_tables_baseline.code(), rewriter::RewriteCode::Success)
+    << logical_tables_baseline.message();
+  const auto ordinary_tables_baseline = rewrite("SHOW TABLES FROM other");
+  ASSERT_EQ(ordinary_tables_baseline.code(), rewriter::RewriteCode::Success)
+    << ordinary_tables_baseline.message();
+
+  for (const auto &prefix : prefixes) {
+    {
+      const std::string sql = "SHOW " + prefix + "TABLES FROM hg_safe";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.message(),
+        "storage-integrity physical database hg_safe is not directly addressable");
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "hg_safe");
+      EXPECT_EQ(resp.original_accessed_tables(0).physical_database(), "hg_safe");
+      EXPECT_TRUE(resp.original_accessed_tables(0).is_storage_integrity());
+    }
+    {
+      const std::string sql = "SHOW " + prefix + "TABLES FROM db1";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_EQ(resp.sql_after_rewrite(), logical_tables_baseline.sql_after_rewrite());
+      ASSERT_EQ(resp.database_rewrites_size(), 1);
+      EXPECT_EQ(resp.database_rewrites().at("db1"), "phys");
+    }
+    {
+      const std::string sql = "SHOW " + prefix + "TABLES FROM other";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_EQ(resp.sql_after_rewrite(), ordinary_tables_baseline.sql_after_rewrite());
+      ASSERT_EQ(resp.database_rewrites_size(), 1);
+      EXPECT_EQ(resp.database_rewrites().at("other"), "phys");
+    }
+    {
+      const std::string sql = "SHOW " + prefix + "DICTIONARIES FROM hg_safe";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.message(),
+        "storage-integrity physical database hg_safe is not directly addressable");
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "hg_safe");
+      EXPECT_EQ(resp.original_accessed_tables(0).physical_database(), "hg_safe");
+      EXPECT_TRUE(resp.original_accessed_tables(0).is_storage_integrity());
+    }
+    {
+      const std::string sql = "SHOW " + prefix + "DICTIONARIES FROM db1";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.message(),
+        "storage-integrity logical database db1 is not directly addressable");
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "db1");
+      EXPECT_EQ(resp.original_accessed_tables(0).logical_database(), "db1");
+      EXPECT_EQ(resp.original_accessed_tables(0).physical_database(), "phys");
+      EXPECT_TRUE(resp.original_accessed_tables(0).is_storage_integrity());
+    }
+    {
+      const std::string sql = "SHOW " + prefix + "DICTIONARIES FROM other";
+      SCOPED_TRACE(sql);
+      const auto resp = rewrite(sql);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+  }
+}
+
+TEST(StorageIntegrityShowPrefixes, KeywordDatabaseTargetsUseStructuredAST) {
+  const std::vector<std::string> databases = {
+    "system", "default", "select", "from", "table", "settings",
+  };
+
+  for (const auto &database : databases) {
+    {
+      const std::string sql =
+        "SHOW FULL TEMPORARY TABLES FROM " + database;
+      SCOPED_TRACE(sql);
+      rewriter::RewriteSQLRequest req;
+      req.set_sql(sql);
+      AddSIContractOption(req);
+      auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+      (*dyn->mutable_database_map())[database] = "phys";
+
+      const auto resp = RunDirectRewrite(std::move(req));
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_NE(resp.sql_after_rewrite().find("database = 'phys'"),
+                std::string::npos);
+      EXPECT_NE(resp.sql_after_rewrite().find(
+                  "startsWith(name, '" + database + ".')"),
+                std::string::npos);
+      ASSERT_EQ(resp.database_rewrites_size(), 1);
+      EXPECT_EQ(resp.database_rewrites().at(database), "phys");
+    }
+    {
+      const std::string sql =
+        "SHOW FULL TEMPORARY DICTIONARIES FROM " + database;
+      SCOPED_TRACE(sql);
+      rewriter::RewriteSQLRequest req;
+      req.set_sql(sql);
+      AddSIContractOption(req);
+      auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+      (*dyn->mutable_database_map())[database] = "phys";
+
+      const auto resp = RunDirectRewrite(std::move(req));
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+  }
+}
+
+TEST(StorageIntegrityShowPrefixes, ReversePrefixOrderRemainsSyntaxError) {
+  const std::vector<std::string> cases = {
+    "SHOW TEMPORARY FULL TABLES FROM hg_safe",
+    "SHOW TEMPORARY FULL DICTIONARIES FROM hg_safe",
+  };
+
+  for (const auto &sql : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest plain;
+    plain.set_sql(sql);
+    const auto plain_resp = RunDirectRewrite(std::move(plain));
+    ASSERT_EQ(plain_resp.code(), rewriter::RewriteCode::SyntaxError);
+
+    rewriter::RewriteSQLRequest protected_req;
+    protected_req.set_sql(sql);
+    AddSIContractOption(protected_req);
+    const auto protected_resp = RunDirectRewrite(std::move(protected_req));
+    EXPECT_EQ(protected_resp.code(), rewriter::RewriteCode::SyntaxError);
+    EXPECT_EQ(protected_resp.message(), plain_resp.message());
+    EXPECT_EQ(protected_resp.sql_after_rewrite(), "Error parsing query");
+  }
+}
+
+TEST(StorageIntegrityShowNamespaces, UnresolvedExplicitDatabaseFailsClosed) {
+  struct Case {
+    const char *sql;
+    const char *message;
+  };
+  const std::vector<Case> cases = {
+    {"SHOW DICTIONARIES FROM {db:Identifier}",
+      "storage-integrity SHOW DICTIONARIES database is not statically resolvable"},
+    {"SHOW TABLES FROM {db:Identifier}",
+      "storage-integrity SHOW TABLES database is not statically resolvable"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+      ->set_upstream_logical_database_in_context("db1");
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    EXPECT_EQ(resp.database_rewrites_size(), 0);
+  }
+}
+
+TEST(StorageIntegrityShowNamespaces, EmptyStorageIntegritySurfaceKeepsDictionaryPassthrough) {
+  const std::vector<std::string> cases = {
+    "SHOW DICTIONARIES FROM {db:Identifier}",
+    "SHOW DICTIONARIES FROM hg_safe",
+    "SHOW FULL DICTIONARIES FROM hg_safe",
+    "SHOW TEMPORARY DICTIONARIES FROM hg_safe",
+    "SHOW FULL TEMPORARY DICTIONARIES FROM hg_safe",
+  };
+  for (const auto &sql : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    auto *opt = req.add_options();
+    opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+    auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["db1"] = "phys";
+    dyn->set_upstream_logical_database_in_context("db1");
+    dyn->mutable_storage_integrity()->set_contract_version(
+      rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+    EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+  }
+}
+
+TEST(StorageIntegrityShowNamespaces, ContextNamesAreAlreadySemantic) {
+  constexpr const char *literal_context = "hg\\x5Fsafe";
+
+  rewriter::RewriteSQLRequest dictionaries;
+  dictionaries.set_sql("SHOW DICTIONARIES");
+  AddSIContractOption(dictionaries);
+  dictionaries.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+    ->set_upstream_logical_database_in_context(literal_context);
+  const auto dictionaries_resp = RunDirectRewrite(std::move(dictionaries));
+  EXPECT_EQ(dictionaries_resp.code(), rewriter::RewriteCode::Success)
+    << dictionaries_resp.message();
+  EXPECT_EQ(dictionaries_resp.sql_after_rewrite(), "SHOW DICTIONARIES");
+  EXPECT_EQ(dictionaries_resp.original_accessed_tables_size(), 0);
+
+  rewriter::RewriteSQLRequest tables;
+  tables.set_sql("SHOW TABLES");
+  AddSIContractOption(tables);
+  auto *dyn = tables.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+  dyn->set_upstream_logical_database_in_context(literal_context);
+  (*dyn->mutable_database_map())[literal_context] = "phys";
+  const auto tables_resp = RunDirectRewrite(std::move(tables));
+  EXPECT_EQ(tables_resp.code(), rewriter::RewriteCode::Success)
+    << tables_resp.message();
+  ASSERT_EQ(tables_resp.database_rewrites_size(), 1);
+  EXPECT_EQ(tables_resp.database_rewrites().at(literal_context), "phys");
+  EXPECT_EQ(tables_resp.original_accessed_tables_size(), 0);
+}
+
+TEST(StorageIntegrityShowDictionaries, PhysicalContextGuardPrecedesLogicalContext) {
+  struct Case {
+    const char *physical_context;
+    const char *logical_context;
+  };
+  const std::vector<Case> cases = {
+    {"hg_safe", ""},
+    {"hg_unsafe", "other"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.physical_context);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql("SHOW DICTIONARIES");
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    dyn->set_upstream_physical_database_in_context(c.physical_context);
+    dyn->set_upstream_logical_database_in_context(c.logical_context);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), "SHOW DICTIONARIES");
+    EXPECT_EQ(resp.message(),
+      std::string("storage-integrity physical database ") + c.physical_context
+        + " is not directly addressable");
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.physical_context);
+    EXPECT_EQ(access.physical_database(), c.physical_context);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
+
+  // An explicit ordinary database wins over both session contexts.
+  rewriter::RewriteSQLRequest explicit_ordinary;
+  explicit_ordinary.set_sql("SHOW DICTIONARIES FROM other");
+  AddSIContractOption(explicit_ordinary);
+  auto *explicit_dyn = explicit_ordinary.mutable_options(0)
+    ->mutable_table_name_args()->mutable_dynamic_args();
+  explicit_dyn->set_upstream_physical_database_in_context("hg_safe");
+  explicit_dyn->set_upstream_logical_database_in_context("db1");
+  const auto explicit_resp = RunDirectRewrite(std::move(explicit_ordinary));
+  EXPECT_EQ(explicit_resp.code(), rewriter::RewriteCode::Success)
+    << explicit_resp.message();
+  EXPECT_EQ(explicit_resp.original_accessed_tables_size(), 0);
+
+  // Context values are semantic already; a literal backslash-x spelling is
+  // ordinary and must not be decoded into the reserved physical database.
+  rewriter::RewriteSQLRequest literal_physical;
+  literal_physical.set_sql("SHOW DICTIONARIES");
+  AddSIContractOption(literal_physical);
+  literal_physical.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+    ->set_upstream_physical_database_in_context("hg\\x5Fsafe");
+  const auto literal_resp = RunDirectRewrite(std::move(literal_physical));
+  EXPECT_EQ(literal_resp.code(), rewriter::RewriteCode::Success)
+    << literal_resp.message();
+  EXPECT_EQ(literal_resp.original_accessed_tables_size(), 0);
+}
+
+TEST(StorageIntegrityCTEScope, NonRecursiveAliasesBecomeVisibleIncrementally) {
+  constexpr const char *mutation_sql =
+    "UPDATE other.u SET x=(WITH t AS (SELECT count() FROM t) "
+    "SELECT count() FROM t) WHERE id=1";
+  rewriter::RewriteSQLRequest mutation;
+  mutation.set_sql(mutation_sql);
+  AddSIContractOption(mutation);
+  auto *mutation_dyn =
+    mutation.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+  (*mutation_dyn->mutable_database_map())["other"] = "phys";
+  mutation_dyn->set_upstream_logical_database_in_context("db1");
+
+  const auto mutation_resp = RunDirectRewrite(std::move(mutation));
+  EXPECT_EQ(mutation_resp.code(), rewriter::RewriteCode::UnsupportedStatement)
+    << mutation_resp.message();
+  EXPECT_EQ(mutation_resp.message(),
+            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+  ASSERT_EQ(mutation_resp.original_accessed_tables_size(), 1);
+  const auto &mutation_access = mutation_resp.original_accessed_tables(0);
+  EXPECT_TRUE(mutation_access.original_database().empty());
+  EXPECT_EQ(mutation_access.original_table(), "t");
+  EXPECT_EQ(mutation_access.logical_database(), "db1");
+  EXPECT_EQ(mutation_access.physical_database(), "phys");
+  EXPECT_TRUE(mutation_access.is_storage_integrity());
+
+  constexpr const char *select_sql =
+    "WITH t AS (SELECT count() FROM t) SELECT count() FROM t";
+  rewriter::RewriteSQLRequest select;
+  select.set_sql(select_sql);
+  AddSIContractOption(select);
+  select.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+    ->set_upstream_logical_database_in_context("db1");
+
+  const auto select_resp = RunDirectRewrite(std::move(select));
+  EXPECT_EQ(select_resp.code(), rewriter::RewriteCode::Success) << select_resp.message();
+  EXPECT_NE(select_resp.sql_after_rewrite().find("hg_safe.db1__t"), std::string::npos)
+    << select_resp.sql_after_rewrite();
+  const auto *select_access = FindAccessed(select_resp, "", "t");
+  ASSERT_NE(select_access, nullptr);
+  EXPECT_TRUE(select_access->is_storage_integrity());
+}
+
+TEST(StorageIntegrityCTEScope, RecursiveAliasesArePredeclared) {
+  constexpr const char *sql =
+    "UPDATE other.u SET x=(WITH RECURSIVE t AS (SELECT count() FROM t) "
+    "SELECT count() FROM t) WHERE id=1";
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  AddSIContractOption(req);
+  auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["other"] = "phys";
+  dyn->set_upstream_logical_database_in_context("db1");
+
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  for (const auto &access : resp.original_accessed_tables())
+    EXPECT_FALSE(access.is_storage_integrity());
+  EXPECT_EQ(resp.sql_after_rewrite().find("hg_safe"), std::string::npos);
+  EXPECT_EQ(resp.sql_after_rewrite().find("hg_unsafe"), std::string::npos);
+}
+
+TEST(StorageIntegrityWrappers, PREWHEREUsesParsedMainTable) {
+  const std::vector<std::string> cases = {
+    "SELECT a FROM `\\x64b1`.t PREWHERE a > 1",
+    "SELECT a FROM db1.t AS \"FROM\" PREWHERE a > 1",
+  };
+  for (const auto &sql : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::RewriteError) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.message(),
+              std::string(rewriter_handlers::kStorageIntegrityWrapperMessage));
+  }
+}
+
+TEST(StorageIntegrityWrappers, EscapedDatabaseUsesSemanticTarget) {
+  const std::vector<std::string> cases = {
+    "SELECT a FROM `\\x64b1`.t FINAL",
+    "SELECT a FROM `\\x64b1`.t SAMPLE 0.1",
+    "SELECT * FROM `\\x64b1`.t WITH OFFSET AS off",
+    "SELECT * FROM `\\x64b1`.t AS x(a)",
+  };
+  for (const auto &sql : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::RewriteError) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.message(),
+              std::string(rewriter_handlers::kStorageIntegrityWrapperMessage));
+  }
+}
+
+TEST(StorageIntegrityReservedColumn, EscapedDatabaseUsesSemanticTarget) {
+  const std::vector<std::string> cases = {
+    "SELECT _hg_row_id FROM `\\x64b1`.t",
+    "SELECT `\\x64b1`.t._hg_row_id FROM `\\x64b1`.t",
+  };
+  for (const auto &sql : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::RewriteError) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.message(), "reserved column _hg_row_id is not addressable");
+  }
+}
+
+TEST(StorageIntegrityNamespaces, IdentifierEscapesAreSemanticButLiteralsAreNotDecodedAgain) {
+  const std::vector<std::string> semantic_identifiers = {
+    "SELECT * FROM merge(`\\x64b1`, t)",
+    "SELECT * FROM remote('host', `\\x64b1`, t)",
+    "SELECT * FROM other.u WHERE id IN `\\x64b1`.t",
+  };
+  for (const auto &sql : semantic_identifiers) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::RewriteError) << resp.message();
+    const auto *access = FindAccessed(resp, "db1", "t");
+    ASSERT_NE(access, nullptr);
+    EXPECT_TRUE(access->is_storage_integrity());
+  }
+
+  const std::vector<std::string> literal_backslash_x = {
+    "SELECT * FROM merge('db\\\\x31', 't')",
+    "SELECT * FROM remote('host', 'db\\\\x31', 't')",
+  };
+  for (const auto &sql : literal_backslash_x) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddSIContractOption(req);
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    for (const auto &access : resp.original_accessed_tables())
+      EXPECT_FALSE(access.is_storage_integrity());
+  }
+}
+
+TEST(StorageIntegrityAlterModifyQuery, RejectsEmbeddedLogicalAndPhysicalReads) {
+  struct Case {
+    const char *sql;
+    const char *message;
+    const char *database;
+    const char *table;
+  };
+  const std::vector<Case> cases = {
+    {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM db1.t",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+  };
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.database);
+    EXPECT_EQ(access.original_table(), c.table);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
+}
+
+TEST(StorageIntegrityAlterExpressions, RejectsEmbeddedLogicalAndPhysicalReads) {
+  struct Case {
+    const char *sql;
+    const char *message;
+    const char *database;
+    const char *table;
+  };
+  const std::vector<Case> cases = {
+    {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t)",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"ALTER TABLE other.u ADD COLUMN x UInt64 MATERIALIZED (SELECT max(a) FROM hg_safe.db1__t)",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+    {"ALTER TABLE other.u ADD COLUMN x UInt64 ALIAS (SELECT max(a) FROM db1.t)",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"ALTER TABLE other.u ADD COLUMN x UInt64 EPHEMERAL (SELECT max(a) FROM hg_unsafe.db1__t)",
+      "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+      "hg_unsafe", "db1__t"},
+    {"ALTER TABLE other.u ADD CONSTRAINT c CHECK x IN (SELECT a FROM hg_safe.db1__t)",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+    {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t), "
+      "ADD CONSTRAINT c CHECK x IN (SELECT a FROM hg_safe.db1__t)",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.database);
+    EXPECT_EQ(access.original_table(), c.table);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
+
+  constexpr const char *ordinary_sql =
+    "ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM other.v), "
+    "ADD CONSTRAINT c CHECK x IN (SELECT a FROM other.w)";
+  rewriter::RewriteSQLRequest ordinary;
+  ordinary.set_sql(ordinary_sql);
+  AddSIContractOption(ordinary);
+  (*ordinary.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+      ->mutable_database_map())["other"] = "phys";
+
+  const auto ordinary_resp = RunDirectRewrite(std::move(ordinary));
+  EXPECT_EQ(ordinary_resp.code(), rewriter::RewriteCode::Success)
+    << ordinary_resp.message();
+  EXPECT_EQ(ordinary_resp.statement_type(), rewriter::STATEMENT_TYPE_ALTER_TABLE);
+  EXPECT_EQ(ordinary_resp.message(), "success");
+  for (const auto &access : ordinary_resp.original_accessed_tables())
+    EXPECT_FALSE(access.is_storage_integrity());
+}
+
+TEST(StorageIntegrityCreateExpressions, RejectsEmbeddedColumnAndConstraintReads) {
+  struct Case {
+    const char *sql;
+    const char *message;
+    const char *database;
+    const char *table;
+  };
+  const std::vector<Case> cases = {
+    {"CREATE TABLE other.x (a UInt64 DEFAULT (SELECT max(x) FROM db1.t)) ENGINE=Memory",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"CREATE TABLE other.x (a UInt64 MATERIALIZED (SELECT max(x) FROM hg_safe.db1__t)) ENGINE=Memory",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+    {"CREATE TABLE other.x (a UInt64 ALIAS (SELECT max(x) FROM db1.t)) ENGINE=Memory",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"CREATE TABLE other.x (a UInt64 EPHEMERAL (SELECT max(x) FROM hg_unsafe.db1__t)) ENGINE=Memory",
+      "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+      "hg_unsafe", "db1__t"},
+    {"CREATE TABLE other.x (a UInt64, CONSTRAINT c CHECK ((SELECT max(x) FROM db1.t) > 0)) ENGINE=Memory",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.database);
+    EXPECT_EQ(access.original_table(), c.table);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
+
+  constexpr const char *ordinary_sql =
+    "CREATE TABLE other.x (a UInt64 DEFAULT (SELECT max(x) FROM other.u), "
+    "CONSTRAINT c CHECK ((SELECT count() FROM other.v) >= 0)) ENGINE=Memory";
+  rewriter::RewriteSQLRequest ordinary;
+  ordinary.set_sql(ordinary_sql);
+  AddSIContractOption(ordinary);
+  (*ordinary.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args()
+      ->mutable_database_map())["other"] = "phys";
+
+  const auto ordinary_resp = RunDirectRewrite(std::move(ordinary));
+  EXPECT_EQ(ordinary_resp.code(), rewriter::RewriteCode::Success)
+    << ordinary_resp.message();
+  EXPECT_EQ(ordinary_resp.statement_type(), rewriter::STATEMENT_TYPE_CREATE_TABLE);
+  EXPECT_EQ(ordinary_resp.message(), "success");
+  for (const auto &access : ordinary_resp.original_accessed_tables())
+    EXPECT_FALSE(access.is_storage_integrity());
+}
+
+TEST(StorageIntegrityLiterals, EscapeSqlLiteralEscapesBackslashBeforeQuote) {
+  EXPECT_EQ(rewriter_handlers::escapeSqlLiteral("plain_1_1_0"), "plain_1_1_0");
+  EXPECT_EQ(rewriter_handlers::escapeSqlLiteral("o'brien"), "o''brien");
+  EXPECT_EQ(rewriter_handlers::escapeSqlLiteral("back\\slash"), "back\\\\slash");
+  EXPECT_EQ(rewriter_handlers::escapeSqlLiteral("evil\\"), "evil\\\\");
+  EXPECT_EQ(rewriter_handlers::escapeSqlLiteral("mix\\'ed"), "mix\\\\''ed");
+}
+
+TEST(StorageIntegrityLiterals, ProjectionRestoreSkipsStringLiterals) {
+  EXPECT_EQ(rewriter_handlers::restoreStorageIntegrityProjectionSyntax(
+              "SELECT * EXCEPT _hg_row_id FROM hg_safe.db1__t", "_hg_row_id"),
+            "SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t");
+  EXPECT_EQ(rewriter_handlers::restoreStorageIntegrityProjectionSyntax(
+              "SELECT 'EXCEPT _hg_row_id' AS s FROM t", "_hg_row_id"),
+            "SELECT 'EXCEPT _hg_row_id' AS s FROM t");
+  EXPECT_EQ(rewriter_handlers::restoreStorageIntegrityProjectionSyntax(
+              "SELECT 'a''EXCEPT _hg_row_id' AS s, * EXCEPT _hg_row_id FROM t", "_hg_row_id"),
+            "SELECT 'a''EXCEPT _hg_row_id' AS s, * EXCEPT (_hg_row_id) FROM t");
+}
+
+TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
+  struct MutationCase {
+    const char *name;
+    const char *sql;
+    const char *message;
+    const char *access_database;
+    const char *access_table;
+  };
+  const std::vector<MutationCase> cases = {
+    {"update_assignment_logical",
+      "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"update_predicate_safe",
+      "UPDATE other.u SET x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+    {"delete_predicate_unsafe",
+      "DELETE FROM other.u WHERE id IN (SELECT id FROM hg_unsafe.db1__t)",
+      "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
+      "hg_unsafe", "db1__t"},
+    {"alter_update_assignment_logical",
+      "ALTER TABLE other.u UPDATE x = (SELECT count() FROM db1.t) WHERE id = 1",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+    {"alter_update_predicate_safe",
+      "ALTER TABLE other.u UPDATE x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
+      "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+      "hg_safe", "db1__t"},
+    {"alter_delete_predicate_logical",
+      "ALTER TABLE other.u DELETE WHERE id IN (SELECT id FROM db1.t)",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.name);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.access_database);
+    EXPECT_EQ(access.original_table(), c.access_table);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
+}
+
+TEST(StorageIntegrityMutationReads, UpdateAssignmentPrecedesPredicate) {
+  constexpr const char *sql =
+    "UPDATE other.u "
+    "SET x = (SELECT count() FROM db1.t) "
+    "WHERE id IN (SELECT id FROM hg_safe.db1__t)";
+
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  AddSIContractOption(req);
+  auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["other"] = "phys";
+
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+  EXPECT_EQ(resp.sql_after_rewrite(), sql);
+  EXPECT_EQ(resp.message(),
+            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+  const auto &access = resp.original_accessed_tables(0);
+  EXPECT_EQ(access.original_database(), "db1");
+  EXPECT_EQ(access.original_table(), "t");
+  EXPECT_TRUE(access.is_storage_integrity());
+}
+
+TEST(StorageIntegrityMutationReads, FirstSourceWinsAcrossTablesAndNamespaces) {
+  struct OrderCase {
+    const char *name;
+    const char *sql;
+    const char *message;
+    const char *access_database;
+    const char *access_table;
+  };
+  const std::vector<OrderCase> cases = {
+    {"namespace_before_table",
+      "UPDATE other.u SET x = (SELECT count() FROM merge('hg_safe', 'x')) + "
+      "(SELECT count() FROM db1.t) WHERE id = 1",
+      "storage-integrity physical table hg_safe.x is not directly addressable",
+      "hg_safe", "x"},
+    {"table_before_namespace",
+      "UPDATE other.u SET x = (SELECT count() FROM db1.t) + "
+      "(SELECT count() FROM merge('hg_safe', 'x')) WHERE id = 1",
+      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      "db1", "t"},
+  };
+
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.name);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddSIContractOption(req);
+    auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
+    (*dyn->mutable_database_map())["other"] = "phys";
+
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.message(), c.message);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    const auto &access = resp.original_accessed_tables(0);
+    EXPECT_EQ(access.original_database(), c.access_database);
+    EXPECT_EQ(access.original_table(), c.access_table);
+    EXPECT_TRUE(access.is_storage_integrity());
+  }
 }
 
 // ============================================================================

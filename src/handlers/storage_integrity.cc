@@ -9,8 +9,13 @@
 #include <Parsers/ASTFunctionWithKeyValueArguments.h>
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTSelectIntersectExceptQuery.h>
+#include <Parsers/ASTSelectQuery.h>
+#include <Parsers/ASTSelectWithUnionQuery.h>
 #include <Parsers/ASTSubquery.h>
+#include <Parsers/ASTSystemQuery.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
+#include <Parsers/ASTWithElement.h>
 #include <Parsers/ParserSelectWithUnionQuery.h>
 #include <Parsers/parseQuery.h>
 
@@ -20,10 +25,12 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "ASTTransformers.h"
 #include "handlers/common.h"
+#include "handlers/cte_scope.h"
 #include "handlers/name_rewrite.h"
 
 namespace rewriter_handlers {
@@ -249,6 +256,28 @@ std::string upper(std::string value) {
   return value;
 }
 
+int hexDigit(char value) {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+char decodedQuotedEscape(char value) {
+  switch (value) {
+  case 'a': return '\a';
+  case 'b': return '\b';
+  case 'e': return '\x1b';
+  case 'f': return '\f';
+  case 'n': return '\n';
+  case 'r': return '\r';
+  case 't': return '\t';
+  case 'v': return '\v';
+  case '0': return '\0';
+  default: return value;
+  }
+}
+
 std::vector<SQLToken> tokenizeSQL(const std::string &sql) {
   std::vector<SQLToken> out;
   int depth = 0;
@@ -284,7 +313,20 @@ std::vector<SQLToken> tokenizeSQL(const std::string &sql) {
           break;
         }
         if (sql[i] == '\\' && i + 1 < sql.size()) {
-          value += sql[i + 1];
+          // Quoted identifiers are grammar objects, so their token value must
+          // match ClickHouse's semantic AST name. In particular `\xHH` is one
+          // byte, not the three literal characters xHH. String tokens remain
+          // parser-decoded only once and are never identifier targets here.
+          if (quote != '\'' && i + 3 < sql.size() && sql[i + 1] == 'x') {
+            const int hi = hexDigit(sql[i + 2]);
+            const int lo = hexDigit(sql[i + 3]);
+            if (hi >= 0 && lo >= 0) {
+              value += static_cast<char>((hi << 4) | lo);
+              i += 4;
+              continue;
+            }
+          }
+          value += decodedQuotedEscape(sql[i + 1]);
           i += 2;
           continue;
         }
@@ -515,31 +557,101 @@ std::optional<NamespaceRef> decodeDictionarySource(const DB::ASTCreateQuery &cre
   return decodePair(NamespaceRefSource::DictionarySource, "CLICKHOUSE", args, 0);
 }
 
-void collectNamespaceRefs(const DB::ASTPtr &ast, std::vector<NamespaceRef> &out) {
+// Split a table identifier's "db.table" (or bare "table") at the first dot,
+// the same split collectAccessedTablePairsFromAST uses.
+std::pair<std::string, std::string> splitTableIdentifier(const std::string &full) {
+  if (const auto dot = full.find('.'); dot != std::string::npos)
+    return {full.substr(0, dot), full.substr(dot + 1)};
+  return {std::string(), full};
+}
+
+void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef> &out,
+  const std::unordered_set<std::string> &cte_scope) {
   if (!ast) return;
+
+  if (const auto *expression = ast->as<DB::ASTTableExpression>()) {
+    const auto *identifier = expression->database_and_table_name
+      ? expression->database_and_table_name->as<DB::ASTTableIdentifier>()
+      : nullptr;
+    if (identifier) {
+      const auto [database, table] = splitTableIdentifier(identifier->name());
+      const bool is_cte_ref = database.empty() && cte_scope.count(table) > 0;
+      if (!table.empty() && !is_cte_ref) {
+        StorageIntegrityReadRef event;
+        event.kind = StorageIntegrityReadRef::Kind::Table;
+        event.database = database;
+        event.table = table;
+        out.push_back(std::move(event));
+      }
+    }
+  }
   if (const auto *create = ast->as<DB::ASTCreateQuery>()) {
     if (create->storage && create->storage->engine) {
       const std::string lname = lower(create->storage->engine->name);
       const auto &args = functionArgs(*create->storage->engine);
+      std::optional<NamespaceRef> ref;
       if (lname == "remote" || lname == "distributed")
-        out.push_back(
-          decodePair(NamespaceRefSource::TableEngine, create->storage->engine->name, args, 1));
+        ref = decodePair(
+          NamespaceRefSource::TableEngine, create->storage->engine->name, args, 1);
       else if (lname == "merge" || lname == "buffer")
-        out.push_back(
-          decodePair(NamespaceRefSource::TableEngine, create->storage->engine->name, args, 0));
+        ref = decodePair(
+          NamespaceRefSource::TableEngine, create->storage->engine->name, args, 0);
+      if (ref) {
+        StorageIntegrityReadRef event;
+        event.kind = StorageIntegrityReadRef::Kind::Namespace;
+        event.namespace_ref = std::move(*ref);
+        out.push_back(std::move(event));
+      }
     }
-    if (auto ref = decodeDictionarySource(*create)) out.push_back(*ref);
+    if (auto ref = decodeDictionarySource(*create)) {
+      StorageIntegrityReadRef event;
+      event.kind = StorageIntegrityReadRef::Kind::Namespace;
+      event.namespace_ref = std::move(*ref);
+      out.push_back(std::move(event));
+    }
   }
   if (const auto *fn = ast->as<DB::ASTFunction>()) {
     // Namespace-bearing functions also occur outside ASTTableExpression
     // wrappers (notably INSERT INTO FUNCTION and CREATE ... AS function).
     // Decode the function node itself so every read/write surface shares the
     // same policy. Ordinary scalar functions are ignored by the decoder.
-    if (auto ref = decodeNamespaceFunction(*fn, NamespaceRefSource::TableFunction))
-      out.push_back(*ref);
-    if (auto ref = decodeInFunction(*fn)) out.push_back(*ref);
+    if (auto ref = decodeNamespaceFunction(*fn, NamespaceRefSource::TableFunction)) {
+      StorageIntegrityReadRef event;
+      event.kind = StorageIntegrityReadRef::Kind::Namespace;
+      event.namespace_ref = std::move(*ref);
+      out.push_back(std::move(event));
+    }
+    if (auto ref = decodeInFunction(*fn)) {
+      // A bare `IN <alias>` whose name is an in-scope CTE alias is a CTE
+      // reference, not a table (Spec I D7b). Qualified `db.alias` stays a real
+      // table, exactly as collectAccessedTablePairsFromAST treats it.
+      if (!(ref->database.empty() && cte_scope.count(ref->table) > 0)) {
+        StorageIntegrityReadRef event;
+        event.kind = StorageIntegrityReadRef::Kind::Namespace;
+        event.namespace_ref = std::move(*ref);
+        out.push_back(std::move(event));
+      }
+    }
   }
-  for (const auto &child : ast->children) collectNamespaceRefs(child, out);
+  visitChildrenWithCTEVisibility(
+    *ast, cte_scope,
+    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+      collectReadRefs(child, out, child_scope);
+    });
+}
+
+void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef> &out) {
+  static const std::unordered_set<std::string> kEmpty;
+  collectReadRefs(ast, out, kEmpty);
+}
+
+void collectNamespaceRefs(const DB::ASTPtr &ast, std::vector<NamespaceRef> &out) {
+  std::vector<StorageIntegrityReadRef> events;
+  collectReadRefs(ast, events);
+  for (auto &event : events) {
+    if (event.kind == StorageIntegrityReadRef::Kind::Namespace)
+      out.push_back(std::move(event.namespace_ref));
+  }
 }
 
 std::string namespaceSurface(const NamespaceRef &ref) {
@@ -582,6 +694,69 @@ void setNamespaceReject(
   rewriter::RewriteSQLResponse *response, rewriter::RewriteCode code, const std::string &message) {
   response->set_code(code);
   response->set_message(message);
+}
+
+using StorageIntegrityBindings = std::map<std::string, bool>;
+
+// Collect one select block's own table bindings (alias, else table name) and
+// report whether the block reads a storage-integrity table. Nested blocks own
+// their own scope and are not descended into.
+bool storageIntegrityBlockScope(const DB::ASTSelectQuery &select,
+  const rewriter::RewriteTableDynamicArgs &args,
+  StorageIntegrityBindings &bindings) {
+  bool block_protected = false;
+  const auto tables = const_cast<DB::ASTSelectQuery &>(select).tables();
+  const auto *list = tables ? tables->as<DB::ASTTablesInSelectQuery>() : nullptr;
+  if (!list) return false;
+  for (const auto &child : list->children) {
+    const auto *element = child->as<DB::ASTTablesInSelectQueryElement>();
+    if (!element || !element->table_expression) continue;
+    const auto *expr = element->table_expression->as<DB::ASTTableExpression>();
+    if (!expr || !expr->database_and_table_name) continue;
+    const auto *id = expr->database_and_table_name->as<DB::ASTTableIdentifier>();
+    if (!id) continue;
+    const auto [database, table] = splitTableIdentifier(id->name());
+    const bool si = lookupStorageIntegrity(database, table, args).has_value();
+    block_protected = block_protected || si;
+    std::string key = expr->database_and_table_name->tryGetAlias();
+    if (key.empty()) key = table;
+    if (!key.empty()) bindings[key] = si;
+  }
+  return block_protected;
+}
+
+bool referencesIdentifierInScope(const DB::ASTPtr &ast,
+  const std::string &name,
+  const rewriter::RewriteTableDynamicArgs &args,
+  StorageIntegrityBindings bindings,
+  bool block_protected) {
+  if (!ast) return false;
+  if (const auto *select = ast->as<DB::ASTSelectQuery>()) {
+    StorageIntegrityBindings next = bindings;
+    const bool next_protected = storageIntegrityBlockScope(*select, args, next);
+    for (const auto &child : select->children)
+      if (referencesIdentifierInScope(child, name, args, next, next_protected)) return true;
+    return false;
+  }
+  if (const auto *identifier = ast->as<DB::ASTIdentifier>();
+      identifier && !ast->as<DB::ASTTableIdentifier>() && identifier->shortName() == name) {
+    // A compound reference (`alias.col`, `db.table.col`) is decided by its
+    // qualifier when that qualifier is bound in scope; otherwise it falls back
+    // to the owning block.
+    const auto &parts = identifier->name_parts;
+    if (parts.size() >= 2) {
+      const auto it = bindings.find(parts[parts.size() - 2]);
+      if (it != bindings.end()) return it->second;
+    }
+    return block_protected;
+  }
+  if (const auto *replacement = ast->as<DB::ASTColumnsReplaceTransformer::Replacement>();
+      replacement && replacement->name == name)
+    return block_protected;
+  if (!ast->tryGetAlias().empty() && ast->tryGetAlias() == name) return block_protected;
+  for (const auto &child : ast->children)
+    if (referencesIdentifierInScope(child, name, args, bindings, block_protected)) return true;
+  return false;
 }
 
 } // namespace
@@ -797,18 +972,47 @@ std::string restoreStorageIntegrityProjectionSyntax(
     keywords.count(lower(reserved_column)) ? "`" + reserved_column + "`" : reserved_column;
   const std::string needle = "EXCEPT " + reserved_column;
   const std::string replacement = "EXCEPT (" + rendered + ")";
-  size_t pos = 0;
-  while ((pos = sql.find(needle, pos)) != std::string::npos) {
-    const size_t after = pos + needle.size();
-    if (after == sql.size() ||
-        !(std::isalnum(static_cast<unsigned char>(sql[after])) || sql[after] == '_')) {
-      sql.replace(pos, needle.size(), replacement);
-      pos += replacement.size();
-    } else {
-      pos = after;
+  std::string out;
+  out.reserve(sql.size());
+  size_t i = 0;
+  while (i < sql.size()) {
+    const char c = sql[i];
+    // Copy a quoted run (string literal or quoted identifier) verbatim: the
+    // textual fixup must never reach inside caller data (Spec I D7d).
+    if (c == '\'' || c == '`' || c == '"') {
+      const char quote = c;
+      out += sql[i++];
+      while (i < sql.size()) {
+        if (sql[i] == '\\' && i + 1 < sql.size()) {
+          out += sql[i];
+          out += sql[i + 1];
+          i += 2;
+          continue;
+        }
+        if (sql[i] == quote) {
+          out += sql[i++];
+          if (i < sql.size() && sql[i] == quote) {  // '' / `` / "" escape
+            out += sql[i++];
+            continue;
+          }
+          break;
+        }
+        out += sql[i++];
+      }
+      continue;
     }
+    if (sql.compare(i, needle.size(), needle) == 0) {
+      const size_t after = i + needle.size();
+      if (after == sql.size()
+          || !(std::isalnum(static_cast<unsigned char>(sql[after])) || sql[after] == '_')) {
+        out += replacement;
+        i = after;
+        continue;
+      }
+    }
+    out += sql[i++];
   }
-  return sql;
+  return out;
 }
 
 bool prepareStorageIntegritySQL(const std::string &sql,
@@ -979,6 +1183,28 @@ bool prepareStorageIntegritySQL(const std::string &sql,
     edits.push_back({tokens[i].begin, tokens[end_index].end});
   }
 
+  // PREWHERE is a query-level clause evaluated against the FROM clause's main
+  // table, so bind it to the first target after the nearest preceding FROM at
+  // the same depth (Spec I D7c). Rejecting here keeps the physical names and
+  // the reserved column out of the raw ClickHouse error the client would
+  // otherwise receive. Token-based, so a string literal cannot trigger it.
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    if (tokens[i].kind != SQLToken::Kind::Word || tokens[i].upper != "PREWHERE") continue;
+    std::optional<LexicalTarget> bound;
+    for (size_t j = i; j > 0; --j) {
+      const auto &candidate = tokens[j - 1];
+      if (candidate.depth != tokens[i].depth) continue;
+      if (candidate.kind == SQLToken::Kind::Word && candidate.upper == "FROM") {
+        bound = targetAt(tokens, j);
+        break;
+      }
+    }
+    if (!bound) continue;
+    if (targetTouchesStorageIntegrity(*bound, args)) {
+      return reject_select_surface(*bound, std::string(kStorageIntegrityWrapperMessage));
+    }
+  }
+
   // Likewise, strip an ordinary table's alias column list long enough for
   // the pinned parser to build the AST. SI-bound lists are rejected because
   // substituting the table with a derived query would change their meaning.
@@ -1133,6 +1359,12 @@ bool astReferencesIdentifier(const DB::ASTPtr &ast, const std::string &name) {
   return false;
 }
 
+bool astReferencesIdentifierInScope(const DB::ASTPtr &ast,
+  const std::string &name,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  return referencesIdentifierInScope(ast, name, args, StorageIntegrityBindings{}, false);
+}
+
 std::string describeMetadataSQL(const std::string &safe_table, const std::string &reserved_column) {
   const auto [database, table] = splitPhysical(safe_table);
   // system.columns exposes default_kind; alias it to native DESCRIBE's
@@ -1184,6 +1416,12 @@ void recordPhysicalStorageIntegrityAccess(rewriter::RewriteSQLResponse *response
 std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast) {
   std::vector<NamespaceRef> refs;
   collectNamespaceRefs(ast, refs);
+  return refs;
+}
+
+std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast) {
+  std::vector<StorageIntegrityReadRef> refs;
+  collectReadRefs(ast, refs);
   return refs;
 }
 
@@ -1274,6 +1512,124 @@ bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
     return true;
   }
   return false;
+}
+
+bool rejectUnmodelledStorageIntegrityStatement(const DB::ASTPtr &ast,
+  const rewriter::RewriteTableDynamicArgs &args,
+  rewriter::RewriteSQLResponse *response) {
+  if (!ast || !response) return false;
+  if (!args.has_storage_integrity() || args.storage_integrity().tables().empty()) return false;
+  if (ast->as<DB::ASTSelectWithUnionQuery>() || ast->as<DB::ASTSelectQuery>()
+      || ast->as<DB::ASTSelectIntersectExceptQuery>())
+    return false;
+  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+  response->set_message(std::string(kStorageIntegrityUnmodelledMessage));
+  return true;
+}
+
+namespace {
+
+bool annotateStructuredStorageIntegrityTarget(
+  rewriter::RewriteSQLResponse *response,
+  const std::string &database,
+  const std::string &table,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  if (table.empty()) {
+    if (isStorageIntegrityPhysicalDatabase(database, args)) {
+      response->set_message(storageIntegrityPhysicalDatabaseRejectMessage(database));
+      return true;
+    }
+    if (isStorageIntegrityLogicalDatabase(database, args)) {
+      response->set_message(
+        "storage-integrity logical database " + database + " is not directly addressable");
+      return true;
+    }
+    return false;
+  }
+
+  if (!database.empty()) {
+    if (isStorageIntegrityPhysicalDatabase(database, args)) {
+      response->set_message(
+        storageIntegrityPhysicalRejectMessage(database + "." + table));
+      return true;
+    }
+    if (auto hit = lookupStorageIntegrity(database, table, args)) {
+      response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+      return true;
+    }
+    return false;
+  }
+
+  if (auto hit = lookupStorageIntegrity("", table, args)) {
+    response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+    return true;
+  }
+  const std::string physical = storageIntegrityExecutionDatabase(args);
+  if (isStorageIntegrityPhysicalDatabase(physical, args)) {
+    response->set_message(storageIntegrityPhysicalRejectMessage(physical + "." + table));
+    return true;
+  }
+  return false;
+}
+
+} // namespace
+
+void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
+  const DB::ASTPtr &ast,
+  const std::string &sql,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  if (!response || response->code() == rewriter::RewriteCode::Success) return;
+  if (!args.has_storage_integrity() || args.storage_integrity().tables().empty()) return;
+  for (const auto &entry : response->original_accessed_tables())
+    if (entry.is_storage_integrity()) return;
+
+  // A failed parse has no proven target. Preserve ParserQuery's diagnostic;
+  // lexical lookalikes in malformed SQL must never replace SyntaxError.
+  if (!ast) return;
+
+  // SYSTEM statements carry their object separately from ON CLUSTER and
+  // other operands. Only those structured target fields participate in D2
+  // attribution; cluster names and arbitrary words are not database/table
+  // events.
+  if (const auto *system = ast->as<DB::ASTSystemQuery>()) {
+    if (annotateStructuredStorageIntegrityTarget(
+          response, system->getDatabase(), system->getTable(), args)) return;
+    for (const auto &[database, table] : system->tables) {
+      if (annotateStructuredStorageIntegrityTarget(
+            response, database, table, args)) return;
+    }
+    return;
+  }
+
+  const auto tokens = tokenizeSQL(sql);
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    if (!identifierToken(tokens[i])) continue;
+    const auto target = targetAt(tokens, i);
+    if (!target) continue;
+    if (!target->database.empty()) {
+      i = target->next - 1;  // consume `db . table`
+      if (isStorageIntegrityPhysicalDatabase(target->database, args)) {
+        response->set_message(
+          storageIntegrityPhysicalRejectMessage(target->database + "." + target->table));
+        return;
+      }
+      if (auto hit = lookupStorageIntegrity(target->database, target->table, args)) {
+        response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+        return;
+      }
+      continue;
+    }
+    if (isStorageIntegrityPhysicalDatabase(target->table, args)) {
+      // A bare name in a database position: TRUNCATE DATABASE hg_safe,
+      // TRUNCATE ALL TABLES FROM hg_unsafe, ALTER DATABASE hg_safe ...
+      response->set_message(storageIntegrityPhysicalDatabaseRejectMessage(target->table));
+      return;
+    }
+    if (auto hit = lookupStorageIntegrity("", target->table, args)) {
+      response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+      return;
+    }
+  }
 }
 
 } // namespace rewriter_handlers

@@ -24,6 +24,7 @@
 
 #include "ASTTransformers.h"
 #include "handlers/common.h"
+#include "handlers/cte_scope.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/storage_integrity.h"
 
@@ -98,6 +99,19 @@ const DB::ASTTableExpression *lastTableExpression(
   return nullptr;
 }
 
+const DB::ASTTableExpression *firstTableExpression(
+  const DB::ASTSelectQuery &select) {
+  const auto tables = select.tables();
+  const auto *list = tables ? tables->as<DB::ASTTablesInSelectQuery>() : nullptr;
+  if (!list) return nullptr;
+  for (const auto &child : list->children) {
+    const auto *element = child->as<DB::ASTTablesInSelectQueryElement>();
+    if (!element || !element->table_expression) continue;
+    return element->table_expression->as<DB::ASTTableExpression>();
+  }
+  return nullptr;
+}
+
 bool tableExpressionTouchesStorageIntegrity(
   const DB::ASTTableExpression &table_expression,
   const rewriter::RewriteTableDynamicArgs &args) {
@@ -125,6 +139,11 @@ bool hasUnsupportedStorageIntegrityWrapper(
             || table_expression->sample_offset)) return true;
   }
   if (const auto *select = ast->as<DB::ASTSelectQuery>()) {
+    if (select->prewhere()) {
+      const auto *first = firstTableExpression(*select);
+      if (first && tableExpressionTouchesStorageIntegrity(*first, args))
+        return true;
+    }
     if (select->aliases()) {
       const auto *last = lastTableExpression(*select);
       if (last && tableExpressionTouchesStorageIntegrity(*last, args))
@@ -178,27 +197,6 @@ void recordStorageIntegrityPairUnique(
   entry->set_is_storage_integrity(resolved.is_storage_integrity);
 }
 
-// Collect bare CTE aliases declared by the WITH clause of a SELECT into
-// `out_aliases`. Returns true when at least one alias was added — the caller
-// uses this to decide whether to fork a new scope set on the recursion.
-bool collectInlineCTEAliases(
-  const DB::ASTSelectQuery *select,
-  std::unordered_set<std::string> &out_aliases) {
-  if (!select) return false;
-  const auto with_expr = const_cast<DB::ASTSelectQuery *>(select)->with();
-  if (!with_expr) return false;
-  bool added = false;
-  for (const auto &ch : with_expr->children) {
-    if (const auto *we = ch->as<DB::ASTWithElement>()) {
-      if (!we->name.empty()) {
-        out_aliases.insert(we->name);
-        added = true;
-      }
-    }
-  }
-  return added;
-}
-
 // Walk every ASTTableExpression and collect its (db, table) split. Keyed by
 // the SQL-shaped name ("db.table" / bare "table") so we can dedup and so
 // CTE-alias entries can be erased by alias when their bodies inline. Replaces
@@ -214,22 +212,13 @@ void collectAccessedTablePairsFromAST(
   const std::unordered_set<std::string> &cte_scope) {
   if (!node) return;
 
-  std::unordered_set<std::string> extended;
-  const std::unordered_set<std::string> *scope = &cte_scope;
-  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
-    extended = cte_scope;
-    if (collectInlineCTEAliases(select, extended)) {
-      scope = &extended;
-    }
-  }
-
   if (auto *te = node->as<DB::ASTTableExpression>()) {
     if (te->database_and_table_name) {
       if (auto *id = te->database_and_table_name->as<DB::ASTTableIdentifier>()) {
         const auto full = id->name();  // "db.table" or bare "table"
         if (!full.empty()) {
           const bool is_cte_ref =
-            full.find('.') == std::string::npos && scope->count(full) > 0;
+            full.find('.') == std::string::npos && cte_scope.count(full) > 0;
           if (!is_cte_ref) {
             AccessedTablePair p;
             // Match the split that dynamicRewriteWalk and the table_rewrites
@@ -246,7 +235,11 @@ void collectAccessedTablePairsFromAST(
       }
     }
   }
-  for (auto &ch : node->children) { collectAccessedTablePairsFromAST(ch, out, *scope); }
+  visitChildrenWithCTEVisibility(
+    *node, cte_scope,
+    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+      collectAccessedTablePairsFromAST(child, out, child_scope);
+    });
 }
 
 void collectAccessedTablePairsFromAST(
@@ -296,20 +289,6 @@ void dynamicRewriteWalk(
   const std::unordered_set<std::string> &cte_scope) {
   if (!ast) return;
 
-  // Extend the CTE scope when entering a SELECT with a WITH clause so that
-  // bare references to those aliases inside the SELECT body aren't rewritten
-  // as if they were real tables. We fork a local copy (rather than mutate the
-  // caller's set) so siblings of this SELECT don't see aliases that only
-  // belong to this subtree.
-  std::unordered_set<std::string> extended;
-  const std::unordered_set<std::string> *scope = &cte_scope;
-  if (const auto *select = ast->as<DB::ASTSelectQuery>()) {
-    extended = cte_scope;
-    if (collectInlineCTEAliases(select, extended)) {
-      scope = &extended;
-    }
-  }
-
   if (auto *table_expression = ast->as<DB::ASTTableExpression>()) {
     if (table_expression->database_and_table_name) {
       auto *identifier = table_expression->database_and_table_name->as<DB::ASTTableIdentifier>();
@@ -320,7 +299,7 @@ void dynamicRewriteWalk(
         // Bare reference to a CTE alias — leave it alone. Qualified
         // `db.alias` is a real table and falls through to the rewrite path.
         if (origin_full_name.find('.') == std::string::npos &&
-            scope->count(origin_full_name) > 0) {
+            cte_scope.count(origin_full_name) > 0) {
           return;
         }
 
@@ -400,16 +379,20 @@ void dynamicRewriteWalk(
         // doc-comment for why SELECT swallows unresolvable identifiers.
       }
     } else if (table_expression->subquery) {
-      for (auto &child : ast->children) {
-        dynamicRewriteWalk(child, args, out_table_rewrites, *scope);
-      }
+      visitChildrenWithCTEVisibility(
+        *ast, cte_scope,
+        [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+          dynamicRewriteWalk(child, args, out_table_rewrites, child_scope);
+        });
     }
     return;
   }
 
-  for (auto &child : ast->children) {
-    dynamicRewriteWalk(child, args, out_table_rewrites, *scope);
-  }
+  visitChildrenWithCTEVisibility(
+    *ast, cte_scope,
+    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+      dynamicRewriteWalk(child, args, out_table_rewrites, child_scope);
+    });
 }
 
 void dynamicRewriteWalk(
@@ -602,28 +585,23 @@ bool subtreeHasRemoteSource(const DB::IAST *node) {
 bool subtreeHasLocalSource(const DB::IAST *node,
                            const std::unordered_set<std::string> &cte_scope) {
   if (!node) return false;
-  std::unordered_set<std::string> extended;
-  const std::unordered_set<std::string> *scope = &cte_scope;
-  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
-    extended = cte_scope;
-    if (collectInlineCTEAliases(select, extended)) {
-      scope = &extended;
-    }
-  }
   if (const auto *te = node->as<DB::ASTTableExpression>()) {
     if (te->database_and_table_name) {
       if (const auto *id = te->database_and_table_name->as<DB::ASTTableIdentifier>()) {
         const auto full = id->name();
         const bool is_cte_ref =
-          full.find('.') == std::string::npos && scope->count(full) > 0;
+          full.find('.') == std::string::npos && cte_scope.count(full) > 0;
         if (!is_cte_ref) return true;
       }
     }
   }
-  for (const auto &ch : node->children) {
-    if (subtreeHasLocalSource(ch.get(), *scope)) return true;
-  }
-  return false;
+  bool found = false;
+  visitChildrenWithCTEVisibility(
+    *node, cte_scope,
+    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+      if (!found) found = subtreeHasLocalSource(child.get(), child_scope);
+    });
+  return found;
 }
 
 // Walk this select's body looking for IN-family functions whose right
@@ -669,18 +647,11 @@ void forceGlobalForRemoteAsymmetryImpl(
   const std::unordered_set<std::string> &cte_scope) {
   if (!node) return;
 
-  std::unordered_set<std::string> extended;
-  const std::unordered_set<std::string> *scope = &cte_scope;
-  if (const auto *select = node->as<DB::ASTSelectQuery>()) {
-    extended = cte_scope;
-    if (collectInlineCTEAliases(select, extended)) {
-      scope = &extended;
-    }
-  }
-
-  for (auto &ch : node->children) {
-    forceGlobalForRemoteAsymmetryImpl(ch.get(), *scope);
-  }
+  const auto scope = visitChildrenWithCTEVisibility(
+    *node, cte_scope,
+    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+      forceGlobalForRemoteAsymmetryImpl(child.get(), child_scope);
+    });
 
   auto *select = node->as<DB::ASTSelectQuery>();
   if (!select) return;
@@ -694,7 +665,7 @@ void forceGlobalForRemoteAsymmetryImpl(
       const bool this_remote =
         subtreeHasRemoteSource(el->table_expression.get());
       const bool this_local =
-        subtreeHasLocalSource(el->table_expression.get(), *scope);
+        subtreeHasLocalSource(el->table_expression.get(), scope);
       if (el->table_join) {
         if (auto *tj = el->table_join->as<DB::ASTTableJoin>()) {
           if (tj->locality == DB::JoinLocality::Unspecified) {
@@ -719,7 +690,7 @@ void forceGlobalForRemoteAsymmetryImpl(
     for (auto &child : select->children) {
       if (child.get() == tables_ptr.get()) continue;
       if (child.get() == with_ptr.get())   continue;
-      forceGlobalInWalk(child.get(), *scope);
+      forceGlobalInWalk(child.get(), scope);
     }
   }
 }
@@ -969,7 +940,7 @@ void handleSelectQuery(DB::ASTPtr ast,
       return;
     }
     if (responseTouchesStorageIntegrity(*response)
-        && astReferencesIdentifier(ast, reservedRowIdColumn(args))) {
+        && astReferencesIdentifierInScope(ast, reservedRowIdColumn(args), args)) {
       const std::string rid = reservedRowIdColumn(args);
       response->set_code(rewriter::RewriteCode::RewriteError);
       response->set_message("reserved column " + rid + " is not addressable");
@@ -1017,35 +988,35 @@ bool rejectEmbeddedStorageIntegrityRead(
     return false;
   }
   const auto &args = *selection.dynamic_args;
-  std::map<std::string, AccessedTablePair> originals;
-  collectAccessedTablePairsFromAST(body, originals);
-  for (const auto &[_, pair] : originals) {
-    if (auto hit = lookupStorageIntegrity(
-          pair.original_db, pair.original_table, args)) {
-      recordStorageIntegrityPairUnique(response, pair, selection);
-      std::string logical;
-      if (!authorizeStorageIntegrityLogical(pair.original_db, args, &logical)) {
-        response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
-        response->set_message(storageIntegrityUnauthorizedMessage(logical));
-      } else {
-        response->set_code(code);
-        response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+  for (const auto &event : collectStorageIntegrityReadRefs(body)) {
+    if (event.kind == StorageIntegrityReadRef::Kind::Table) {
+      const AccessedTablePair pair{event.database, event.table};
+      if (auto hit = lookupStorageIntegrity(
+            pair.original_db, pair.original_table, args)) {
+        recordStorageIntegrityPairUnique(response, pair, selection);
+        std::string logical;
+        if (!authorizeStorageIntegrityLogical(pair.original_db, args, &logical)) {
+          response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+          response->set_message(storageIntegrityUnauthorizedMessage(logical));
+        } else {
+          response->set_code(code);
+          response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+        }
+        return true;
       }
-      return true;
+      const std::string physical = pair.original_db.empty()
+        ? storageIntegrityExecutionDatabase(args) : pair.original_db;
+      if (isStorageIntegrityPhysicalDatabase(physical, args)) {
+        recordStorageIntegrityPairUnique(response, pair, selection);
+        response->set_code(code);
+        response->set_message(storageIntegrityPhysicalRejectMessage(
+          physical + "." + pair.original_table));
+        return true;
+      }
+      continue;
     }
-    const std::string physical = pair.original_db.empty()
-      ? storageIntegrityExecutionDatabase(args) : pair.original_db;
-    if (isStorageIntegrityPhysicalDatabase(physical, args)) {
-      recordStorageIntegrityPairUnique(response, pair, selection);
-      response->set_code(code);
-      response->set_message(storageIntegrityPhysicalRejectMessage(
-        physical + "." + pair.original_table));
-      return true;
-    }
-  }
-  if (rejectStorageIntegrityNamespaces(
-        response, collectStorageIntegrityNamespaceRefs(body), args, code)) {
-    return true;
+    if (rejectStorageIntegrityNamespaces(
+          response, {event.namespace_ref}, args, code)) return true;
   }
   return false;
 }
