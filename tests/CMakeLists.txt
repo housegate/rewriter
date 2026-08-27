@@ -54,3 +54,13 @@ target_link_libraries(rewriter_tests PRIVATE
 )
 
 add_test(NAME rewriter_tests COMMAND rewriter_tests)
+
+# Exercise the real process entry point and Poco/gRPC startup lifecycle. The
+# handler tests above link rewriter_core directly and cannot catch failures in
+# ClickHouse worker-thread runtime initialization.
+add_test(
+    NAME rewriter_startup_smoke
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/rewriter_startup_smoke.sh
+            $<TARGET_FILE:clickhousegate_rewriter>)
+set_tests_properties(rewriter_startup_smoke PROPERTIES TIMEOUT 20)

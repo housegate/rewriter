@@ -1,0 +1,22 @@
+diff --git a/src/Common/ThreadStatus.cpp b/src/Common/ThreadStatus.cpp
+--- a/src/Common/ThreadStatus.cpp
++++ b/src/Common/ThreadStatus.cpp
+@@ -89,10 +89,13 @@ struct ThreadStack
+     static size_t getSize()
+     {
+-        auto size = std::max<size_t>({UNWIND_MINSIGSTKSZ, static_cast<size_t>(MINSIGSTKSZ), static_cast<size_t>(getPageSize())});
+-
++        const auto page_size = static_cast<size_t>(getPageSize());
++        auto size = std::max<size_t>({UNWIND_MINSIGSTKSZ, static_cast<size_t>(MINSIGSTKSZ), page_size});
++
+         if constexpr (guardPagesEnabled())
+-            size += getPageSize();
+-
+-        return size;
++            size += page_size;
++
++        /// aligned_alloc requires size to be a multiple of alignment. glibc's
++        /// dynamic MINSIGSTKSZ can be larger than 32 KiB without being page-aligned.
++        return ((size + page_size - 1) / page_size) * page_size;
+     }
+     void * getData() const { return data; }

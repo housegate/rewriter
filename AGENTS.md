@@ -80,6 +80,7 @@ Don't bump versions by hand. Use the `cut-release` workflow (`Actions → cut-re
 `scripts.sh`'s `build` runs `git submodule foreach --recursive 'git reset --hard && git clean -fdx'` at the end, which also wipes the `clickHouse/src/clickHouse` self-symlink needed for `#include "clickHouse/..."` to resolve, and reverts in-tree patches. Both `build` and `rebuild` call `ensure_symlinks` + `ensure_patches` on entry to re-establish them:
 
 - `clickHouse/src/clickHouse -> .` and `./contrib -> clickHouse/contrib`
+- `src/Common/ThreadStatus.cpp`: round the CPU-dependent alternative signal-stack size up to a page before passing it to `aligned_alloc`
 - `flatbuffers/include/flatbuffers/stl_emulation.h`: drop `const` from `size_type count_`
 - `numactl-cmake/CMakeLists.txt`: append `distance.c / affinity.c / sysfs.c / rtnetlink.c` so the static lib exports `resolve_affinity` etc.
 

@@ -40,6 +40,16 @@ ensure_symlinks() {
 # wipes them, the next build re-adds them — otherwise ninja hits missing symbols
 # like `undefined symbol: resolve_affinity` when relinking numactl.
 ensure_patches() {
+    local thread_status=clickHouse/src/Common/ThreadStatus.cpp
+    local thread_stack_patch="$PWD/patches/clickhouse-thread-stack-alignment.patch"
+    # glibc exposes a CPU-dependent MINSIGSTKSZ. On CPUs with larger XSAVE
+    # state it is not page-aligned, but aligned_alloc requires size to be an
+    # integral multiple of alignment and otherwise returns EINVAL.
+    if [ -f "$thread_status" ] && \
+       ! grep -q 'aligned_alloc requires size to be a multiple of alignment' "$thread_status"; then
+        git -C clickHouse apply "$thread_stack_patch"
+    fi
+
     local flatbuf=clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
     if [ -f "$flatbuf" ] && grep -q 'const size_type count_' "$flatbuf"; then
         sed -i 's/const size_type count_/size_type count_/' "$flatbuf"
