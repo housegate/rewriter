@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "clickhouse_build_digest": "",
+  "platform": "linux/amd64",
+  "native_analyzer_build_digest": "",
+  "grpc_analyzer_build_digest": "",
+  "tzdata_digest": "",
+  "settings": [
+    {
+      "name": "cast_keep_nullable",
+      "value": "0"
+    },
+    {
+      "name": "max_threads",
+      "value": "1"
+    },
+    {
+      "name": "read_overflow_mode",
+      "value": "throw"
+    },
+    {
+      "name": "result_overflow_mode",
+      "value": "throw"
+    },
+    {
+      "name": "sort_overflow_mode",
+      "value": "throw"
+    },
+    {
+      "name": "timeout_overflow_mode",
+      "value": "throw"
+    }
+  ],
+  "scalar_operators": [
+    "and",
+    "column",
+    "equals",
+    "greater",
+    "greaterOrEquals",
+    "in",
+    "less",
+    "lessOrEquals",
+    "literal",
+    "not",
+    "notEquals",
+    "or",
+    "prepare-integer-literal-exact-v1",
+    "prepare-integer-scalar-null-throw-v1",
+    "rand",
+    "rand32",
+    "rand64"
+  ],
+  "column_profile_id": "column-profile-v1",
+  "output_order_id": "output-order-v1",
+  "limits": {
+    "max_sql_bytes": 65536,
+    "max_descriptor_bytes": 65536,
+    "max_output_rows": 1048576,
+    "max_output_bytes": 268435456,
+    "max_restore_bytes": 1073741824,
+    "max_sort_memory_bytes": 134217728,
+    "max_spill_bytes": 1073741824,
+    "max_execution_ms": 30000
+  }
+}

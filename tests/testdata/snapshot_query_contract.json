@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "fixture_purpose": "Synthetic protobuf transport fixture only; it is not a measured or installed runtime profile and does not assert admission.",
+  "analyze_request": {
+    "contract_version": 1,
+    "query_profile_id": "synthetic-snapshot-profile-v1",
+    "sql": "INSERT INTO tenant.copy SELECT value FROM tenant.events",
+    "logical_database": "tenant",
+    "catalog": [
+      {
+        "database": "tenant",
+        "table": "copy",
+        "table_id": "target-table-17",
+        "schema_hash": "target-schema-29",
+        "columns": [
+          {
+            "name": "copy_a",
+            "type": "UInt64",
+            "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+            "default_expression": ""
+          },
+          {
+            "name": "copy_b",
+            "type": "String",
+            "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+            "default_expression": ""
+          }
+        ]
+      },
+      {
+        "database": "tenant",
+        "table": "events",
+        "table_id": "read-table-43",
+        "schema_hash": "read-schema-47",
+        "columns": [
+          {
+            "name": "event_value",
+            "type": "Int32",
+            "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+            "default_expression": ""
+          },
+          {
+            "name": "event_time",
+            "type": "DateTime64(3)",
+            "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+            "default_expression": ""
+          }
+        ]
+      }
+    ],
+    "materialize": true,
+    "inputs": {
+      "now_unix_ns": "1700000000123456789",
+      "random_uint64_values": ["11", "22"],
+      "uuid_values": [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222"
+      ],
+      "random_float64_values": [0.125, 0.875]
+    }
+  },
+  "analyze_response": {
+    "contract_version": 1,
+    "query_profile_id": "synthetic-snapshot-profile-v1",
+    "code": "SUCCESS",
+    "message": "synthetic-analysis-message",
+    "sql_after_materialization": "INSERT INTO tenant.copy (copy_b, copy_a) SELECT event_value, 7 FROM tenant.events",
+    "target_table_id": "target-table-17",
+    "target_columns": ["copy_b", "copy_a"],
+    "read_table_ids": ["read-table-43"]
+  },
+  "prepare_request": {
+    "analysis": {
+      "contract_version": 1,
+      "query_profile_id": "synthetic-snapshot-profile-v1",
+      "sql": "INSERT INTO tenant.copy SELECT value FROM tenant.events",
+      "logical_database": "tenant",
+      "catalog": [
+        {
+          "database": "tenant",
+          "table": "copy",
+          "table_id": "target-table-17",
+          "schema_hash": "target-schema-29",
+          "columns": [
+            {
+              "name": "copy_a",
+              "type": "UInt64",
+              "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+              "default_expression": ""
+            },
+            {
+              "name": "copy_b",
+              "type": "String",
+              "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+              "default_expression": ""
+            }
+          ]
+        },
+        {
+          "database": "tenant",
+          "table": "events",
+          "table_id": "read-table-43",
+          "schema_hash": "read-schema-47",
+          "columns": [
+            {
+              "name": "event_value",
+              "type": "Int32",
+              "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+              "default_expression": ""
+            },
+            {
+              "name": "event_time",
+              "type": "DateTime64(3)",
+              "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ORDINARY",
+              "default_expression": ""
+            }
+          ]
+        }
+      ],
+      "materialize": true,
+      "inputs": {
+        "now_unix_ns": "1700000000123456789",
+        "random_uint64_values": ["11", "22"],
+        "uuid_values": [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "random_float64_values": [0.125, 0.875]
+      }
+    },
+    "bindings": [
+      {
+        "table_id": "read-table-43",
+        "scratch_database": "scratch_db_53",
+        "scratch_table": "scratch_table_59"
+      }
+    ]
+  },
+  "prepare_response": {
+    "contract_version": 1,
+    "query_profile_id": "synthetic-snapshot-profile-v1",
+    "code": "SUCCESS",
+    "message": "synthetic-prepare-message",
+    "select_sql": "SELECT event_value AS copy_a, 7 AS copy_b FROM scratch_db_53.scratch_table_59",
+    "target_table_id": "target-table-17",
+    "target_columns": ["copy_a", "copy_b"],
+    "read_table_ids": ["read-table-43"]
+  },
+  "metadata_transport_table": {
+    "database": "transport_only",
+    "table": "ineligible_columns",
+    "table_id": "transport-table-83",
+    "schema_hash": "transport-schema-89",
+    "columns": [
+      {
+        "name": "default_column",
+        "type": "UInt64",
+        "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_DEFAULT",
+        "default_expression": "41 + 1"
+      },
+      {
+        "name": "materialized_column",
+        "type": "UInt64",
+        "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_MATERIALIZED",
+        "default_expression": "default_column * 2"
+      },
+      {
+        "name": "alias_column",
+        "type": "UInt64",
+        "generation": "SNAPSHOT_QUERY_COLUMN_GENERATION_ALIAS",
+        "default_expression": "materialized_column + 3"
+      },
+      {
+        "name": "future_column",
+        "type": "String",
+        "generation": 127,
+        "default_expression": "future_expression()"
+      }
+    ]
+  }
+}

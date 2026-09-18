@@ -718,11 +718,12 @@ grpc::Status RewriterServiceImpl::MaterializeSQL(
 const std::string VERSION = REWRITER_VERSION;
 const std::string hash = GIT_COMMIT_HASH;
 
-void RunServer(uint16_t grpc_port, uint16_t http_port) {
+void RunServer(uint16_t grpc_port, uint16_t http_port,
+               std::shared_ptr<const snapshot_profiles::Profiles> profiles) {
   std::cout << "Rewriter Server Version: " << VERSION << " (" << hash << ")" << std::endl;
 
   std::string server_address = "0.0.0.0:" + std::to_string(grpc_port);
-  RewriterServiceImpl service;
+  RewriterServiceImpl service(std::move(profiles));
 
   // HTTP+JSON façade — same `service` instance, different protocol. Starts a
   // Poco HTTPServer in its own thread pool and returns immediately so the
@@ -737,4 +738,17 @@ void RunServer(uint16_t grpc_port, uint16_t http_port) {
   std::cout << "Server listening on " << server_address << " (gRPC)" << std::endl;
 
   server->Wait();
+}
+
+Status RewriterServiceImpl::AnalyzeSnapshotQuery(ServerContext *context, const rewriter::AnalyzeSnapshotQueryRequest *request, rewriter::AnalyzeSnapshotQueryResponse *response) {
+  snapshot_query::Execution execution;
+  execution.cancelled = [context] { return context && context->IsCancelled(); };
+  doAnalyzeSnapshotQuery(request, response, std::move(execution));
+  return Status::OK;
+}
+Status RewriterServiceImpl::PrepareSnapshotQuery(ServerContext *context, const rewriter::PrepareSnapshotQueryRequest *request, rewriter::PrepareSnapshotQueryResponse *response) {
+  snapshot_query::Execution execution;
+  execution.cancelled = [context] { return context && context->IsCancelled(); };
+  doPrepareSnapshotQuery(request, response, std::move(execution));
+  return Status::OK;
 }

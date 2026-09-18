@@ -15,6 +15,8 @@
 
 #include "ASTTransformers.h"
 #include "query_preprocessor.h"
+#include "snapshot_query_profiles.h"
+#include "handlers/snapshot_query.h"
 #include "rewriter.grpc.pb.h"
 
 using grpc::Server;
@@ -33,6 +35,14 @@ using rewriter::RewriteSQLResponse;
 
 class RewriterServiceImpl final : public RewriterService::Service {
 public:
+  RewriterServiceImpl() = default;
+  explicit RewriterServiceImpl(std::shared_ptr<const snapshot_profiles::Profiles> profiles)
+      : snapshot_profiles_(std::move(profiles)) {}
+  const snapshot_profiles::Profiles *SnapshotCandidates() const { return snapshot_profiles_.get(); }
+  Status AnalyzeSnapshotQuery(ServerContext *, const rewriter::AnalyzeSnapshotQueryRequest *, rewriter::AnalyzeSnapshotQueryResponse *) override;
+  Status PrepareSnapshotQuery(ServerContext *, const rewriter::PrepareSnapshotQueryRequest *, rewriter::PrepareSnapshotQueryResponse *) override;
+  void doAnalyzeSnapshotQuery(const rewriter::AnalyzeSnapshotQueryRequest *, rewriter::AnalyzeSnapshotQueryResponse *, snapshot_query::Execution = {});
+  void doPrepareSnapshotQuery(const rewriter::PrepareSnapshotQueryRequest *, rewriter::PrepareSnapshotQueryResponse *, snapshot_query::Execution = {});
   // gRPC entrypoints — thin wrappers over the protocol-agnostic do* methods.
   Status MaterializeSQL(ServerContext *context,
     const MaterializeSQLRequest *request,
@@ -67,4 +77,8 @@ public:
     ServerContext *context, const RewriteSQLRequest *request, RewriteSQLResponse *response) {
     return Rewrite(context, request, response);
   }
+private:
+  // Shared by both protocol facades. Immutable identity candidates acknowledge
+  // semantics only after the independent closed-profile support check.
+  const std::shared_ptr<const snapshot_profiles::Profiles> snapshot_profiles_;
 };

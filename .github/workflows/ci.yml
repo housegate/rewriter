@@ -198,7 +198,30 @@ jobs:
           )
           # Keep this verifier byte-for-byte identical in ci.yml and release.yml;
           # historical release refs cannot safely supply the verifier themselves.
-          python3 - --rematerialize "${integrity_roots[@]}" <<'PY'
+          snapshot_ci_dir=$(mktemp -d /tmp/rewriter-snapshot-ci.XXXXXXXX)
+          cleanup_snapshot_ci() {
+            result=$?
+            set +e
+            trap - EXIT INT TERM HUP
+            python3 - "$snapshot_ci_dir" <<'CLEANUP'
+          import os,pathlib,shutil,sys
+          p=pathlib.Path(sys.argv[1])
+          assert str(p).startswith('/tmp/rewriter-snapshot-ci.') and p.resolve()==p
+          for root,dirs,_ in os.walk(p,followlinks=False):
+              os.chmod(root,0o700)
+          shutil.rmtree(p)
+          assert not p.exists()
+          CLEANUP
+            cleanup_result=$?
+            if [ "$cleanup_result" -ne 0 ]; then result=99; fi
+            printf 'TASK_DIRECTORY_CLEANUP_EXIT=%s\n' "$cleanup_result"
+            exit "$result"
+          }
+          trap cleanup_snapshot_ci EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          trap 'exit 129' HUP
+          cat > "$snapshot_ci_dir/raw-integrity.py" <<'PY'
           import hashlib
           import os
           import stat
@@ -1286,6 +1309,7 @@ jobs:
               )
               sys.exit(1)
           PY
+          python3 "$snapshot_ci_dir/raw-integrity.py" --rematerialize "${integrity_roots[@]}"
           clickhouse_submodules="$(git -C clickHouse submodule status --recursive)"
           if [ -n "$clickhouse_submodules" ] && \
              printf '%s\n' "$clickhouse_submodules" | grep -Evq '^ '; then
@@ -1359,28 +1383,14 @@ jobs:
             exit 1
           fi
 
-          ctest --test-dir build --output-on-failure
-          filter='SpecG/StorageIntegrityGolden.*:StorageIntegrityCorpus.*:SINormalize.*'
-          build/tests/rewriter_tests --gtest_filter="$filter"
-          require_test_count() {
-            local family=$1
-            local expected=$2
-            local count
-            count="$(
-              build/tests/rewriter_tests \
-                --gtest_filter="$family" \
-                --gtest_list_tests |
-                awk '/^  / { count++ } END { print count + 0 }'
-            )"
-            echo "$family cases: $count"
-            if [ "$count" -ne "$expected" ]; then
-              echo "error: expected exactly $expected tests for $family, found $count" >&2
-              exit 1
-            fi
-          }
-          require_test_count 'SpecG/StorageIntegrityGolden.*' 237
-          require_test_count 'StorageIntegrityCorpus.*' 2
-          require_test_count 'SINormalize.*' 11
+          # Mandatory paired gate retains full CTest, startup negatives and the
+          # existing ordinary/SI assertions/counts inside isolated namespaces.
+          bash .github/scripts/snapshot-query-paired-ci.sh \
+            "$ci_root" "$expected_sha" "$snapshot_ci_dir" "$snapshot_ci_dir/raw-integrity.py"
+          require_cache_policy
+          [ "$(git rev-parse HEAD)" = "$expected_sha" ]
+          git diff --cached --quiet
+          git diff --quiet --ignore-submodules=all -- . ':(exclude)clickHouse'
           CRITICAL
           then
             echo 'error: build-host lock wait or 85-minute critical section failed' >&2

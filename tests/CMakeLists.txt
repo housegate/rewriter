@@ -21,6 +21,9 @@ find_package(Threads REQUIRED)
 
 clickhouse_add_executable(rewriter_tests
     rewriter_test.cc
+    snapshot_query_contract_test.cc
+    snapshot_query_test.cc
+    snapshot_query_profiles_test.cc
     $<TARGET_OBJECTS:rewriter_core>
 )
 
@@ -50,7 +53,7 @@ target_link_libraries(rewriter_tests PRIVATE
     dl m Threads::Threads
 
     clickhouse_parsers clickhouse_common_io dbms
-    clickhouse_functions rewriter_grpc_protos absl::debugging_internal
+    clickhouse_functions rewriter_grpc_protos absl::debugging_internal OpenSSL::Crypto
 )
 
 add_test(NAME rewriter_tests COMMAND rewriter_tests)
@@ -64,3 +67,11 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/rewriter_startup_smoke.sh
             $<TARGET_FILE:clickhousegate_rewriter>)
 set_tests_properties(rewriter_startup_smoke PROPERTIES TIMEOUT 20)
+
+# Two-stage measured probes are opt-in to an externally generated profile;
+# The measured verification lane supplies both service and test profiles;
+# an ordinary build without those external artifacts reports an explicit skip.
+add_test(NAME snapshot_profile_startup
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/snapshot_profile_startup.py
+            $<TARGET_FILE:clickhousegate_rewriter>)
+set_tests_properties(snapshot_profile_startup PROPERTIES TIMEOUT 240 SKIP_RETURN_CODE 77)

@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "prerequisite_root": "/home/sentio/ci/snapshot-query-prerequisites/issue-153-v1",
+  "sources": {
+    "rg": "896e4344a91bd2b1a58fcb7f92b144642eb77d15",
+    "hg": "022ee95c919b9b1e4bac177f675cda8f1036d6c7",
+    "rp": "a86e62230aaf09fcf43381950cbf5c2732b38c12",
+    "polyglot": "b30c3d28bcdd645f70136cccc3f699cdd5a1e4ed",
+    "clickhouse": "46297556f3ac83e1a3ee4a05cc31f4287f5e17ac",
+    "cctz": "6440590af6962a2ed22ef574c2289a54ccf165fb"
+  },
+  "corpus": {
+    "sha256": "3d7c1f1077b1ac6c1bd73d7703b135e95c92bde10d1ce4393c8cb091cca1c933",
+    "analyze": 636,
+    "prepare": 130
+  },
+  "files": {
+    "ffi": {
+      "name": "libpolyglot_sql_ffi.so",
+      "bytes": 47895744,
+      "sha256": "bc4d179523e7fdac6235d738cad7c27521a5be928642c62b2c972b754f5674b8",
+      "source": "polyglot",
+      "build": "cargo build --locked -p polyglot-sql-ffi --profile ffi_release",
+      "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14); cargo 1.97.1; x86_64-unknown-linux-gnu",
+      "cargo_lock_sha256": "0316c0d83525376fbfb7e59383ce3d7c9c1eedeb9c48965940c48aad10ae5708"
+    },
+    "profile_tool": {
+      "name": "snapshot-query-profile",
+      "bytes": 2506914,
+      "sha256": "30f8d075b5a8c2a2f9260ef73c3a2aa17c8a82c4905700fdc2190ebd34195b57",
+      "source": "hg",
+      "build": "bazel build //tools/snapshot-query-profile:snapshot-query-profile --platforms=@rules_go//go/toolchain:linux_amd64",
+      "toolchain": "Bazel 9.1.0; Go 1.26.3"
+    },
+    "clickhouse": {
+      "name": "clickhouse",
+      "bytes": 699297712,
+      "sha256": "3119787d498400102afb141c903991efb53f5d0cc88b423d79092404af5d370c",
+      "source": "clickhouse",
+      "version": "25.8.32.4",
+      "platform": "linux/amd64"
+    },
+    "tzdata": {
+      "name": "cctz-zoneinfo-complete.tar",
+      "bytes": 870400,
+      "sha256": "a6b5b16ffa716f56a9135ce8944c96540b407f687cfb3ffc3c70f4ecf573b8ff",
+      "source": "cctz",
+      "format": "POSIX ustar; zoneinfo/ root; 600 regular files; sorted; mtime 0; uid/gid 0; file 0444; directory 0555",
+      "version": "2025a"
+    }
+  },
+  "images": {
+    "native": {
+      "id": "sha256:9d9d715d688ced62374388302667e31a6d3a0655c4c9e0ceaf1a4c4886752a62",
+      "registry": "golang@sha256:5a94593d87a066df5abb02969be911524963f53908292aa5a1a6096fc019012a",
+      "platform": "linux/amd64",
+      "go": "go1.26.4",
+      "libc": "2.36",
+      "gcc": "12.2.0"
+    },
+    "cpp": {
+      "id": "sha256:3c23d0399c012c0fbbe4c8f244fd59b89a0489441ac8f82119eda7620c5a2921",
+      "platform": "linux/amd64",
+      "base": "ubuntu@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9",
+      "python": "3.12.3",
+      "ctest": "3.28.3",
+      "libc_package": "2.39-0ubuntu8.9",
+      "recipe": "FROM pinned base; apt-get update; apt-get install --no-install-recommends python3 cmake; remove apt lists; LABEL housegate.task=issue-153-a43"
+    }
+  },
+  "qualification": {
+    "native_members": [
+      "rewriter.test",
+      "engine.test",
+      "harness.test"
+    ],
+    "cpp_tests": 1221,
+    "execution_fixtures": 102,
+    "execution_states": 228,
+    "analyzer_refusals": 78,
+    "transport_calls": 14
+  },
+  "policy": "Reviewed immutable prebuilt prerequisites; each required run freshly compiles RG members and RC executables, authenticates source and measures N/G/Q. Missing inputs fail; never rebuild silently or publish private binaries."
+}

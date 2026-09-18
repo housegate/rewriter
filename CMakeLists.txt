@@ -210,6 +210,8 @@ message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 add_library(rewriter_core OBJECT
     src/rewriter-server.cc
     src/query_preprocessor.cc
+    src/snapshot_query_profiles.cc
+    src/snapshot_executable_identity.cc
     src/ASTTransformers.cc
     src/rewriter-http-server.cc
     src/handlers/use.cc
@@ -223,6 +225,7 @@ add_library(rewriter_core OBJECT
     src/handlers/exists.cc
     src/handlers/show_create.cc
     src/handlers/grant.cc
+    src/handlers/snapshot_query.cc
     src/handlers/materialize.cc
     src/handlers/join_swap.cc)
 target_include_directories(rewriter_core SYSTEM PUBLIC
@@ -231,7 +234,7 @@ target_include_directories(rewriter_core SYSTEM PUBLIC
     ${REWRITER_PROTO_GENERATED_DIR})
 target_link_libraries(rewriter_core PUBLIC
     clickhouse_parsers clickhouse_common_io dbms clickhouse_functions
-    rewriter_grpc_protos absl::debugging_internal)
+    rewriter_grpc_protos absl::debugging_internal OpenSSL::Crypto)
 # Stamp the version / commit hash into rewriter-server.cc ONLY (that's the
 # sole consumer). Previously this was a rewriter_core PUBLIC define, which
 # meant any change to REWRITER_VERSION — including `git describe --dirty`
