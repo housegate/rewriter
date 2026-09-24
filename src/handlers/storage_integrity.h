@@ -14,7 +14,7 @@ namespace rewriter_handlers {
 
 constexpr std::string_view kDefaultReservedRowIdColumn = "_hg_row_id";
 constexpr std::string_view kStorageIntegrityContractMessage =
-  "storage-integrity contract version V1 is required";
+  "storage-integrity contract version V1 or V2 is required";
 constexpr std::string_view kStorageIntegrityWrapperMessage =
   "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported";
 constexpr std::string_view kStorageIntegrityUnmodelledMessage =
@@ -26,9 +26,23 @@ struct StorageIntegrityHit {
   std::string logical_database;
 };
 
-// Validate every v1 proof field before acknowledgement. Empty SI table maps
-// are legacy/no-op and are intentionally not activated by the caller.
+// Validate every proof field before acknowledgement. A V1 request with an
+// empty table map is legacy/no-op and is not activated by the caller; a V2
+// request is activated by version (see storageIntegritySurfaceActive). Under
+// V2 every reserved_databases entry must be a simple identifier; V1 ignores
+// that field entirely.
 bool validateStorageIntegrity(const rewriter::RewriteTableDynamicArgs &args, std::string *error);
+
+// True when the request activates the storage-integrity surface: any V2
+// request, even with an empty table map (housegate sub-project 3, H6), or any
+// other request whose table map is non-empty. Mirrors rewriter-go's
+// nameresolve.StorageIntegritySurfaceActive.
+bool storageIntegritySurfaceActive(const rewriter::RewriteTableDynamicArgs &args);
+
+// True when the request carries contract V2, whose only write-policy
+// difference from V1 is that a plain DROP TABLE of a logical SI table is
+// accepted. Mirrors rewriter-go's nameresolve.StorageIntegrityDropContract.
+bool storageIntegrityDropContract(const rewriter::RewriteTableDynamicArgs &args);
 
 std::optional<StorageIntegrityHit> lookupStorageIntegrity(const std::string &origin_db,
   const std::string &origin_table,

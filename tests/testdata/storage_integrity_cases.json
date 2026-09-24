@@ -1,5 +1,6 @@
 [
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -45,6 +46,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -99,6 +101,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -146,6 +149,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -193,6 +197,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -246,6 +251,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -282,6 +288,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -309,6 +316,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -345,6 +353,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -381,6 +390,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -417,6 +427,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -453,6 +464,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -489,6 +501,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -525,6 +538,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {},
       "known_physical_databases": [
@@ -558,6 +572,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {},
       "known_physical_databases": [
@@ -591,6 +606,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {},
       "known_physical_databases": [
@@ -624,6 +640,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -659,6 +676,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -694,6 +712,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -729,6 +748,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -764,6 +784,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -817,6 +838,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -861,6 +883,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -904,6 +927,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -948,6 +972,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -984,6 +1009,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1020,6 +1046,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1056,6 +1083,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1097,6 +1125,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1133,6 +1162,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1175,6 +1205,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1209,6 +1240,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1252,6 +1284,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1287,6 +1320,7 @@
     "want_stmt": "DESCRIBE"
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1328,6 +1362,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1364,6 +1399,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1405,6 +1441,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1441,6 +1478,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1468,6 +1506,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1495,6 +1534,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1522,6 +1562,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1549,6 +1590,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -1586,6 +1628,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -1623,6 +1666,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1659,6 +1703,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -1707,6 +1752,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -1763,6 +1809,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -1814,6 +1861,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1850,6 +1898,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1886,6 +1935,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1922,6 +1972,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1958,6 +2009,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -1994,6 +2046,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2026,6 +2079,7 @@
     "want_stmt": "SHOW_TABLES"
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2075,6 +2129,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2109,6 +2164,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2165,6 +2221,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2201,6 +2258,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2237,6 +2295,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2278,6 +2337,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2331,6 +2391,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -2375,6 +2436,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -2418,6 +2480,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2453,6 +2516,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2488,6 +2552,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2523,6 +2588,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2558,6 +2624,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2593,6 +2660,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2628,6 +2696,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2680,6 +2749,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2732,6 +2802,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -2784,6 +2855,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2819,6 +2891,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -2854,6 +2927,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -2890,6 +2964,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -2926,6 +3001,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -2963,6 +3039,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {},
       "known_physical_databases": [
@@ -2997,6 +3074,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {},
       "known_physical_databases": [
@@ -3031,6 +3109,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3072,6 +3151,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3113,6 +3193,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3148,6 +3229,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3182,6 +3264,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3216,6 +3299,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3251,6 +3335,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3286,6 +3371,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3322,6 +3408,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3357,6 +3444,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3391,6 +3479,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3426,6 +3515,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3461,6 +3551,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3495,6 +3586,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3530,6 +3622,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -3565,6 +3658,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3599,6 +3693,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3633,6 +3728,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3661,6 +3757,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3689,6 +3786,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -3726,6 +3824,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -3761,6 +3860,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -3798,6 +3898,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -3833,6 +3934,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3867,6 +3969,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3901,6 +4004,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3940,6 +4044,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -3975,6 +4080,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4010,6 +4116,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4046,6 +4153,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4082,6 +4190,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -4135,6 +4244,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4171,6 +4281,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4207,6 +4318,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -4243,6 +4355,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -4279,6 +4392,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -4323,6 +4437,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -4376,6 +4491,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "hg_safe"
@@ -4413,6 +4529,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "hg_safe",
@@ -4452,6 +4569,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "hg_safe",
@@ -4491,6 +4609,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -4534,6 +4653,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -4575,6 +4695,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -4617,6 +4738,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -4654,6 +4776,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -4689,6 +4812,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4724,6 +4848,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4759,6 +4884,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4794,6 +4920,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4829,6 +4956,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4864,6 +4992,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4899,6 +5028,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4934,6 +5064,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -4969,6 +5100,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "hg_safe"
@@ -5006,6 +5138,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys"
@@ -5045,6 +5178,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5080,6 +5214,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5115,6 +5250,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "hg_safe",
@@ -5154,6 +5290,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -5191,6 +5328,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5230,6 +5368,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5271,6 +5410,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5312,6 +5452,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5347,6 +5488,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5383,6 +5525,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5422,6 +5565,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5461,6 +5605,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5502,6 +5647,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5543,6 +5689,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5584,6 +5731,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5625,6 +5773,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5660,6 +5809,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5695,6 +5845,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5730,6 +5881,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5771,6 +5923,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5812,6 +5965,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5853,6 +6007,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5894,6 +6049,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5929,6 +6085,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5964,6 +6121,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -5999,6 +6157,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6040,6 +6199,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6081,6 +6241,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6122,6 +6283,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6163,6 +6325,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6204,6 +6367,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6245,6 +6409,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6286,6 +6451,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6327,6 +6493,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6362,6 +6529,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6397,6 +6565,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6432,6 +6601,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6471,6 +6641,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6510,6 +6681,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6549,6 +6721,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "other": "phys"
@@ -6588,6 +6761,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -6631,6 +6805,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -6674,6 +6849,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -6714,6 +6890,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6743,6 +6920,7 @@
     "want_table_rewrites": {}
   },
   {
+    "contract_version": "V1",
     "allow_sql_divergence": true,
     "dynamic": {
       "database_map": {
@@ -6783,6 +6961,7 @@
     }
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6811,6 +6990,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6839,6 +7019,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6867,6 +7048,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6895,6 +7077,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6923,6 +7106,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6951,6 +7135,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -6979,6 +7164,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7007,6 +7193,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7035,6 +7222,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7063,6 +7251,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7091,6 +7280,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7119,6 +7309,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7157,6 +7348,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7193,6 +7385,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7229,6 +7422,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7266,6 +7460,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7302,6 +7497,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "dynamic": {
       "database_map": {
         "db1": "phys",
@@ -7339,6 +7535,7 @@
     "want_stmt": ""
   },
   {
+    "contract_version": "V1",
     "name": "si_excluded_parts_escaping",
     "sql": "SELECT a FROM db1.t",
     "dynamic": {
@@ -7358,6 +7555,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_excluded_part_trailing_backslash_cannot_close_literal",
     "sql": "SELECT a FROM db1.t",
     "dynamic": {
@@ -7378,6 +7576,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_reserved_column_on_ordinary_table_in_subquery_allowed",
     "sql": "SELECT a FROM db1.t WHERE a IN (SELECT _hg_row_id FROM other.u)",
     "dynamic": {
@@ -7402,6 +7601,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_reserved_column_qualified_by_si_alias_rejected",
     "sql": "SELECT a FROM db1.t AS s WHERE a IN (SELECT k FROM other.u WHERE k = s._hg_row_id)",
     "dynamic": {
@@ -7418,6 +7618,7 @@
     "want_message_contains": "reserved column _hg_row_id is not addressable"
   },
   {
+    "contract_version": "V1",
     "name": "si_cte_alias_shadowing_si_name_in_from_allowed",
     "sql": "WITH t AS (SELECT 1 AS id) SELECT id FROM t",
     "dynamic": {
@@ -7438,6 +7639,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_cte_alias_shadowing_si_name_in_in_clause_allowed",
     "sql": "WITH t AS (SELECT 1 AS id) SELECT a FROM other.u WHERE id IN t",
     "dynamic": {
@@ -7463,6 +7665,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_table_inside_cte_body_rewritten",
     "sql": "WITH c AS (SELECT a FROM db1.t) SELECT a FROM c",
     "dynamic": {
@@ -7484,6 +7687,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_prewhere_rejected",
     "sql": "SELECT a FROM `\\x64b1`.t PREWHERE a > 1",
     "dynamic": {
@@ -7500,6 +7704,7 @@
     "want_message_contains": "FINAL/SAMPLE/PREWHERE/WITH OFFSET/column aliases on storage-integrity tables are not supported"
   },
   {
+    "contract_version": "V1",
     "name": "si_mixed_ordinary_prewhere_allowed",
     "sql": "SELECT * FROM other.u AS x JOIN db1.t AS s ON 1 PREWHERE x.a > 1",
     "dynamic": {
@@ -7520,6 +7725,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_prewhere_literal_allowed",
     "sql": "SELECT 'PREWHERE' FROM db1.t",
     "dynamic": {
@@ -7538,6 +7744,7 @@
     "want_table_rewrites": {"db1.t": "hg_safe.db1__t"}
   },
   {
+    "contract_version": "V1",
     "name": "si_string_literal_except_is_not_mutated",
     "sql": "SELECT 'EXCEPT _hg_row_id' AS s FROM db1.t",
     "dynamic": {
@@ -7559,6 +7766,7 @@
     "allow_sql_divergence": true
   },
   {
+    "contract_version": "V1",
     "name": "si_show_dictionaries_safe_database_rejected",
     "sql": "SHOW DICTIONARIES FROM hg_safe",
     "dynamic": {
@@ -7578,6 +7786,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_dictionaries_logical_database_rejected",
     "sql": "SHOW DICTIONARIES FROM db1",
     "dynamic": {
@@ -7597,6 +7806,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_dictionaries_ordinary_database_passthrough",
     "sql": "SHOW DICTIONARIES FROM other",
     "dynamic": {
@@ -7614,6 +7824,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_merge_tagged_heredoc_physical_rejected",
     "sql": "SELECT * FROM merge($tag$hg_safe$tag$, 'db1__t')",
     "dynamic": {
@@ -7633,6 +7844,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_remote_tagged_heredoc_physical_rejected",
     "sql": "SELECT * FROM remote('h', $tag$hg_unsafe$tag$, 'db1__t')",
     "dynamic": {
@@ -7652,6 +7864,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_merge_bare_heredoc_physical_rejected",
     "sql": "SELECT * FROM merge($$hg_safe$$, 'db1__t')",
     "dynamic": {
@@ -7671,6 +7884,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_merge_bare_heredoc_regexp_physical_rejected",
     "sql": "SELECT * FROM merge($$hg_safe$$, '^db1__t$')",
     "dynamic": {
@@ -7690,6 +7904,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_columns_two_from_safe_rejected",
     "sql": "SHOW COLUMNS FROM db1__t FROM hg_safe",
     "dynamic": {
@@ -7709,6 +7924,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_fields_two_from_safe_rejected",
     "sql": "SHOW FIELDS FROM db1__t FROM hg_safe",
     "dynamic": {
@@ -7728,6 +7944,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_indices_two_from_safe_rejected",
     "sql": "SHOW INDICES FROM db1__t FROM hg_safe",
     "dynamic": {
@@ -7747,6 +7964,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_columns_qualified_safe_rejected",
     "sql": "SHOW COLUMNS FROM hg_safe.db1__t",
     "dynamic": {
@@ -7766,6 +7984,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_extended_columns_unsafe_rejected",
     "sql": "SHOW EXTENDED COLUMNS FROM db1__t FROM hg_unsafe",
     "dynamic": {
@@ -7785,6 +8004,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_full_columns_in_unsafe_rejected",
     "sql": "SHOW FULL COLUMNS FROM db1__t IN hg_unsafe",
     "dynamic": {
@@ -7804,6 +8024,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_index_qualified_safe_rejected",
     "sql": "SHOW INDEX FROM hg_safe.db1__t",
     "dynamic": {
@@ -7823,6 +8044,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_indexes_two_from_safe_rejected",
     "sql": "SHOW INDEXES FROM db1__t FROM hg_safe",
     "dynamic": {
@@ -7842,6 +8064,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_keys_two_from_safe_rejected",
     "sql": "SHOW KEYS FROM db1__t FROM hg_safe",
     "dynamic": {
@@ -7861,6 +8084,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_columns_context_physical_rejected",
     "sql": "SHOW COLUMNS FROM db1__t",
     "dynamic": {
@@ -7881,6 +8105,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_columns_si_logical_database_rejected",
     "sql": "SHOW COLUMNS FROM t FROM db1",
     "dynamic": {
@@ -7900,6 +8125,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_show_columns_ordinary_database_passthrough",
     "sql": "SHOW COLUMNS FROM u FROM other",
     "dynamic": {
@@ -7917,6 +8143,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_show_merges_target_less_passthrough",
     "sql": "SHOW MERGES",
     "dynamic": {
@@ -7934,6 +8161,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_mysql_physical_function_rejected",
     "sql": "SELECT * FROM mysql('127.0.0.1:9004', 'hg_safe', 'db1__t', 'u', 'p')",
     "dynamic": {
@@ -7953,6 +8181,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_postgresql_physical_function_rejected",
     "sql": "SELECT * FROM postgresql('127.0.0.1:9005', 'hg_unsafe', 'db1__t', 'u', 'p')",
     "dynamic": {
@@ -7972,6 +8201,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_mongodb_physical_function_rejected",
     "sql": "SELECT * FROM mongodb('127.0.0.1:27017', 'hg_safe', 'db1__t', 'u', 'p', 'a String')",
     "dynamic": {
@@ -7991,6 +8221,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_jdbc_physical_function_rejected",
     "sql": "SELECT * FROM jdbc('jdbc:clickhouse://127.0.0.1:8123', 'hg_safe', 'db1__t')",
     "dynamic": {
@@ -8010,6 +8241,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_odbc_physical_function_rejected",
     "sql": "SELECT * FROM odbc('DSN=ch', 'hg_unsafe', 'db1__t')",
     "dynamic": {
@@ -8029,6 +8261,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_mysql_unresolved_namespace_rejected",
     "sql": "SELECT * FROM mysql('h', concat('hg_', 'safe'), 'db1__t', 'u', 'p')",
     "dynamic": {
@@ -8049,6 +8282,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_mysql_named_collection_unresolved_rejected",
     "sql": "SELECT * FROM mysql(creds, database = 'hg_safe', table = 'db1__t')",
     "dynamic": {
@@ -8069,6 +8303,7 @@
     ]
   },
   {
+    "contract_version": "V1",
     "name": "si_mysql_ordinary_database_allowed",
     "sql": "SELECT * FROM mysql('127.0.0.1:9004', 'other', 'u', 'x', 'y')",
     "dynamic": {
@@ -8086,6 +8321,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_sqlite_foreign_file_allowed",
     "sql": "SELECT * FROM sqlite('/tmp/x.db', 'db1__t')",
     "dynamic": {
@@ -8103,6 +8339,7 @@
     "want_accessed": []
   },
   {
+    "contract_version": "V1",
     "name": "si_redis_column_name_allowed",
     "sql": "SELECT * FROM redis('127.0.0.1:6379', 'hg_safe', 'k String')",
     "dynamic": {
@@ -8118,5 +8355,365 @@
     "want_code": "Success", "want_stmt": "SELECT",
     "want_sql": "SELECT * FROM redis('127.0.0.1:6379', 'hg_safe', 'k String')",
     "want_accessed": []
+  },
+  {
+    "name": "si_v2_drop_table",
+    "contract_version": "V2",
+    "sql": "DROP TABLE db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "DROP_TABLE",
+    "want_sql": "DROP TABLE phys.\"db1.t\"",
+    "want_table_rewrites": {"db1.t": "phys.db1.t"},
+    "want_accessed": [{"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_drop_table_if_exists_sync",
+    "contract_version": "V2",
+    "sql": "DROP TABLE IF EXISTS db1.t SYNC",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "DROP_TABLE",
+    "want_sql": "DROP TABLE IF EXISTS phys.\"db1.t\" SYNC",
+    "want_table_rewrites": {"db1.t": "phys.db1.t"},
+    "want_accessed": [{"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_drop_multi_mixed",
+    "contract_version": "V2",
+    "sql": "DROP TABLE db1.t, other.u",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "DROP_TABLE",
+    "want_sql": "DROP TABLE phys.\"db1.t\", phys.\"other.u\"",
+    "want_table_rewrites": {"db1.t": "phys.db1.t", "other.u": "phys.other.u"},
+    "want_accessed": [{"original_database": "db1", "original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}, {"original_database": "other", "original_table": "u", "logical_database": "other", "physical_database": "phys"}]
+  },
+  {
+    "name": "si_v2_drop_unqualified_in_context",
+    "contract_version": "V2",
+    "sql": "DROP TABLE t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "want_code": "Success", "want_stmt": "DROP_TABLE",
+    "want_sql": "DROP TABLE phys.\"db1.t\"",
+    "want_table_rewrites": {"t": "phys.db1.t"},
+    "want_accessed": [{"original_table": "t", "logical_database": "db1", "physical_database": "phys", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_truncate_rejected",
+    "contract_version": "V2",
+    "sql": "TRUNCATE TABLE db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v2_drop_physical_rejected",
+    "contract_version": "V2",
+    "sql": "DROP TABLE hg_safe.db1__t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.db1__t is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "db1__t", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_drop_on_cluster_rejected",
+    "contract_version": "V2",
+    "sql": "DROP TABLE db1.t ON CLUSTER c",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v2_drop_view_rejected",
+    "contract_version": "V2",
+    "sql": "DROP VIEW db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v2_drop_dictionary_rejected",
+    "contract_version": "V2",
+    "sql": "DROP DICTIONARY db1.t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v2_empty_map_set_rejected",
+    "contract_version": "V2",
+    "sql": "SET max_threads = 1",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_v2_empty_map_system_rejected",
+    "contract_version": "V2",
+    "sql": "SYSTEM RELOAD CONFIG",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity is configured; statement class is not modelled by the rewriter and cannot be forwarded"
+  },
+  {
+    "name": "si_v1_drop_if_exists_sync_rejected",
+    "contract_version": "V1",
+    "sql": "DROP TABLE IF EXISTS db1.t SYNC",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v1_drop_unqualified_in_context_rejected",
+    "contract_version": "V1",
+    "sql": "DROP TABLE t",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane"
+  },
+  {
+    "name": "si_v2_reserved_select_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM hg_safe.x",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "RewriteError", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "x", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_reserved_insert_rejected",
+    "contract_version": "V2",
+    "sql": "INSERT INTO hg_unsafe.x VALUES (1)",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_unsafe.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_unsafe", "original_table": "x", "physical_database": "hg_unsafe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_reserved_truncate_rejected",
+    "contract_version": "V2",
+    "sql": "TRUNCATE TABLE hg_promote.x",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_promote.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_promote", "original_table": "x", "physical_database": "hg_promote", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_reserved_truncate_database_rejected",
+    "contract_version": "V2",
+    "sql": "TRUNCATE DATABASE hg_safe",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "UnsupportedStatement", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical database hg_safe is not directly addressable"
+  },
+  {
+    "name": "si_v2_reserved_merge_heredoc_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM merge($tag$hg_safe$tag$, 'x')",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "RewriteError", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_safe.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_safe", "original_table": "x", "physical_database": "hg_safe", "is_storage_integrity": true}]
+  },
+  {
+    "name": "si_v2_reserved_union_with_table_map_rejected",
+    "contract_version": "V2",
+    "sql": "SELECT * FROM hg_promote.x",
+    "dynamic": {
+      "database_map": {"db1": "phys", "other": "phys"},
+      "known_physical_databases": ["phys"],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {"db1.t": {"safe_table": "hg_safe.db1__t", "unsafe_table": "hg_unsafe.db1__t"}},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": ["hg_safe", "hg_unsafe", "hg_promote"]
+      }
+    },
+    "reject": true,
+    "want_code": "RewriteError", "want_stmt": "",
+    "want_message_contains": "storage-integrity physical table hg_promote.x is not directly addressable",
+    "want_accessed": [{"original_database": "hg_promote", "original_table": "x", "physical_database": "hg_promote", "is_storage_integrity": true}]
   }
 ]

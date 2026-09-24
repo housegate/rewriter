@@ -329,21 +329,22 @@ void RewriterServiceImpl::doRewrite(
     }
   } _access_log{sql_id, response, t0, original_query.size()};
 
-  // Positive SI v1 proof is selected by the same last-wins table-rewrite
-  // option as the handlers. Validate the entire active contract before
-  // publishing acknowledgement, then stamp it before preprocessing/parsing so
-  // syntax errors and every handler rejection retain the proof.
+  // Positive SI proof (V1 or V2) is selected by the same last-wins
+  // table-rewrite option as the handlers. V2 activates the surface by
+  // version, V1 only with a non-empty table map. Validate the entire active
+  // contract before publishing acknowledgement, then stamp it before
+  // preprocessing/parsing so syntax errors and every handler rejection
+  // retain the proof.
   const auto si_selection =
     rewriter_handlers::findActiveTableRewrite(request->options());
   const bool si_active =
     si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
-    && si_selection.dynamic_args->has_storage_integrity()
-    && !si_selection.dynamic_args->storage_integrity().tables().empty();
+    && rewriter_handlers::storageIntegritySurfaceActive(*si_selection.dynamic_args);
   if (si_active) {
     const auto &si = si_selection.dynamic_args->storage_integrity();
     std::string validation_error;
-    if (si.contract_version()
-          != rewriter::STORAGE_INTEGRITY_CONTRACT_V1) {
+    if (si.contract_version() != rewriter::STORAGE_INTEGRITY_CONTRACT_V1
+        && si.contract_version() != rewriter::STORAGE_INTEGRITY_CONTRACT_V2) {
       response->set_sql_after_rewrite(original_query);
       response->set_message(std::string(
         rewriter_handlers::kStorageIntegrityContractMessage));
@@ -357,8 +358,7 @@ void RewriterServiceImpl::doRewrite(
       response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
       return;
     }
-    response->set_storage_integrity_contract_version(
-      rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+    response->set_storage_integrity_contract_version(si.contract_version());
   }
 
   // Every structured rejection must echo the original SQL. Successful

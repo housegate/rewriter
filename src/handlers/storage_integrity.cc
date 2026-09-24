@@ -804,6 +804,19 @@ bool referencesIdentifierInScope(const DB::ASTPtr &ast,
 
 } // namespace
 
+bool storageIntegritySurfaceActive(const rewriter::RewriteTableDynamicArgs &args) {
+  if (!args.has_storage_integrity()) return false;
+  const auto &si = args.storage_integrity();
+  return si.contract_version() == rewriter::STORAGE_INTEGRITY_CONTRACT_V2
+    || !si.tables().empty();
+}
+
+bool storageIntegrityDropContract(const rewriter::RewriteTableDynamicArgs &args) {
+  return args.has_storage_integrity()
+    && args.storage_integrity().contract_version()
+         == rewriter::STORAGE_INTEGRITY_CONTRACT_V2;
+}
+
 bool validateStorageIntegrity(const rewriter::RewriteTableDynamicArgs &args, std::string *error) {
   if (!args.has_storage_integrity()) return true;
   const auto &si = args.storage_integrity();
@@ -854,6 +867,16 @@ bool validateStorageIntegrity(const rewriter::RewriteTableDynamicArgs &args, std
       return false;
     }
   }
+  if (si.contract_version() == rewriter::STORAGE_INTEGRITY_CONTRACT_V2) {
+    for (const auto &database : si.reserved_databases()) {
+      if (!simpleIdentifier(database)) {
+        if (error)
+          *error = "storage-integrity reserved_databases entry \"" + database +
+                   "\" must be a simple identifier";
+        return false;
+      }
+    }
+  }
   return true;
 }
 
@@ -872,6 +895,20 @@ std::optional<StorageIntegrityHit> lookupStorageIntegrity(const std::string &ori
   return StorageIntegrityHit{&it->second, key, logical};
 }
 
+// Contract V2 only: V1 ignores reserved_databases, so its protected namespace
+// stays the databases derived from the table map, byte-for-byte. Mirrors
+// rewriter-go's nameresolve.storageIntegrityReservedDatabase.
+static bool storageIntegrityReservedDatabase(
+  const std::string &database, const rewriter::RewriteTableDynamicArgs &args) {
+  if (database.empty() || !args.has_storage_integrity()
+      || args.storage_integrity().contract_version()
+           != rewriter::STORAGE_INTEGRITY_CONTRACT_V2)
+    return false;
+  for (const auto &reserved : args.storage_integrity().reserved_databases())
+    if (reserved == database) return true;
+  return false;
+}
+
 bool isStorageIntegrityPhysicalDatabase(
   const std::string &database, const rewriter::RewriteTableDynamicArgs &args) {
   if (database.empty() || !args.has_storage_integrity()) return false;
@@ -882,7 +919,7 @@ bool isStorageIntegrityPhysicalDatabase(
         return true;
     }
   }
-  return false;
+  return storageIntegrityReservedDatabase(database, args);
 }
 
 bool isStorageIntegrityLogicalDatabase(
@@ -905,6 +942,8 @@ std::vector<std::string> storageIntegrityPhysicalDatabases(
         if (splitExactQualified(*value, &database, &ignored)) databases.insert(database);
       }
     }
+    for (const auto &reserved : args.storage_integrity().reserved_databases())
+      if (storageIntegrityReservedDatabase(reserved, args)) databases.insert(reserved);
   }
   return {databases.begin(), databases.end()};
 }
@@ -1472,7 +1511,7 @@ bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
   const std::vector<NamespaceRef> &refs,
   const rewriter::RewriteTableDynamicArgs &args,
   rewriter::RewriteCode code) {
-  if (!args.has_storage_integrity() || args.storage_integrity().tables().empty()) return false;
+  if (!storageIntegritySurfaceActive(args)) return false;
   for (auto ref : refs) {
     if (ref.uses_current_database) {
       if (!ref.table.empty()) {
@@ -1561,7 +1600,7 @@ bool rejectUnmodelledStorageIntegrityStatement(const DB::ASTPtr &ast,
   const rewriter::RewriteTableDynamicArgs &args,
   rewriter::RewriteSQLResponse *response) {
   if (!ast || !response) return false;
-  if (!args.has_storage_integrity() || args.storage_integrity().tables().empty()) return false;
+  if (!storageIntegritySurfaceActive(args)) return false;
   if (ast->as<DB::ASTSelectWithUnionQuery>() || ast->as<DB::ASTSelectQuery>()
       || ast->as<DB::ASTSelectIntersectExceptQuery>())
     return false;
@@ -1622,7 +1661,7 @@ void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
   const std::string &sql,
   const rewriter::RewriteTableDynamicArgs &args) {
   if (!response || response->code() == rewriter::RewriteCode::Success) return;
-  if (!args.has_storage_integrity() || args.storage_integrity().tables().empty()) return;
+  if (!storageIntegritySurfaceActive(args)) return;
   for (const auto &entry : response->original_accessed_tables())
     if (entry.is_storage_integrity()) return;
 

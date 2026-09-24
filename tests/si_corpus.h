@@ -2,7 +2,7 @@
 
 // The storage-integrity corpus contract, mirrored from
 // rewriter-go/internal/harness/sicorpus_test.go. The JSON file is
-// byte-identical in both repos; these rules and their ids (R1..R7) are
+// byte-identical in both repos; these rules and their ids (R1..R8) are
 // identical too, so a case one runner rejects the other rejects as well.
 //
 // Spec J D3.
@@ -45,9 +45,9 @@ inline uint64_t Fingerprint(const std::string &raw) {
 // This repo locally pins its own exact corpus bytes, catching accidental edits
 // and stale local pins. Intentional updates require paired PRs with rewriter-go,
 // an explicit byte-for-byte cmp, and a SHA-256 recorded in each PR description.
-constexpr uint64_t kCorpusFingerprint = 4366038644618079701ULL;
-constexpr size_t kCorpusBytes = 232837;
-constexpr size_t kCorpusCases = 237;
+constexpr uint64_t kCorpusFingerprint = 7051648083520101593ULL;
+constexpr size_t kCorpusBytes = 254170;
+constexpr size_t kCorpusCases = 256;
 
 struct Accessed {
   std::string original_database;
@@ -61,6 +61,9 @@ struct Accessed {
 struct Case {
   std::string name;
   std::string sql;
+  // "V1" or "V2" (rule R8): the StorageIntegrityArgs.contract_version the
+  // runners send for this case.
+  std::string contract_version;
   std::string want_code;
   std::string want_stmt;
   std::string want_sql;
@@ -88,7 +91,7 @@ struct Case {
 
 inline const std::set<std::string> &CaseKeys() {
   static const std::set<std::string> keys = {
-    "name", "sql", "dynamic", "want_code", "want_stmt", "want_sql",
+    "name", "sql", "contract_version", "dynamic", "want_code", "want_stmt", "want_sql",
     "want_sql_go", "want_sql_cpp", "want_sql_contains", "want_sql_not_contains",
     "want_message_contains", "want_table_rewrites", "want_accessed", "reject",
     "allow_sql_divergence", "want_no_contract_ack",
@@ -108,7 +111,7 @@ inline const std::set<std::string> &DynamicKeys() {
 
 inline const std::set<std::string> &StorageIntegrityKeys() {
   static const std::set<std::string> keys = {
-    "tables", "read_mode", "reserved_row_id_column",
+    "tables", "read_mode", "reserved_row_id_column", "reserved_databases",
   };
   return keys;
 }
@@ -251,6 +254,7 @@ inline void ValidateDynamicSchema(const Poco::JSON::Object::Ptr &dynamic,
   RejectUnknownKeys(storage_integrity, StorageIntegrityKeys(), si_path, violations);
   JsonString(storage_integrity, "read_mode", si_path);
   JsonString(storage_integrity, "reserved_row_id_column", si_path);
+  JsonStrings(storage_integrity, "reserved_databases", si_path);
   const auto tables = JsonObject(storage_integrity, "tables", si_path);
   if (!tables) return;
   for (const auto &entry : *tables) {
@@ -297,6 +301,7 @@ inline std::vector<Case> LoadCases(const std::string &path,
       ? "case[" + std::to_string(i) + "]"
       : c.name;
     c.sql = JsonString(object, "sql", case_path);
+    c.contract_version = JsonString(object, "contract_version", case_path);
     RejectUnknownKeys(object, CaseKeys(), case_path, violations);
     c.want_code = JsonString(object, "want_code", case_path);
     c.want_stmt = JsonString(object, "want_stmt", case_path);
@@ -374,6 +379,10 @@ inline std::vector<std::string> ValidateCorpus(const std::vector<Case> &cases) {
     }
     if (!seen.insert(c.name).second) add("R1", "duplicate case name");
     if (IsBlank(c.sql)) add("R2", "sql must be non-empty");
+    if (c.contract_version != "V1" && c.contract_version != "V2") {
+      add("R8", "contract_version must be \"V1\" or \"V2\", got \""
+                + c.contract_version + "\"");
+    }
 
     if (c.want_code.empty()) {
       add("R6", "want_code must be non-empty");

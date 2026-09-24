@@ -87,8 +87,7 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
   const auto selection = findActiveTableRewrite(request->options());
   const auto *dynamic = findDynamicArgs(request->options());
   if (selection.mode == TableRewriteMode::Dynamic
-      && selection.dynamic_args->has_storage_integrity()
-      && !selection.dynamic_args->storage_integrity().tables().empty()) {
+      && storageIntegritySurfaceActive(*selection.dynamic_args)) {
     const auto &args = *selection.dynamic_args;
     for (const auto &elem : grant->access_rights_elements) {
       const std::string original_database = elem.default_database

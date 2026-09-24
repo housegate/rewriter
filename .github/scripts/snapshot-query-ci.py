@@ -36,7 +36,7 @@ def inputs(manifest, output):
     assert p["version"] == 1
     assert all(re.fullmatch("[0-9a-f]{40}", s) for s in p["sources"].values())
     root = Path(p["prerequisite_root"])
-    assert root == Path("/home/sentio/ci/snapshot-query-prerequisites/issue-153-v1")
+    assert root == Path("/home/sentio/ci/snapshot-query-prerequisites/issue-153-v2")
     assert root.resolve() == root and root.is_dir()
     assert p["corpus"] == {"sha256": "3d7c1f1077b1ac6c1bd73d7703b135e95c92bde10d1ce4393c8cb091cca1c933", "analyze": 636, "prepare": 130}
     files = {}
@@ -101,17 +101,17 @@ def generate(config, work, rg, rc):
 def counts(work):
     w = Path(work)
     suite = ET.parse(w/"cpp-run/gtest.xml").getroot()
-    assert int(suite.attrib["tests"]) == 1221
+    assert int(suite.attrib["tests"]) == 1252
     assert all(int(suite.attrib.get(k, "0")) == 0 for k in ("failures", "disabled", "errors"))
     cases = suite.findall(".//testcase")
-    assert len(cases) == 1221 and not suite.findall(".//skipped")
+    assert len(cases) == 1252 and not suite.findall(".//skipped")
     assert sum(c.attrib["classname"] == "SnapshotQuery" for c in cases) == 636
     text = (w/"cpp-run/ctest.log").read_text()
     assert "100% tests passed, 0 tests failed out of 3" in text
     assert not re.search(r"(?:Skipped|Not Run|DISABLED)", text)
     startup = (w/"cpp-run/ctest/Testing/Temporary/LastTest.log").read_text()
     assert "SKIP:" not in startup
-    print(json.dumps({"cpp_tests":1221,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
+    print(json.dumps({"cpp_tests":1252,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
 
 
 if __name__ == "__main__":

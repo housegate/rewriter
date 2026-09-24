@@ -36,8 +36,7 @@ std::string showDatabase(const DB::ASTShowTablesQuery &show_query) {
 }
 
 bool storageIntegrityActive(const rewriter::RewriteTableDynamicArgs *dynamic) {
-  return dynamic && dynamic->has_storage_integrity()
-    && !dynamic->storage_integrity().tables().empty();
+  return dynamic && storageIntegritySurfaceActive(*dynamic);
 }
 
 // The SHOW COLUMNS / INDEXES family's target, read straight off the AST.

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "prerequisite_root": "/home/sentio/ci/snapshot-query-prerequisites/issue-153-v1",
+  "prerequisite_root": "/home/sentio/ci/snapshot-query-prerequisites/issue-153-v2",
   "sources": {
-    "rg": "4e4a14a70841535b3213a38a0c8f6a05de72c7bb",
+    "rg": "ac49dee21b2d7efd4ad206118b4b15050db68894",
     "hg": "022ee95c919b9b1e4bac177f675cda8f1036d6c7",
-    "rp": "d3844a56d7b436ceaba46f949f7e6721ffdeef23",
-    "polyglot": "b30c3d28bcdd645f70136cccc3f699cdd5a1e4ed",
+    "rp": "192e43a96bf5bddafcc40606528888c55d3d7f0b",
+    "polyglot": "d5fd24eec5efaa4444eed6e5f009044214ccdc84",
     "clickhouse": "46297556f3ac83e1a3ee4a05cc31f4287f5e17ac",
     "cctz": "6440590af6962a2ed22ef574c2289a54ccf165fb"
   },
@@ -17,12 +17,12 @@
   "files": {
     "ffi": {
       "name": "libpolyglot_sql_ffi.so",
-      "bytes": 47895744,
-      "sha256": "bc4d179523e7fdac6235d738cad7c27521a5be928642c62b2c972b754f5674b8",
+      "bytes": 48481352,
+      "sha256": "75b4e572ff8fd012caf42cd4391df08073154f592ea2cb505b68542b5152c334",
       "source": "polyglot",
       "build": "cargo build --locked -p polyglot-sql-ffi --profile ffi_release",
       "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14); cargo 1.97.1; x86_64-unknown-linux-gnu",
-      "cargo_lock_sha256": "0316c0d83525376fbfb7e59383ce3d7c9c1eedeb9c48965940c48aad10ae5708"
+      "cargo_lock_sha256": "1bbae26c48a0897f774a4edf5e3609d4467113c90c0312cda0314986e40f3f2b"
     },
     "profile_tool": {
       "name": "snapshot-query-profile",
@@ -74,7 +74,7 @@
       "engine.test",
       "harness.test"
     ],
-    "cpp_tests": 1221,
+    "cpp_tests": 1252,
     "execution_fixtures": 102,
     "execution_states": 228,
     "analyzer_refusals": 78,

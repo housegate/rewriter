@@ -983,8 +983,7 @@ bool rejectEmbeddedStorageIntegrityRead(
   rewriter::RewriteSQLResponse *response,
   rewriter::RewriteCode code) {
   if (!body || selection.mode != TableRewriteMode::Dynamic
-      || !selection.dynamic_args->has_storage_integrity()
-      || selection.dynamic_args->storage_integrity().tables().empty()) {
+      || !storageIntegritySurfaceActive(*selection.dynamic_args)) {
     return false;
   }
   const auto &args = *selection.dynamic_args;

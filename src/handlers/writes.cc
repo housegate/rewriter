@@ -215,16 +215,87 @@ bool alterHasCrossTableRef(const DB::ASTAlterQuery &alter_query) {
 
 bool hasActiveStorageIntegrity(const TableRewriteSelection &sel) {
   return sel.mode == TableRewriteMode::Dynamic
-    && sel.dynamic_args->has_storage_integrity()
-    && !sel.dynamic_args->storage_integrity().tables().empty();
+    && storageIntegritySurfaceActive(*sel.dynamic_args);
 }
 
+// A query parameter (`{p:Identifier}`) binds a name only at execution time.
+// ClickHouse parses it into an identifier whose name() is empty (or ends in
+// an empty part), so a write target's getTable() is "" and the rewrite's
+// setTable("") erases the target: `DROP TABLE db1.{p:Identifier}` would be
+// formatted as `DROP DATABASE phys` (TRUNCATE as `TRUNCATE DATABASE`, CREATE
+// TABLE as `CREATE DATABASE`). Every write target must be a literal name.
+constexpr std::string_view kQueryParameterWriteTargetMessage =
+  "query parameters are not supported as write targets";
+
+bool isParameterOrEmptyName(const DB::ASTPtr &node) {
+  if (!node) return false;
+  const auto *identifier = dynamic_cast<const DB::ASTIdentifier *>(node.get());
+  return identifier && (identifier->isParam() || identifier->name().empty());
+}
+
+bool hasParameterWriteTarget(const DB::ASTPtr &ast) {
+  const DB::ASTQueryWithTableAndOutput *target = nullptr;
+  if (const auto *drop = ast->as<DB::ASTDropQuery>()) {
+    if (drop->database_and_tables) {
+      for (const auto &child : drop->database_and_tables->children)
+        if (isParameterOrEmptyName(child)) return true;
+    }
+    target = drop;
+  } else if (const auto *alter = ast->as<DB::ASTAlterQuery>()) {
+    target = alter;
+  } else if (const auto *create = ast->as<DB::ASTCreateQuery>()) {
+    target = create;
+  } else if (const auto *update = ast->as<DB::ASTUpdateQuery>()) {
+    target = update;
+  } else if (const auto *del = ast->as<DB::ASTDeleteQuery>()) {
+    target = del;
+  }
+  if (target) {
+    return isParameterOrEmptyName(target->database)
+      || isParameterOrEmptyName(target->table);
+  }
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    return isParameterOrEmptyName(insert->database)
+      || isParameterOrEmptyName(insert->table);
+  }
+  if (const auto *rename = ast->as<DB::ASTRenameQuery>()) {
+    for (const auto &elem : rename->getElements()) {
+      if (isParameterOrEmptyName(elem.from.database)
+          || isParameterOrEmptyName(elem.from.table)
+          || isParameterOrEmptyName(elem.to.database)
+          || isParameterOrEmptyName(elem.to.table)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Contract V2 accepts exactly `DROP TABLE [IF EXISTS] name[, name...] [SYNC]`
+// for logical SI targets (rewriter-go engine.PlainDropTable). ClickHouse
+// parses NO DELAY into the same `sync` flag, so it is accepted too; every
+// other DROP modifier keeps the V1 rejection.
+bool storageIntegrityPlainDrop(const DB::ASTDropQuery &drop,
+                               const TableRewriteSelection &sel) {
+  return sel.mode == TableRewriteMode::Dynamic
+    && storageIntegrityDropContract(*sel.dynamic_args)
+    && drop.kind == DB::ASTDropQuery::Kind::Drop
+    && !drop.is_view && !drop.is_dictionary && !drop.isTemporary()
+    && !drop.if_empty && !drop.has_all && !drop.has_tables && drop.like.empty()
+    && drop.cluster.empty() && !drop.permanently
+    && !drop.out_file && !drop.format_ast && !drop.settings_ast
+    && (drop.table || drop.database_and_tables);
+}
+
+// allow_authorized_logical admits an authorized logical SI target: the
+// signed-ingress INSERT target, or a V2 plain DROP TABLE target, which drops
+// only the ordinary physical table.
 bool rejectStorageIntegrityWriteTarget(
   rewriter::RewriteSQLResponse *response,
   const TableRewriteSelection &sel,
   const std::string &database,
   const std::string &table,
-  bool allow_authorized_insert) {
+  bool allow_authorized_logical) {
   if (!hasActiveStorageIntegrity(sel) || table.empty()) return false;
   const auto &args = *sel.dynamic_args;
   if (auto hit = lookupStorageIntegrity(database, table, args)) {
@@ -234,7 +305,7 @@ bool rejectStorageIntegrityWriteTarget(
       rejectInvalidRequest(response, storageIntegrityUnauthorizedMessage(logical));
       return true;
     }
-    if (allow_authorized_insert) {
+    if (allow_authorized_logical) {
       response->mutable_original_accessed_tables()->RemoveLast();
       return false;
     }
@@ -325,11 +396,12 @@ bool preflightStorageIntegrityWrite(
   }
 
   if (auto *drop = ast->as<DB::ASTDropQuery>()) {
+    const bool plain_si_drop = storageIntegrityPlainDrop(*drop, sel);
     if (drop->database_and_tables) {
       for (const auto &single : drop->getRewrittenASTsOfSingleTable(ast)) {
         const auto *one = single->as<DB::ASTDropQuery>();
         if (one && rejectStorageIntegrityWriteTarget(
-              response, sel, one->getDatabase(), one->getTable(), false)) {
+              response, sel, one->getDatabase(), one->getTable(), plain_si_drop)) {
           return true;
         }
       }
@@ -340,7 +412,7 @@ bool preflightStorageIntegrityWrite(
         response, sel, drop->getDatabase());
     }
     return rejectStorageIntegrityWriteTarget(
-      response, sel, drop->getDatabase(), drop->getTable(), false);
+      response, sel, drop->getDatabase(), drop->getTable(), plain_si_drop);
   }
 
   if (auto *alter = ast->as<DB::ASTAlterQuery>()) {
@@ -651,6 +723,13 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   // db-level dynamic_args validation.
   const auto *dynamic = findDynamicArgs(request->options());
 
+  // Before storage-integrity preflight, which skips an empty table name, and
+  // before any rewrite (see kQueryParameterWriteTargetMessage).
+  if (hasParameterWriteTarget(ast)) {
+    rejectInvalidRequest(response, std::string(kQueryParameterWriteTargetMessage));
+    return WriteDispatchResult::Rejected;
+  }
+
   if (preflightStorageIntegrityWrite(ast, sel, response))
     return WriteDispatchResult::Rejected;
 
@@ -792,8 +871,40 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     // DROP VIEW (kind == Drop, is_view == true) falls through to the
     // single-target rewriteOneTarget path below, same as DROP TABLE.
     if (drop_query->database_and_tables) {
-      rejectUnsupported(response, "multi-table DROP/TRUNCATE is not supported");
-      return WriteDispatchResult::Rejected;
+      // Contract V2 accepts a plain multi-table DROP TABLE whose targets may
+      // mix storage-integrity and ordinary tables; everything else stays
+      // rejected. Each target takes the ordinary single-target policy.
+      if (!storageIntegrityPlainDrop(*drop_query, sel)) {
+        rejectUnsupported(response, "multi-table DROP/TRUNCATE is not supported");
+        return WriteDispatchResult::Rejected;
+      }
+      auto &list = drop_query->database_and_tables->as<DB::ASTExpressionList &>();
+      for (auto &child : list.children) {
+        auto *identifier = child->as<DB::ASTTableIdentifier>();
+        // hasParameterWriteTarget already rejected query-parameter names.
+        // Re-check defensively: resetTable swaps only name_parts and keeps
+        // the parameter child, which the formatter prints in place of an
+        // empty part, so `db.{p:Identifier}` would survive the rewrite as
+        // `phys.{p:Identifier}` and bind any physical table at execution.
+        if (!identifier || identifier->isParam()) {
+          rejectUnsupported(response, "multi-table DROP/TRUNCATE is not supported");
+          return WriteDispatchResult::Rejected;
+        }
+        const auto table_id = identifier->getTableId();
+        const std::string origin_db = table_id.database_name;
+        const std::string origin_table = table_id.table_name;
+        std::string new_db = origin_db;
+        std::string new_table = origin_table;
+        if (!rewriteOneTarget(response, sel, origin_db, origin_table, stmt_kind_str,
+            [&](const std::string &s){ new_db = s; },
+            [&](const std::string &s){ new_table = s; })) {
+          return WriteDispatchResult::Rejected;
+        }
+        if (new_db != origin_db || new_table != origin_table)
+          identifier->resetTable(new_db, new_table);
+      }
+      acceptWrite(ast, response, rewriter::STATEMENT_TYPE_DROP_TABLE);
+      return WriteDispatchResult::Handled;
     }
     if (!drop_query->table) {
       // TRUNCATE without a table is "TRUNCATE DATABASE" / "TRUNCATE ALL

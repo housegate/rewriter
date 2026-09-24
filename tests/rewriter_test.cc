@@ -4575,6 +4575,7 @@ TEST(StorageIntegrityContract, RejectsMissingAndUnknownBeforeAcknowledgement) {
     EXPECT_EQ(resp.storage_integrity_contract_version(),
               rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
     EXPECT_EQ(resp.sql_after_rewrite(), "SELECT 1");
+    EXPECT_EQ(resp.message(), rewriter_handlers::kStorageIntegrityContractMessage);
   }
 }
 
@@ -4652,6 +4653,313 @@ TEST(StorageIntegrityCatchAll, UnmodelledStatementPassesThroughWithoutStorageInt
   grpc::ServerContext ctx;
   ASSERT_TRUE(service.Rewrite(&ctx, &req, &resp).ok());
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+}
+
+// ---- Storage-integrity contract V2 (dynamic table set, housegate sub-project 3)
+namespace {
+
+// Probe-shaped V2 request: db1 and other map to phys; the SI table map carries
+// db1.t or is empty (H6).
+rewriter::RewriteTableDynamicArgs *AddV2Option(
+  rewriter::RewriteSQLRequest &req,
+  rewriter::StorageIntegrityContractVersion version,
+  bool with_table) {
+  auto *si = AddSIContractOption(req, version);
+  if (!with_table) si->mutable_tables()->clear();
+  si->set_reserved_row_id_column("_hg_row_id");
+  auto *dyn = req.mutable_options(req.options_size() - 1)
+                ->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["other"] = "phys";
+  dyn->set_delim("_");
+  return dyn;
+}
+
+}  // namespace
+
+TEST(StorageIntegrityContractV2, EmptyMapActivatesCatchAll) {
+  for (const char *sql : {"SYSTEM RELOAD CONFIG", "SET max_threads = 1"}) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, false);
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.message(), rewriter_handlers::kStorageIntegrityUnmodelledMessage);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+  }
+}
+
+TEST(StorageIntegrityContractV2, V1EmptyMapStaysLegacy) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SYSTEM RELOAD CONFIG");
+  AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V1, false);
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+}
+
+TEST(StorageIntegrityContractV2, AcknowledgesV2OnEveryPath) {
+  struct Case {
+    const char *sql;
+    bool with_table;
+    rewriter::RewriteCode code;
+  };
+  const std::vector<Case> cases = {
+    {"SELECT a FROM db1.t", true, rewriter::RewriteCode::Success},
+    {"SELECT a FROM db1.t", false, rewriter::RewriteCode::Success},
+    {"TRUNCATE TABLE db1.t", true, rewriter::RewriteCode::UnsupportedStatement},
+    {"SELECT (", false, rewriter::RewriteCode::SyntaxError},
+  };
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, c.with_table);
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), c.code) << resp.message();
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+  }
+}
+
+TEST(StorageIntegrityContractV2, DropTableSucceeds) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("DROP TABLE db1.t, other.u");
+  AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, true);
+  const auto resp = RunDirectRewrite(std::move(req));
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+  EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_DROP_TABLE);
+  EXPECT_EQ(resp.sql_after_rewrite(), "DROP TABLE phys.`db1.t`, phys.`other.u`");
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+  const auto *si = FindAccessed(resp, "db1", "t");
+  ASSERT_NE(si, nullptr);
+  EXPECT_TRUE(si->is_storage_integrity());
+  EXPECT_EQ(si->physical_database(), "phys");
+  const auto *ordinary = FindAccessed(resp, "other", "u");
+  ASSERT_NE(ordinary, nullptr);
+  EXPECT_FALSE(ordinary->is_storage_integrity());
+  const auto si_rewrite = resp.table_rewrites().find("db1.t");
+  ASSERT_NE(si_rewrite, resp.table_rewrites().end());
+  EXPECT_EQ(si_rewrite->second, "phys.db1.t");
+  const auto ordinary_rewrite = resp.table_rewrites().find("other.u");
+  ASSERT_NE(ordinary_rewrite, resp.table_rewrites().end());
+  EXPECT_EQ(ordinary_rewrite->second, "phys.other.u");
+}
+
+TEST(StorageIntegrityContractV2, DropExemptionRequiresPlainGrammar) {
+  const std::string signed_lane =
+    "storage-integrity table db1.t accepts writes only through the signed statement lane";
+  struct Case {
+    const char *sql;
+    bool session_db1;
+    std::string message;
+    rewriter::RewriteCode code = rewriter::RewriteCode::UnsupportedStatement;
+  };
+  const std::vector<Case> cases = {
+    {"DROP TABLE db1.t ON CLUSTER c", false, signed_lane},
+    {"DROP TABLE IF EMPTY db1.t", false, signed_lane},
+    {"DROP TEMPORARY TABLE t", true, signed_lane},
+    {"DROP VIEW db1.t", false, signed_lane},
+    {"DROP TABLE other.u, other.v ON CLUSTER c", false,
+      "multi-table DROP/TRUNCATE is not supported"},
+    {"DROP TABLE other.u, {p:Identifier} UUID '00000000-0000-0000-0000-000000000001'",
+      false, "query parameters are not supported as write targets",
+      rewriter::RewriteCode::InvalidRewriteRequest},
+  };
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    auto *dyn = AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, true);
+    if (c.session_db1) dyn->set_upstream_logical_database_in_context("db1");
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), c.code);
+    EXPECT_EQ(resp.message(), c.message);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+    EXPECT_EQ(resp.storage_integrity_contract_version(),
+              rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+  }
+}
+
+// A query-parameter write target parses to an empty table name; rewriting it
+// erased the target, so `DROP TABLE db1.{p:Identifier}` became
+// `DROP DATABASE phys`. It must fail closed in every dynamic mode.
+TEST(WriteTargetQueryParameter, RejectedBeforeRewriteInEveryMode) {
+  enum class Mode { DynamicNoSI, V1, V2 };
+  struct Case {
+    const char *sql;
+    bool session_db1;
+  };
+  const std::vector<Case> cases = {
+    {"DROP TABLE db1.{p:Identifier}", false},
+    {"DROP TABLE {p:Identifier}", true},
+    {"TRUNCATE TABLE db1.{p:Identifier}", false},
+    {"DROP VIEW db1.{p:Identifier}", false},
+    {"DROP TABLE hg_safe.{p:Identifier}", false},
+  };
+  for (const Mode mode : {Mode::DynamicNoSI, Mode::V1, Mode::V2}) {
+    for (const auto &c : cases) {
+      SCOPED_TRACE(std::string(c.sql) + " mode=" + std::to_string(static_cast<int>(mode)));
+      rewriter::RewriteSQLRequest req;
+      req.set_sql(c.sql);
+      auto *dyn = AddV2Option(req,
+        mode == Mode::V1 ? rewriter::STORAGE_INTEGRITY_CONTRACT_V1
+                         : rewriter::STORAGE_INTEGRITY_CONTRACT_V2,
+        true);
+      if (mode == Mode::DynamicNoSI) dyn->clear_storage_integrity();
+      if (c.session_db1) dyn->set_upstream_logical_database_in_context("db1");
+      const auto resp = RunDirectRewrite(std::move(req));
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+      // Under an active SI surface the reject annotator names hg_safe for
+      // the hg_safe row; every other row keeps the parameter message.
+      const bool annotated = mode != Mode::DynamicNoSI
+        && std::string(c.sql).find("hg_safe") != std::string::npos;
+      if (!annotated) {
+        EXPECT_EQ(resp.message(), "query parameters are not supported as write targets");
+      }
+      EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+      EXPECT_EQ(resp.sql_after_rewrite().find("DATABASE"), std::string::npos);
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
+      EXPECT_EQ(resp.storage_integrity_contract_version(),
+        mode == Mode::DynamicNoSI ? rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
+        : mode == Mode::V1        ? rewriter::STORAGE_INTEGRITY_CONTRACT_V1
+                                  : rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+    }
+  }
+}
+
+TEST(StorageIntegrityContractV2, StaticSelectionShadowsDropExemption) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("DROP TABLE db1.t, other.u");
+  AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, true);
+  AddEmptyStaticOption(req);
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+  EXPECT_EQ(resp.message(), "multi-table DROP/TRUNCATE is not supported");
+  EXPECT_EQ(resp.storage_integrity_contract_version(),
+            rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
+}
+
+TEST(StorageIntegrityContractV2, DropRequiresAuthorizedLogicalDatabase) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("DROP TABLE db1.t");
+  auto *dyn = AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, true);
+  dyn->mutable_database_map()->erase("db1");
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_EQ(resp.message(),
+            "storage-integrity logical database db1 is not authorized by database_map");
+}
+
+// ---- Storage-integrity contract V2: reserved_databases -----------------------
+namespace {
+
+// V1 learns its protected namespace from the table map: name every reserved
+// database through a map entry.
+rewriter::RewriteTableDynamicArgs *AddReservedV1Equivalent(rewriter::RewriteSQLRequest &req) {
+  auto *dyn = AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V1, true);
+  auto &promote = (*dyn->mutable_storage_integrity()->mutable_tables())["db1.p"];
+  promote.set_safe_table("hg_promote.db1__p");
+  promote.set_unsafe_table("hg_unsafe.db1__p");
+  return dyn;
+}
+
+rewriter::RewriteTableDynamicArgs *AddReservedV2(rewriter::RewriteSQLRequest &req, bool with_table) {
+  auto *dyn = AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, with_table);
+  for (const char *database : {"hg_safe", "hg_unsafe", "hg_promote"})
+    dyn->mutable_storage_integrity()->add_reserved_databases(database);
+  return dyn;
+}
+
+const std::vector<std::string> kReservedNamespaceSQL = {
+  "SELECT * FROM hg_safe.x",
+  "SELECT * FROM hg_safe.db1__t",
+  "INSERT INTO hg_unsafe.x VALUES (1)",
+  "INSERT INTO hg_unsafe.x SELECT 1",
+  "TRUNCATE TABLE hg_promote.x",
+  "DROP TABLE hg_safe.x",
+  "TRUNCATE DATABASE hg_safe",
+  "SELECT * FROM merge($tag$hg_safe$tag$, 'x')",
+  "USE hg_unsafe",
+  "SHOW TABLES FROM hg_promote",
+  "SYSTEM START MERGES hg_unsafe.x",
+};
+
+}  // namespace
+
+TEST(StorageIntegrityReservedDatabases, V2EmptyMapMatchesV1Protection) {
+  for (const auto &sql : kReservedNamespaceSQL) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest v1;
+    v1.set_sql(sql);
+    AddReservedV1Equivalent(v1);
+    auto want = RunDirectRewrite(std::move(v1));
+    rewriter::RewriteSQLRequest v2;
+    v2.set_sql(sql);
+    AddReservedV2(v2, false);
+    const auto got = RunDirectRewrite(std::move(v2));
+    EXPECT_NE(got.code(), rewriter::RewriteCode::Success) << got.sql_after_rewrite();
+    EXPECT_EQ(got.storage_integrity_contract_version(), rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+    want.set_storage_integrity_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+    EXPECT_EQ(got.DebugString(), want.DebugString());
+  }
+}
+
+TEST(StorageIntegrityReservedDatabases, UnionWithTableMap) {
+  const std::vector<std::pair<std::string, std::string>> cases = {
+    {"SELECT * FROM safe_x.y", "storage-integrity physical table safe_x.y is not directly addressable"},
+    {"SELECT * FROM hg_safe.y", "storage-integrity physical table hg_safe.y is not directly addressable"},
+  };
+  for (const auto &[sql, message] : cases) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    auto *dyn = AddReservedV2(req, false);
+    auto &table = (*dyn->mutable_storage_integrity()->mutable_tables())["db1.t"];
+    table.set_safe_table("safe_x.db1__t");
+    table.set_unsafe_table("unsafe_x.db1__t");
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::RewriteError);
+    EXPECT_EQ(resp.message(), message);
+  }
+}
+
+TEST(StorageIntegrityReservedDatabases, V1IgnoresReservedDatabases) {
+  for (const bool with_table : {false, true}) {
+    for (const auto &sql : kReservedNamespaceSQL) {
+      SCOPED_TRACE(sql);
+      rewriter::RewriteSQLRequest plain;
+      plain.set_sql(sql);
+      AddV2Option(plain, rewriter::STORAGE_INTEGRITY_CONTRACT_V1, with_table);
+      rewriter::RewriteSQLRequest reserved;
+      reserved.set_sql(sql);
+      auto *dyn = AddV2Option(reserved, rewriter::STORAGE_INTEGRITY_CONTRACT_V1, with_table);
+      for (const char *database : {"not a name", "hg_safe", "hg_unsafe", "hg_promote"})
+        dyn->mutable_storage_integrity()->add_reserved_databases(database);
+      EXPECT_EQ(RunDirectRewrite(std::move(reserved)).DebugString(),
+                RunDirectRewrite(std::move(plain)).DebugString());
+    }
+  }
+}
+
+TEST(StorageIntegrityReservedDatabases, RejectsMalformedEntryUnderV2) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql("SELECT 1");
+  auto *dyn = AddV2Option(req, rewriter::STORAGE_INTEGRITY_CONTRACT_V2, false);
+  dyn->mutable_storage_integrity()->add_reserved_databases("hg_safe");
+  dyn->mutable_storage_integrity()->add_reserved_databases("hg-unsafe");
+  const auto resp = RunDirectRewrite(std::move(req));
+  EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_EQ(resp.message(),
+            "storage-integrity reserved_databases entry \"hg-unsafe\" must be a simple identifier");
   EXPECT_EQ(resp.storage_integrity_contract_version(),
             rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
 }
@@ -5786,9 +6094,11 @@ const std::map<std::string, rewriter::StatementType> kSIStmtByName = {
   {"INSERT", rewriter::STATEMENT_TYPE_INSERT}, {"EXISTS_TABLE", rewriter::STATEMENT_TYPE_EXISTS_TABLE},
   {"SHOW_TABLES", rewriter::STATEMENT_TYPE_SHOW_TABLES}, {"DESCRIBE", rewriter::STATEMENT_TYPE_DESCRIBE},
   {"CREATE_TABLE", rewriter::STATEMENT_TYPE_CREATE_TABLE},
+  {"DROP_TABLE", rewriter::STATEMENT_TYPE_DROP_TABLE},
 };
 
-void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poco::JSON::Object::Ptr &d) {
+void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poco::JSON::Object::Ptr &d,
+                               const std::string &contract_version) {
   if (d->has("database_map")) {
     auto m = d->getObject("database_map");
     for (const auto &k : *m) (*dyn->mutable_database_map())[k.first] = k.second.toString();
@@ -5818,13 +6128,17 @@ void applyStorageIntegrityArgs(rewriter::RewriteTableDynamicArgs *dyn, const Poc
   if (!d->has("storage_integrity")) return;
   auto si = d->getObject("storage_integrity");
   auto *args = dyn->mutable_storage_integrity();
-  args->set_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  args->set_contract_version(contract_version == "V2"
+                               ? rewriter::STORAGE_INTEGRITY_CONTRACT_V2
+                               : rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
   const std::string mode = si->has("read_mode") ? si->getValue<std::string>("read_mode") : "";
   args->set_read_mode(mode == "UNSAFE_LATEST" ? rewriter::StorageIntegrityArgs::READ_MODE_UNSAFE_LATEST
                     : mode == "SAFE" ? rewriter::StorageIntegrityArgs::READ_MODE_SAFE
                     : mode == "INVALID_99" ? static_cast<rewriter::StorageIntegrityArgs::ReadMode>(99)
                     : rewriter::StorageIntegrityArgs::READ_MODE_UNSPECIFIED);
   if (si->has("reserved_row_id_column")) args->set_reserved_row_id_column(si->getValue<std::string>("reserved_row_id_column"));
+  for (const auto &database : si_corpus::JsonStrings(si, "reserved_databases"))
+    args->add_reserved_databases(database);
   auto tables = si->getObject("tables");
   for (const auto &kv : *tables) {
     auto t = tables->getObject(kv.first);
@@ -5852,18 +6166,23 @@ TEST_P(StorageIntegrityGolden, MatchesSharedCorpus) {
   if (c.has_dynamic) {
     auto *opt = req.add_options();
     opt->set_op(rewriter::RewriteOp::TableNameRewrite);
-    applyStorageIntegrityArgs(opt->mutable_table_name_args()->mutable_dynamic_args(), c.dynamic);
+    applyStorageIntegrityArgs(opt->mutable_table_name_args()->mutable_dynamic_args(), c.dynamic,
+                              c.contract_version);
   }
   rewriter::RewriteSQLResponse resp;
   grpc::ServerContext ctx;
   ASSERT_TRUE(service.Rewrite(&ctx, &req, &resp).ok());
   SCOPED_TRACE("sql_after_rewrite: " + resp.sql_after_rewrite() + " | message: " + resp.message());
 
-  if (c.has_dynamic && c.dynamic->has("storage_integrity") &&
-      c.dynamic->getObject("storage_integrity")->getObject("tables")->size() != 0) {
+  // The surface is active for any V2 case and for a V1 case with a non-empty
+  // table map; an active case expects its own version acknowledged.
+  const bool si_block = c.has_dynamic && c.dynamic->has("storage_integrity");
+  const bool si_active = si_block && (c.contract_version == "V2"
+    || c.dynamic->getObject("storage_integrity")->getObject("tables")->size() != 0);
+  if (si_active && !c.want_no_contract_ack) {
     EXPECT_EQ(resp.storage_integrity_contract_version(),
-              c.want_no_contract_ack ? rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED
-                                     : rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+              c.contract_version == "V2" ? rewriter::STORAGE_INTEGRITY_CONTRACT_V2
+                                         : rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
   } else {
     EXPECT_EQ(resp.storage_integrity_contract_version(), rewriter::STORAGE_INTEGRITY_CONTRACT_UNSPECIFIED);
   }
