@@ -29,6 +29,8 @@
 #include "handlers/show_databases.h"
 #include "handlers/show_tables.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/system_tables.h"
+#include "handlers/table_reference.h"
 #include "handlers/describe.h"
 #include "handlers/use.h"
 #include "handlers/writes.h"
@@ -360,6 +362,18 @@ void RewriterServiceImpl::doRewrite(
     }
     response->set_storage_integrity_contract_version(si.contract_version());
   }
+  // Spec 2026-09-26 §6: every protected_databases entry is a simple
+  // identifier, validated for every dynamic request whatever the SI state.
+  if (si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic) {
+    std::string protected_error;
+    if (!rewriter_handlers::validateProtectedDatabases(
+          *si_selection.dynamic_args, &protected_error)) {
+      response->set_sql_after_rewrite(original_query);
+      response->set_message(protected_error);
+      response->set_code(rewriter::RewriteCode::InvalidRewriteRequest);
+      return;
+    }
+  }
 
   // Every structured rejection must echo the original SQL. Successful
   // handlers replace this value with their formatted rewrite, while the
@@ -384,20 +398,22 @@ void RewriterServiceImpl::doRewrite(
     }
   } _si_restore{response, &si_compatibility};
   DB::ASTPtr parsed_ast;
+  // The annotator reads the statement as the client wrote it (rewriter-go
+  // annotates its original parse): handlers rewrite names in place, and a
+  // target a handler already mapped to hg_safe is not one the client named.
+  DB::ASTPtr annotate_ast;
   // Spec I D2: one place upgrades every reject's message to name the SI object
   // it touched, on every exit path, so no handler has to grow its own SI
   // branch. Mirrors rewriter-go's finalize() hook.
   struct StorageIntegrityRejectAnnotator {
     RewriteSQLResponse *response;
     const DB::ASTPtr *ast;
-    const std::string *sql;
     const rewriter::RewriteTableDynamicArgs *args;  // null when SI is inactive
     ~StorageIntegrityRejectAnnotator() {
       if (!args) return;
-      rewriter_handlers::annotateStorageIntegrityReject(response, *ast, *sql, *args);
+      rewriter_handlers::annotateStorageIntegrityReject(response, *ast, *args);
     }
-  } _si_annotate{response, &parsed_ast, &original_query,
-                 si_active ? si_selection.dynamic_args : nullptr};
+  } _si_annotate{response, &annotate_ast, si_active ? si_selection.dynamic_args : nullptr};
 
   // Preprocess the query to split large IN clauses. The preprocessor logs a
   // single [preprocess] line only when it actually transformed the SQL; the
@@ -423,6 +439,10 @@ void RewriterServiceImpl::doRewrite(
     // buffers die on return — leaving INSERT inline payload pointers
     // dangling. See doRewriteErrorMessage below for the same pattern.
     parsed_ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    // The annotator's copy is taken before registration (clonePolicyAst):
+    // a registered tree's clone would share adopted subtrees with it.
+    if (si_active) annotate_ast = rewriter_handlers::clonePolicyAst(parsed_ast);
+    rewriter_handlers::registerFieldOnlyChildren(*parsed_ast);
     DB::ASTPtr &ast = parsed_ast;
 
     // Surface the existence-check clause (IF NOT EXISTS / IF EXISTS) as a
@@ -437,40 +457,110 @@ void RewriterServiceImpl::doRewrite(
         response->set_existence_clause(rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
     }
 
-    if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
-    if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
-    if (rewriter_handlers::handleShowTablesQuery(ast, request, response)) return;
-    // Database-level SHOW dispatch stays ahead of EXISTS / SHOW CREATE, mirroring
-    // rewriter-go's order. SHOW COLUMNS / INDEXES parse into their own AST
-    // classes, so they need their own entry here (Spec N D2).
-    if (rewriter_handlers::handleShowColumnsQuery(ast, request, response)) return;
-    if (rewriter_handlers::handleExistsQuery(ast, request, response)
-        == rewriter_handlers::ExistsDispatchResult::Handled) {
-      return;
-    }
-    if (rewriter_handlers::handleShowCreateQuery(ast, request, response)
-        == rewriter_handlers::ShowCreateDispatchResult::Handled) {
-      return;
-    }
-    if (rewriter_handlers::handleDescribeQuery(ast, request, response)) return;
-    switch (rewriter_handlers::handleGrantQuery(ast, request, response)) {
-      case rewriter_handlers::GrantDispatchResult::Handled:
-      case rewriter_handlers::GrantDispatchResult::Rejected:
+    // Spec 2026-09-26 §5: the table-reference policy runs before any handler
+    // can rewrite a name it refuses.
+    std::optional<std::string> deferred_system_table;
+    if (rewriter_handlers::preflightTableReferences(ast, request, response, &deferred_system_table)) return;
+
+    // A read where no handler rewrites it would reach ClickHouse unrewritten
+    // (a cross-tenant or protected read). R2 refuses these in the preflight or
+    // the SI write path; this re-check is defence in depth, and the only guard
+    // of an IN operand inside a CREATE's `AS <table function>` source
+    // (table_reference.h; a SHOW filter is R7's). Decided on the parse tree
+    // before a handler mutates it; applied only to a statement the handlers
+    // accepted, so their own (storage-integrity) rejections keep their
+    // messages.
+    const bool refuse_unrewritten_in_operand =
+      si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+      && rewriter_handlers::inOperandInUnrewrittenPosition(ast);
+
+    // R5 with the SI surface active: the SI handlers answer first; a statement
+    // they accept (SHOW, DESCRIBE, EXISTS, DROP, … carry no hook of their own)
+    // is refused here, ahead of the R2 refusal below. Decided on the parse
+    // tree before a handler mutates it.
+    rewriter::RewriteSQLResponse settings_refusal;
+    const bool refuse_settings = si_active
+      && rewriter_handlers::rejectQuerySettings(ast, &settings_refusal, &original_query);
+
+    // A column declaration's own SETTINGS clause: refused on a would-be
+    // Success, in both SI states (rewriter-go refuses it last).
+    const bool refuse_column_settings = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+      && rewriter_handlers::columnDeclarationHasSettings(ast);
+
+    // A literal the embedded parser folds into SQL that ClickHouse 25.8 / 26.2
+    // read differently (`((1, 2))`, `1e-310`): refused on a would-be Success,
+    // in both SI states, from the text the AST was parsed from.
+    const bool refuse_literal_fold = rewriter_handlers::foldsMeaningChangingLiteral(ast, query);
+
+    [&]() {
+      if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
+      if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
+      if (rewriter_handlers::handleShowTablesQuery(ast, request, response)) return;
+      // Database-level SHOW dispatch stays ahead of EXISTS / SHOW CREATE, mirroring
+      // rewriter-go's order. SHOW COLUMNS / INDEXES parse into their own AST
+      // classes, so they need their own entry here (Spec N D2).
+      if (rewriter_handlers::handleShowColumnsQuery(ast, request, response)) return;
+      // The SHOW forms that name no table (PROCESSLIST, USERS, GRANTS, …):
+      // the system-table allowlist's SHOW mapping (spec 2026-09-26 §5).
+      if (rewriter_handlers::handleShowSystemFormQuery(ast, request, response)) return;
+      if (rewriter_handlers::handleExistsQuery(ast, request, response)
+          == rewriter_handlers::ExistsDispatchResult::Handled) {
         return;
-      case rewriter_handlers::GrantDispatchResult::NotAGrant:
-        break;  // fall through to write/SELECT dispatch.
-    }
-    switch (rewriter_handlers::handleWriteQuery(ast, request, response)) {
-      case rewriter_handlers::WriteDispatchResult::Handled:
-      case rewriter_handlers::WriteDispatchResult::Rejected:
+      }
+      if (rewriter_handlers::handleShowCreateQuery(ast, request, response)
+          == rewriter_handlers::ShowCreateDispatchResult::Handled) {
         return;
-      case rewriter_handlers::WriteDispatchResult::NotAWrite:
-        break;  // fall through to SELECT
-    }
-    if (si_active && rewriter_handlers::rejectUnmodelledStorageIntegrityStatement(
-          ast, *si_selection.dynamic_args, response))
-      return;
-    rewriter_handlers::handleSelectQuery(ast, request, response);
+      }
+      if (rewriter_handlers::handleDescribeQuery(ast, request, response)) return;
+      switch (rewriter_handlers::handleGrantQuery(ast, request, response)) {
+        case rewriter_handlers::GrantDispatchResult::Handled:
+        case rewriter_handlers::GrantDispatchResult::Rejected:
+          return;
+        case rewriter_handlers::GrantDispatchResult::NotAGrant:
+          break;  // fall through to write/SELECT dispatch.
+      }
+      switch (rewriter_handlers::handleWriteQuery(ast, request, response)) {
+        case rewriter_handlers::WriteDispatchResult::Handled:
+        case rewriter_handlers::WriteDispatchResult::Rejected:
+          return;
+        case rewriter_handlers::WriteDispatchResult::NotAWrite:
+          break;  // fall through to SELECT
+      }
+      if (si_active && rewriter_handlers::rejectUnmodelledStorageIntegrityStatement(
+            ast, *si_selection.dynamic_args, response))
+        return;
+      rewriter_handlers::handleSelectQuery(ast, request, response);
+    }();
+
+    const auto refuseAcceptedStatement = [&](rewriter::RewriteCode code, const std::string &message) {
+      response->clear_statement_type();
+      response->clear_table_rewrites();
+      response->clear_database_rewrites();
+      response->clear_original_accessed_tables();
+      response->clear_privileges_deltas();
+      response->clear_failed_cte_aliases();
+      response->set_sql_after_rewrite(original_query);
+      response->set_code(code);
+      response->set_message(message);
+    };
+    if (refuse_settings && response->code() == rewriter::RewriteCode::Success)
+      refuseAcceptedStatement(settings_refusal.code(), settings_refusal.message());
+    if (refuse_unrewritten_in_operand && response->code() == rewriter::RewriteCode::Success)
+      refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                              std::string(rewriter_handlers::kUnsupportedStatementMessage));
+    // The system-table refusal the preflight deferred to the SI pipeline
+    // (the statement names an SI object while the surface is active) applies
+    // to that pipeline's would-be Success, after every refusal it issues
+    // (rewriter-go RejectSystemTablesOnSuccess).
+    if (deferred_system_table)
+      rewriter_handlers::rejectDeferredSystemTable(response, *deferred_system_table, original_query, si_selection);
+    // Last, as rewriter-go's mid-statement drop gate.
+    if (refuse_column_settings && response->code() == rewriter::RewriteCode::Success)
+      refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                              std::string(rewriter_handlers::kUnsupportedStatementMessage));
+    if (refuse_literal_fold && response->code() == rewriter::RewriteCode::Success)
+      refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                              std::string(rewriter_handlers::kUnsupportedStatementMessage));
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real
     // syntax errors; keep the actual SQL out of the log — it may contain PII.

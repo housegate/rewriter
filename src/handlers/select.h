@@ -56,13 +56,39 @@ void rewriteEmbeddedViewBody(
   DB::ASTPtr body,
   rewriter::RewriteSQLResponse *response);
 
+// Which statement embeds the body. A view body refuses an SI read; an
+// INSERT … SELECT or CREATE TABLE … AS SELECT body reads an Active table
+// through the derived read and reports every source (spec 2026-09-26 T4).
+enum class EmbeddedBodyKind { View, InsertSelect, CreateSelect };
+void rewriteEmbeddedBody(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options,
+  DB::ASTPtr body,
+  rewriter::RewriteSQLResponse *response,
+  EmbeddedBodyKind kind);
+
 // Fail-closed preflight for SELECT subtrees embedded in a write statement
 // (CREATE TABLE AS SELECT / INSERT ... SELECT). Only SI sources are recorded;
 // ordinary write-target bookkeeping remains owned by writes.cc.
+// allow_logical_reads admits an authorized Active SI table read by any table
+// expression of the body (FROM, JOIN, subquery, CTE, UNION arm, view() body),
+// which the body rewrite turns into the derived read: set only for the body
+// of an INSERT … SELECT / CTAS whose target is ordinary (spec 2026-09-26 T4).
+// Every other caller refuses it. Two readings stay refused even then: a
+// one-part quoted name split at its dot (`db1.t`), which the body does not
+// turn into the derived read, and a table inside a table function other than
+// view() (viewIfPermitted, viewExplain, executable, …) until T5 decides it. An IN operand naming an SI object is
+// refused in every write body, as rewriter-go's write-path namespace policy
+// refuses it.
+// *rejected_table_source reports whether the refusal named a table source
+// (rather than a namespace), for the target-first accessed order.
 bool rejectEmbeddedStorageIntegrityRead(
   DB::ASTPtr body,
   const TableRewriteSelection &selection,
   rewriter::RewriteSQLResponse *response,
-  rewriter::RewriteCode code = rewriter::RewriteCode::UnsupportedStatement);
+  rewriter::RewriteCode code = rewriter::RewriteCode::UnsupportedStatement,
+  bool allow_logical_reads = false,
+  bool *rejected_table_source = nullptr,
+  bool r2_position = false,
+  bool rewritten_body = false);
 
 } // namespace rewriter_handlers

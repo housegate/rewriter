@@ -1,9 +1,14 @@
 // src/handlers/storage_integrity.cc — housegate Spec G policy helpers.
 #include "handlers/storage_integrity.h"
 
+#include <Parsers/ASTBackupQuery.h>
 #include <Parsers/ASTColumnsTransformers.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTDictionary.h>
+#include <Parsers/ASTDropQuery.h>
+#include <Parsers/ASTInsertQuery.h>
+#include <Parsers/ASTQueryWithTableAndOutput.h>
+#include <Parsers/ASTRenameQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTFunctionWithKeyValueArguments.h>
@@ -12,14 +17,20 @@
 #include <Parsers/ASTSelectIntersectExceptQuery.h>
 #include <Parsers/ASTSelectQuery.h>
 #include <Parsers/ASTSelectWithUnionQuery.h>
+#include <Parsers/ASTShowColumnsQuery.h>
+#include <Parsers/ASTShowIndexesQuery.h>
+#include <Parsers/ASTShowTablesQuery.h>
 #include <Parsers/ASTSubquery.h>
 #include <Parsers/ASTSystemQuery.h>
+#include <Parsers/ASTViewTargets.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/ASTWithElement.h>
 #include <Parsers/ParserSelectWithUnionQuery.h>
+#include <Parsers/Lexer.h>
 #include <Parsers/parseQuery.h>
 
 #include <algorithm>
+#include <iostream>
 #include <cctype>
 #include <map>
 #include <set>
@@ -32,6 +43,7 @@
 #include "handlers/common.h"
 #include "handlers/cte_scope.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
 
@@ -242,7 +254,14 @@ std::optional<NamespaceRef> decodeNamespaceFunction(
   return std::nullopt;
 }
 
-std::optional<NamespaceRef> decodeInFunction(const DB::ASTFunction &fn) {
+// `select_rewrites`: the caller is the SELECT handler, which rewrites an IN
+// operand itself (an Active table becomes the derived safe read, any other name
+// a table of the current database), so a one-part operand is decoded as the
+// whole name against the current database and exempt from the exact-key
+// check. Every other caller keeps the conservative decode: a dotted one-part
+// name is split, and an Active table is refused (InOperandReading::
+// SplitAndWhole adds the whole-name reading in collectReadRefs).
+std::optional<NamespaceRef> decodeInFunction(const DB::ASTFunction &fn, bool select_rewrites) {
   std::string lname = lower(fn.name);
   // ClickHouse registers the IgnoreSet implementations as callable aliases of
   // the same IN family. Normalize the implementation suffix so every alias is
@@ -271,8 +290,29 @@ std::optional<NamespaceRef> decodeInFunction(const DB::ASTFunction &fn) {
     return std::nullopt;
   const auto &args = functionArgs(fn);
   if (args.size() != 2 || !args[1]->as<DB::ASTIdentifier>()) return std::nullopt;
-  NamespaceRef ref = decodeSingle(NamespaceRefSource::InTable, display, args[1]);
-  if (ref.table.empty() && !ref.resolved) return std::nullopt;
+  if (const auto &parts = args[1]->as<DB::ASTIdentifier>()->name_parts; parts.size() >= 2) {
+    NamespaceRef ref{NamespaceRefSource::InTable, display};
+    ref.database = parts[0];
+    ref.table = parts[1];
+    for (size_t i = 2; i < parts.size(); ++i) ref.table += "." + parts[i];
+    ref.resolved = true;
+    ref.rewritten_read = select_rewrites;
+    return ref;
+  }
+  if (!select_rewrites) {
+    NamespaceRef ref = decodeSingle(NamespaceRefSource::InTable, display, args[1]);
+    if (ref.table.empty() && !ref.resolved) return std::nullopt;
+    return ref;
+  }
+  // A one-part operand is one table of the current database, whatever dots
+  // its quoted name holds (rewriter-go decodeInOperand): never split it.
+  const auto *operand = args[1]->as<DB::ASTIdentifier>();
+  if (operand->isParam() || operand->name_parts.empty() || operand->name_parts.front().empty())
+    return std::nullopt;
+  NamespaceRef ref{NamespaceRefSource::InTable, display};
+  ref.uses_current_database = true;
+  ref.rewritten_read = true;
+  ref.table = operand->name_parts.front();
   return ref;
 }
 
@@ -299,114 +339,52 @@ std::string upper(std::string value) {
   return value;
 }
 
-int hexDigit(char value) {
-  if (value >= '0' && value <= '9') return value - '0';
-  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-  return -1;
-}
-
-char decodedQuotedEscape(char value) {
-  switch (value) {
-  case 'a': return '\a';
-  case 'b': return '\b';
-  case 'e': return '\x1b';
-  case 'f': return '\f';
-  case 'n': return '\n';
-  case 'r': return '\r';
-  case 't': return '\t';
-  case 'v': return '\v';
-  case '0': return '\0';
-  default: return value;
-  }
-}
-
+// The SI compatibility scan reads table names from the statement text before
+// ClickHouse's parser runs, so it tokenizes with ClickHouse's own Lexer and
+// decodes a quoted name exactly as ClickHouse's ParserIdentifier does
+// (decodeIdentifierToken): `\N` decodes to nothing, `\xHH` to one byte,
+// Unicode “…” quotes delimit a name, and `#`, `--` and nested `/* */`
+// comments and heredocs are what ClickHouse reads them as. A hand-made
+// decoder here once read `db\N1`.t as a table other than db1.t, so the scan
+// took an Active table's wrapper for an ordinary one's. Depth counts round
+// brackets only; a Lexer error ends the scan (ClickHouse's parser refuses the
+// same text).
 std::vector<SQLToken> tokenizeSQL(const std::string &sql) {
   std::vector<SQLToken> out;
   int depth = 0;
-  for (size_t i = 0; i < sql.size();) {
-    const unsigned char c = static_cast<unsigned char>(sql[i]);
-    if (std::isspace(c)) {
-      ++i;
-      continue;
+  DB::Lexer lexer(sql.data(), sql.data() + sql.size());
+  for (;;) {
+    const DB::Token token = lexer.nextToken();
+    if (token.isEnd() || token.isError()) break;
+    if (!token.isSignificant()) continue;
+    const size_t begin = static_cast<size_t>(token.begin - sql.data());
+    const size_t end = static_cast<size_t>(token.end - sql.data());
+    const std::string raw(token.begin, token.end);
+    switch (token.type) {
+    case DB::TokenType::BareWord:
+      out.push_back({SQLToken::Kind::Word, raw, upper(raw), begin, end, depth});
+      break;
+    case DB::TokenType::QuotedIdentifier: {
+      const std::string value = decodeIdentifierToken(token).value_or(raw);
+      out.push_back({SQLToken::Kind::Identifier, value, upper(value), begin, end, depth});
+      break;
     }
-    if (sql[i] == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
-      i += 2;
-      while (i < sql.size() && sql[i] != '\n') ++i;
-      continue;
+    case DB::TokenType::StringLiteral:
+    case DB::TokenType::HereDoc:
+      out.push_back({SQLToken::Kind::String, raw, std::string(), begin, end, depth});
+      break;
+    case DB::TokenType::ClosingRoundBracket:
+      depth = std::max(0, depth - 1);
+      out.push_back({SQLToken::Kind::Symbol, raw, "", begin, end, depth});
+      break;
+    case DB::TokenType::OpeningRoundBracket:
+      out.push_back({SQLToken::Kind::Symbol, raw, "", begin, end, depth});
+      ++depth;
+      break;
+    default:
+      out.push_back({SQLToken::Kind::Symbol, raw, "", begin, end, depth});
+      break;
     }
-    if (sql[i] == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
-      i += 2;
-      while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) ++i;
-      i = std::min(sql.size(), i + 2);
-      continue;
-    }
-    const size_t begin = i;
-    if (sql[i] == '\'' || sql[i] == '`' || sql[i] == '"') {
-      const char quote = sql[i++];
-      std::string value;
-      while (i < sql.size()) {
-        if (sql[i] == quote) {
-          if (i + 1 < sql.size() && sql[i + 1] == quote) {
-            value += quote;
-            i += 2;
-            continue;
-          }
-          ++i;
-          break;
-        }
-        if (sql[i] == '\\' && i + 1 < sql.size()) {
-          // Quoted identifiers are grammar objects, so their token value must
-          // match ClickHouse's semantic AST name. In particular `\xHH` is one
-          // byte, not the three literal characters xHH. String tokens remain
-          // parser-decoded only once and are never identifier targets here.
-          if (quote != '\'' && i + 3 < sql.size() && sql[i + 1] == 'x') {
-            const int hi = hexDigit(sql[i + 2]);
-            const int lo = hexDigit(sql[i + 3]);
-            if (hi >= 0 && lo >= 0) {
-              value += static_cast<char>((hi << 4) | lo);
-              i += 4;
-              continue;
-            }
-          }
-          value += decodedQuotedEscape(sql[i + 1]);
-          i += 2;
-          continue;
-        }
-        value += sql[i++];
-      }
-      const auto kind = quote == '\'' ? SQLToken::Kind::String : SQLToken::Kind::Identifier;
-      out.push_back({kind,
-        value,
-        kind == SQLToken::Kind::Identifier ? upper(value) : std::string(),
-        begin,
-        i,
-        depth});
-      continue;
-    }
-    if (std::isalpha(c) || sql[i] == '_') {
-      ++i;
-      while (i < sql.size()) {
-        const unsigned char d = static_cast<unsigned char>(sql[i]);
-        if (!std::isalnum(d) && sql[i] != '_' && sql[i] != '$') break;
-        ++i;
-      }
-      const std::string value = sql.substr(begin, i - begin);
-      out.push_back({SQLToken::Kind::Word, value, upper(value), begin, i, depth});
-      continue;
-    }
-    if (std::isdigit(c)) {
-      ++i;
-      while (i < sql.size() &&
-             (std::isalnum(static_cast<unsigned char>(sql[i])) || sql[i] == '.' || sql[i] == '_'))
-        ++i;
-      out.push_back({SQLToken::Kind::Symbol, sql.substr(begin, i - begin), "", begin, i, depth});
-      continue;
-    }
-    if (sql[i] == ')') depth = std::max(0, depth - 1);
-    out.push_back({SQLToken::Kind::Symbol, std::string(1, sql[i]), "", begin, begin + 1, depth});
-    if (sql[i] == '(') ++depth;
-    ++i;
   }
   return out;
 }
@@ -447,6 +425,8 @@ std::vector<LexicalTarget> collectLexicalSelectTargets(const std::vector<SQLToke
     "PREWHERE",
     "GROUP",
     "HAVING",
+    "WINDOW",
+    "QUALIFY",
     "ORDER",
     "LIMIT",
     "SETTINGS",
@@ -491,7 +471,13 @@ void recordLexicalTargets(rewriter::RewriteSQLResponse *response,
   const std::vector<LexicalTarget> &targets,
   const rewriter::RewriteTableDynamicArgs &args) {
   const auto selection = dynamicSelection(args);
-  for (const auto &target : targets) {
+  // Spec 2026-09-26 §5 "What the engines report": key-sorted by the name as
+  // written, the order the SELECT collector produces.
+  std::vector<LexicalTarget> sorted = targets;
+  std::stable_sort(sorted.begin(), sorted.end(), [](const LexicalTarget &l, const LexicalTarget &r) {
+    return lexicalKey(l) < lexicalKey(r);
+  });
+  for (const auto &target : sorted) {
     bool exists = false;
     for (const auto &entry : response->original_accessed_tables()) {
       if (entry.original_database() == target.database && entry.original_table() == target.table) {
@@ -600,6 +586,16 @@ std::optional<NamespaceRef> decodeDictionarySource(const DB::ASTCreateQuery &cre
   return decodePair(NamespaceRefSource::DictionarySource, "CLICKHOUSE", args, 0);
 }
 
+std::optional<NamespaceRef> decodeEngine(const DB::ASTFunction &engine) {
+  const std::string lname = lower(engine.name);
+  const auto &args = functionArgs(engine);
+  if (lname == "remote" || lname == "distributed")
+    return decodePair(NamespaceRefSource::TableEngine, engine.name, args, 1);
+  if (lname == "merge" || lname == "buffer")
+    return decodePair(NamespaceRefSource::TableEngine, engine.name, args, 0);
+  return std::nullopt;
+}
+
 // Split a table identifier's "db.table" (or bare "table") at the first dot,
 // the same split collectAccessedTablePairsFromAST uses.
 std::pair<std::string, std::string> splitTableIdentifier(const std::string &full) {
@@ -608,8 +604,15 @@ std::pair<std::string, std::string> splitTableIdentifier(const std::string &full
   return {std::string(), full};
 }
 
+// The identifier operand of an IN-family call, or nullptr.
+const DB::ASTIdentifier *inFamilyOperandIdentifier(const DB::ASTFunction &fn) {
+  const auto &args = functionArgs(fn);
+  return args.size() == 2 ? args[1]->as<DB::ASTIdentifier>() : nullptr;
+}
+
 void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef> &out,
-  const std::unordered_set<std::string> &cte_scope) {
+  const CTEAliasScope &cte_scope, InOperandReading reading,
+  bool inside_non_view_table_function) {
   if (!ast) return;
 
   if (const auto *expression = ast->as<DB::ASTTableExpression>()) {
@@ -618,32 +621,39 @@ void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef>
       : nullptr;
     if (identifier) {
       const auto [database, table] = splitTableIdentifier(identifier->name());
-      const bool is_cte_ref = database.empty() && cte_scope.count(table) > 0;
+      const bool is_cte_ref = database.empty() && cte_scope.bindsTable(table);
       if (!table.empty() && !is_cte_ref) {
         StorageIntegrityReadRef event;
         event.kind = StorageIntegrityReadRef::Kind::Table;
         event.database = database;
         event.table = table;
+        event.split_one_part = !database.empty() && identifier->name_parts.size() == 1;
+        event.inside_non_view_table_function = inside_non_view_table_function;
         out.push_back(std::move(event));
       }
     }
   }
   if (const auto *create = ast->as<DB::ASTCreateQuery>()) {
     if (create->storage && create->storage->engine) {
-      const std::string lname = lower(create->storage->engine->name);
-      const auto &args = functionArgs(*create->storage->engine);
-      std::optional<NamespaceRef> ref;
-      if (lname == "remote" || lname == "distributed")
-        ref = decodePair(
-          NamespaceRefSource::TableEngine, create->storage->engine->name, args, 1);
-      else if (lname == "merge" || lname == "buffer")
-        ref = decodePair(
-          NamespaceRefSource::TableEngine, create->storage->engine->name, args, 0);
-      if (ref) {
+      if (auto ref = decodeEngine(*create->storage->engine)) {
         StorageIntegrityReadRef event;
         event.kind = StorageIntegrityReadRef::Kind::Namespace;
         event.namespace_ref = std::move(*ref);
         out.push_back(std::move(event));
+      }
+    }
+    // A MATERIALIZED VIEW keeps its ENGINE in the view targets, not in
+    // `storage`; its Merge / Buffer / Distributed arguments are the same
+    // namespace carriers.
+    if (create->targets) {
+      for (const auto *inner : create->targets->getInnerEngines()) {
+        if (!inner || !inner->engine) continue;
+        if (auto ref = decodeEngine(*inner->engine)) {
+          StorageIntegrityReadRef event;
+          event.kind = StorageIntegrityReadRef::Kind::Namespace;
+          event.namespace_ref = std::move(*ref);
+          out.push_back(std::move(event));
+        }
       }
     }
     if (auto ref = decodeDictionarySource(*create)) {
@@ -664,33 +674,69 @@ void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef>
       event.namespace_ref = std::move(*ref);
       out.push_back(std::move(event));
     }
-    if (auto ref = decodeInFunction(*fn)) {
-      // A bare `IN <alias>` whose name is an in-scope CTE alias is a CTE
-      // reference, not a table (Spec I D7b). Qualified `db.alias` stays a real
-      // table, exactly as collectAccessedTablePairsFromAST treats it.
-      if (!(ref->database.empty() && cte_scope.count(ref->table) > 0)) {
+    const bool select_rewrites = reading == InOperandReading::SelectRewrite;
+    const auto *operand = inFamilyOperandIdentifier(*fn);
+    // A one-part operand an in-scope name binds (a CTE, a qualifying WITH
+    // alias or projection alias; cte_scope.h) is that name, not a table, in
+    // every reading: `WITH 1 AS "db1.t" … a IN "db1.t"` reads no table.
+    // Qualified `db.alias` stays a real table, exactly as
+    // collectAccessedTablePairsFromAST treats it.
+    const bool bound = operand && !operand->isParam() && operand->name_parts.size() == 1
+      && cte_scope.bindsInOperand(operand->name_parts.front());
+    // A rewritten write body (INSERT … SELECT, CTAS, a view body) outside an
+    // R2 position (which is unbound) rewrites a one-part operand exactly as
+    // the SELECT handler does: the whole name is one table of the current
+    // database (`db1.t` quoted is the tenant's table "db1.t", never the SI
+    // table db1.t) and an Active table becomes the derived read (spec
+    // 2026-09-26 T4). So it gets the SELECT handler's reading. rewriter-go
+    // admits `INSERT … SELECT … WHERE a IN t` for Active `t` and `… IN
+    // "db1.t"` the same way; a view body that reads the Active table is then
+    // refused with the SI write message, and an INSERT into an SI target
+    // keeps the key refusal (rejectEmbeddedStorageIntegrityRead).
+    const bool whole_only = reading == InOperandReading::SplitAndWhole && !cte_scope.unbound
+      && operand && !operand->isParam() && operand->name_parts.size() == 1;
+    if (auto ref = decodeInFunction(*fn, select_rewrites || whole_only); ref && !bound) {
+      const std::string surface = ref->name;
+      StorageIntegrityReadRef event;
+      event.kind = StorageIntegrityReadRef::Kind::Namespace;
+      event.namespace_ref = std::move(*ref);
+      out.push_back(std::move(event));
+      // A rewritten write body reads a dotted one-part operand (`db2.x`) as
+      // one table of the current database, as the SELECT handler does; check
+      // that reading too, after the split one (its SI refusal stays).
+      if (reading == InOperandReading::SplitAndWhole && !whole_only && operand && !operand->isParam()
+          && operand->name_parts.size() == 1 && !operand->name_parts.front().empty()
+          && operand->name_parts.front().find('.') != std::string::npos) {
         StorageIntegrityReadRef event;
         event.kind = StorageIntegrityReadRef::Kind::Namespace;
-        event.namespace_ref = std::move(*ref);
+        event.namespace_ref = NamespaceRef{NamespaceRefSource::InTable, surface};
+        event.namespace_ref.uses_current_database = true;
+        event.namespace_ref.table = operand->name_parts.front();
         out.push_back(std::move(event));
       }
     }
   }
-  visitChildrenWithCTEVisibility(
-    *ast, cte_scope,
-    [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
-      collectReadRefs(child, out, child_scope);
-    });
+  const auto *table_expression = ast->as<DB::ASTTableExpression>();
+  const auto *table_function = table_expression && table_expression->table_function
+    ? table_expression->table_function->as<DB::ASTFunction>() : nullptr;
+  const auto visit = [&](const DB::ASTPtr &child, const CTEAliasScope &child_scope) {
+    const bool enters_non_view = table_function && child.get() == table_function
+      && !isViewTableFunction(table_function->name);
+    collectReadRefs(child, out, child_scope, reading,
+                    inside_non_view_table_function || enters_non_view);
+  };
+  visitChildrenWithCTEVisibility(*ast, cte_scope, visit);
 }
 
-void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef> &out) {
-  static const std::unordered_set<std::string> kEmpty;
-  collectReadRefs(ast, out, kEmpty);
+void collectReadRefs(const DB::ASTPtr &ast, std::vector<StorageIntegrityReadRef> &out,
+  InOperandReading reading = InOperandReading::Split) {
+  collectReadRefs(ast, out, CTEAliasScope{}, reading, false);
 }
 
-void collectNamespaceRefs(const DB::ASTPtr &ast, std::vector<NamespaceRef> &out) {
+void collectNamespaceRefs(const DB::ASTPtr &ast, std::vector<NamespaceRef> &out,
+  InOperandReading reading) {
   std::vector<StorageIntegrityReadRef> events;
-  collectReadRefs(ast, events);
+  collectReadRefs(ast, events, reading);
   for (auto &event : events) {
     if (event.kind == StorageIntegrityReadRef::Kind::Namespace)
       out.push_back(std::move(event.namespace_ref));
@@ -1290,11 +1336,28 @@ bool prepareStorageIntegritySQL(const std::string &sql,
   // Likewise, strip an ordinary table's alias column list long enough for
   // the pinned parser to build the AST. SI-bound lists are rejected because
   // substituting the table with a derived query would change their meaning.
+  // A clause keyword followed by "(" is not an implicit alias with a column
+  // list: `FROM o WHERE (a, b) IN x`, `FROM o LIMIT (SELECT …)`,
+  // `JOIN b USING (k)`, `FROM o JOIN (SELECT …)` (spec 2026-09-26 inventory
+  // §6, the V2-only parse failures). Audited against ClickHouse's
+  // ParserAlias::restricted_keywords and ParserTablesInSelectQuery /
+  // ParserSelectQuery: every restricted keyword that may follow a table
+  // expression. LOCAL and OUTER are not restricted (they are valid aliases),
+  // and a quoted token is never a keyword: ClickHouse exempts quoted aliases.
+  static const std::set<std::string> implicitAliasKeywords = {"WHERE", "PREWHERE", "GROUP",
+    "HAVING", "ORDER", "LIMIT", "OFFSET", "SETTINGS", "UNION", "INTERSECT", "EXCEPT", "USING",
+    "ON", "FORMAT", "WINDOW", "QUALIFY", "INTO", "FETCH", "ARRAY", "LEFT", "RIGHT", "INNER",
+    "FULL", "CROSS", "GLOBAL", "ANY", "ALL", "ASOF", "SEMI", "ANTI", "ONLY", "PASTE", "JOIN",
+    "FINAL", "SAMPLE", "LIKE", "ILIKE", "NOT", "FROM", "IN"};
   std::map<int, bool> in_from;
+  // WINDOW / QUALIFY end the FROM list too: `WINDOW w AS (…), w2 AS (…)` is
+  // not a table followed by an alias column list.
   const std::set<std::string> from_ends = {"WHERE",
     "PREWHERE",
     "GROUP",
     "HAVING",
+    "WINDOW",
+    "QUALIFY",
     "ORDER",
     "LIMIT",
     "SETTINGS",
@@ -1317,6 +1380,8 @@ bool prepareStorageIntegritySQL(const std::string &sql,
       alias = tokens[cursor + 1].text;
       cursor += 2;
     } else if (cursor < tokens.size() && identifierToken(tokens[cursor]) &&
+               (tokens[cursor].kind != SQLToken::Kind::Word ||
+                !implicitAliasKeywords.count(tokens[cursor].upper)) &&
                cursor + 1 < tokens.size() && tokens[cursor + 1].text == "(") {
       alias = tokens[cursor].text;
       ++cursor;
@@ -1495,15 +1560,36 @@ void recordPhysicalStorageIntegrityAccess(rewriter::RewriteSQLResponse *response
   recordStorageIntegrityAccess(response, original_database, original_table, "", physical_database);
 }
 
-std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast) {
+std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast,
+  InOperandReading reading) {
   std::vector<NamespaceRef> refs;
-  collectNamespaceRefs(ast, refs);
+  collectNamespaceRefs(ast, refs, reading);
   return refs;
 }
 
-std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast) {
+std::optional<std::string> staticNamespaceArgValue(const DB::ASTPtr &arg) {
+  return staticNamespaceArg(arg);
+}
+
+std::vector<NamespaceRef> withoutQualifiedInOperandRefs(std::vector<NamespaceRef> refs) {
+  refs.erase(std::remove_if(refs.begin(), refs.end(), [](const NamespaceRef &ref) {
+    return ref.source == NamespaceRefSource::InTable && !ref.uses_current_database;
+  }), refs.end());
+  return refs;
+}
+
+std::optional<NamespaceRef> decodeTableFunctionNamespace(const DB::ASTFunction &fn) {
+  return decodeNamespaceFunction(fn, NamespaceRefSource::TableFunction);
+}
+
+std::optional<NamespaceRef> decodeTableEngineNamespace(const DB::ASTFunction &engine) {
+  return decodeEngine(engine);
+}
+
+std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast,
+  CTEBinding binding, InOperandReading reading) {
   std::vector<StorageIntegrityReadRef> refs;
-  collectReadRefs(ast, refs);
+  collectReadRefs(ast, refs, binding == CTEBinding::Unbound ? unboundScope() : CTEAliasScope{}, reading, false);
   return refs;
 }
 
@@ -1514,7 +1600,10 @@ bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
   if (!storageIntegritySurfaceActive(args)) return false;
   for (auto ref : refs) {
     if (ref.uses_current_database) {
-      if (!ref.table.empty()) {
+      // An IN operand is exempt from the exact-key check: an Active table
+      // reads through the derived safe read (T4), like the qualified form.
+      // The physical-context checks below still apply to it.
+      if (!ref.table.empty() && !(ref.source == NamespaceRefSource::InTable && ref.rewritten_read)) {
         if (auto hit = lookupStorageIntegrity("", ref.table, args)) {
           recordLogicalStorageIntegrityAccess(response, "", ref.table, args);
           std::string logical;
@@ -1611,56 +1700,75 @@ bool rejectUnmodelledStorageIntegrityStatement(const DB::ASTPtr &ast,
 
 namespace {
 
-bool annotateStructuredStorageIntegrityTarget(
+// Name one proven storage-integrity object in a rejected response's message
+// (Spec I D2), mirroring rewriter-go's AnnotateStorageIntegrityRejectAST:
+//   - an SI physical or reserved database (hg_*) always names itself: spec
+//     2026-09-26 §5 keeps the SI messages ahead of every later rule (T3 with
+//     the SI messages first, then T5, T6, R5);
+//   - an Active table names itself only as the target of an opaque class
+//     rewriter-go's NameRefs parses (SYSTEM, CHECK TABLE, DROP DICTIONARY) or
+//     of an unmodelled class refused with the SI catch-all (UNDROP, BACKUP, …,
+//     which rewriter-go's SI write preflight names): an Active table is not a
+//     refusal cause by itself — a read is rewritten to the derived safe read
+//     and an INSERT takes the signed lane — so a T3 / T5 / T6 / R5 refusal of
+//     the same statement keeps its own message;
+//   - an unqualified name resolves through the logical context only, as
+//     rewriter-go's NameRef does; the physical execution context names
+//     nothing here.
+bool annotateProvenStorageIntegrityName(
   rewriter::RewriteSQLResponse *response,
   const std::string &database,
   const std::string &table,
-  const rewriter::RewriteTableDynamicArgs &args) {
+  const rewriter::RewriteTableDynamicArgs &args,
+  bool name_active) {
   if (table.empty()) {
-    if (isStorageIntegrityPhysicalDatabase(database, args)) {
-      response->set_message(storageIntegrityPhysicalDatabaseRejectMessage(database));
-      return true;
-    }
-    if (isStorageIntegrityLogicalDatabase(database, args)) {
-      response->set_message(
-        "storage-integrity logical database " + database + " is not directly addressable");
-      return true;
-    }
-    return false;
-  }
-
-  if (!database.empty()) {
-    if (isStorageIntegrityPhysicalDatabase(database, args)) {
-      response->set_message(
-        storageIntegrityPhysicalRejectMessage(database + "." + table));
-      return true;
-    }
-    if (auto hit = lookupStorageIntegrity(database, table, args)) {
-      response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
-      return true;
-    }
-    return false;
-  }
-
-  if (auto hit = lookupStorageIntegrity("", table, args)) {
-    response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+    // rewriter-go's NameRef names a database only when it is SI physical.
+    if (!isStorageIntegrityPhysicalDatabase(database, args)) return false;
+    response->set_message(storageIntegrityPhysicalDatabaseRejectMessage(database));
     return true;
   }
-  const std::string physical = storageIntegrityExecutionDatabase(args);
-  if (isStorageIntegrityPhysicalDatabase(physical, args)) {
-    response->set_message(storageIntegrityPhysicalRejectMessage(physical + "." + table));
+  const std::string effective =
+    database.empty() ? args.upstream_logical_database_in_context() : database;
+  if (isStorageIntegrityPhysicalDatabase(effective, args)) {
+    response->set_message(storageIntegrityPhysicalRejectMessage(effective + "." + table));
+    return true;
+  }
+  if (!name_active) return false;
+  if (auto hit = lookupStorageIntegrity(database, table, args)) {
+    response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
     return true;
   }
   return false;
 }
 
-} // namespace
+// The statement classes whose embedded reads rewriter-go's CollectSelectTables
+// walks (every structured node that is not a `command`), plus a SHOW body,
+// whose SI reads rewriter-go's SHOW policy names (the corpus pins
+// `SHOW DICTIONARIES … WHERE in(7, hg_safe.db1__t)`): EXPLAIN, EXISTS, KILL,
+// … keep the caller's message whatever they read.
+bool readsAreProven(const DB::IAST &ast) {
+  switch (ast.getQueryKind()) {
+  case DB::IAST::QueryKind::Show:
+  case DB::IAST::QueryKind::Select:
+  case DB::IAST::QueryKind::Insert:
+  case DB::IAST::QueryKind::Delete:
+  case DB::IAST::QueryKind::Update:
+  case DB::IAST::QueryKind::Create:
+  case DB::IAST::QueryKind::Alter:
+  case DB::IAST::QueryKind::Describe:
+    return true;
+  default:
+    return false;
+  }
+}
 
-void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
+void annotateStorageIntegrityRejectUnguarded(rewriter::RewriteSQLResponse *response,
   const DB::ASTPtr &ast,
-  const std::string &sql,
   const rewriter::RewriteTableDynamicArgs &args) {
   if (!response || response->code() == rewriter::RewriteCode::Success) return;
+  // T2 (an Identifier parameter in a table position) precedes T3 (spec
+  // 2026-09-26 §5): nothing below may upgrade its message.
+  if (response->message() == kIdentifierParameterMessage) return;
   if (!storageIntegritySurfaceActive(args)) return;
   for (const auto &entry : response->original_accessed_tables())
     if (entry.is_storage_integrity()) return;
@@ -1668,49 +1776,128 @@ void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
   // A failed parse has no proven target. Preserve ParserQuery's diagnostic;
   // lexical lookalikes in malformed SQL must never replace SyntaxError.
   if (!ast) return;
+  const auto kind = ast->getQueryKind();
+  const auto *drop = ast->as<DB::ASTDropQuery>();
+  const bool names_active = kind == DB::IAST::QueryKind::System
+    || kind == DB::IAST::QueryKind::Check || (drop && drop->is_dictionary)
+    || response->message() == kStorageIntegrityUnmodelledMessage;
 
   // SYSTEM statements carry their object separately from ON CLUSTER and
   // other operands. Only those structured target fields participate in D2
   // attribution; cluster names and arbitrary words are not database/table
   // events.
   if (const auto *system = ast->as<DB::ASTSystemQuery>()) {
-    if (annotateStructuredStorageIntegrityTarget(
-          response, system->getDatabase(), system->getTable(), args)) return;
+    if (annotateProvenStorageIntegrityName(
+          response, system->getDatabase(), system->getTable(), args, names_active)) return;
     for (const auto &[database, table] : system->tables) {
-      if (annotateStructuredStorageIntegrityTarget(
-            response, database, table, args)) return;
+      if (annotateProvenStorageIntegrityName(response, database, table, args, names_active)) return;
     }
     return;
   }
 
-  const auto tokens = tokenizeSQL(sql);
-  for (size_t i = 0; i < tokens.size(); ++i) {
-    if (!identifierToken(tokens[i])) continue;
-    const auto target = targetAt(tokens, i);
-    if (!target) continue;
-    if (!target->database.empty()) {
-      i = target->next - 1;  // consume `db . table`
-      if (isStorageIntegrityPhysicalDatabase(target->database, args)) {
-        response->set_message(
-          storageIntegrityPhysicalRejectMessage(target->database + "." + target->table));
-        return;
+  // Spec 2026-09-26 parity with rewriter-go's AnnotateStorageIntegrityRejectAST:
+  // only a proven name — a statement target, then a table or IN-operand read
+  // the CTE-aware read walker classifies — upgrades the message. A lexical
+  // lookalike (an alias-qualified column `hg_safe.x`, a CTE named like an
+  // Active table, a cluster or setting name) keeps the caller's message.
+  std::vector<std::pair<std::string, std::string>> targets;
+  // A parameter target (table AST present, name empty) proves nothing.
+  if (const auto *q = dynamic_cast<const DB::ASTQueryWithTableAndOutput *>(ast.get());
+      q && (!q->table || !q->getTable().empty()))
+    targets.emplace_back(q->getDatabase(), q->getTable());
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>())
+    targets.emplace_back(insert->getDatabase(), insert->getTable());
+  if (const auto *rename = ast->as<DB::ASTRenameQuery>()) {
+    for (const auto &e : rename->getElements()) {
+      targets.emplace_back(e.from.getDatabase(), rename->database ? "" : e.from.getTable());
+      targets.emplace_back(e.to.getDatabase(), rename->database ? "" : e.to.getTable());
+    }
+  }
+  if (drop && drop->database_and_tables) {
+    for (const auto &single : drop->getRewrittenASTsOfSingleTable(ast)) {
+      if (const auto *one = single->as<DB::ASTDropQuery>())
+        targets.emplace_back(one->getDatabase(), one->getTable());
+    }
+  }
+  if (const auto *backup = ast->as<DB::ASTBackupQuery>()) {
+    for (const auto &e : backup->elements) {
+      if (e.type == DB::ASTBackupQuery::TABLE) {
+        targets.emplace_back(e.database_name, e.table_name);
+        targets.emplace_back(e.new_database_name, e.new_table_name);
+      } else if (e.type == DB::ASTBackupQuery::DATABASE) {
+        targets.emplace_back(e.database_name, "");
+        targets.emplace_back(e.new_database_name, "");
       }
-      if (auto hit = lookupStorageIntegrity(target->database, target->table, args)) {
-        response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
-        return;
-      }
+    }
+  }
+  if (const auto *create = ast->as<DB::ASTCreateQuery>()) {
+    if (!create->as_table.empty()) targets.emplace_back(create->as_database, create->as_table);
+    if (create->targets && create->hasTargetTableID(DB::ViewTarget::To)) {
+      const auto to = create->getTargetTableID(DB::ViewTarget::To);
+      targets.emplace_back(to.database_name, to.table_name);
+    }
+  }
+  for (const auto &[database, table] : targets) {
+    if (database.empty() && table.empty()) continue;
+    if (annotateProvenStorageIntegrityName(response, database, table, args, names_active)) return;
+  }
+
+  // Reads: rewriter-go's CollectSelectTables names only a qualified SI
+  // physical table in a table or IN-operand position. A one-part quoted name
+  // (`hg_safe.x`) is one table of the current database, and a table function's
+  // namespace arguments are T5's to decide.
+  if (!readsAreProven(*ast)) return;
+  // A SHOW body is held outside `children`.
+  std::vector<DB::ASTPtr> read_roots{ast};
+  if (const auto *show = ast->as<DB::ASTShowTablesQuery>())
+    read_roots = {show->where_expression, show->limit_length};
+  else if (const auto *columns = ast->as<DB::ASTShowColumnsQuery>())
+    read_roots = {columns->where_expression, columns->limit_length};
+  else if (const auto *indexes = ast->as<DB::ASTShowIndexesQuery>())
+    read_roots = {indexes->where_expression};
+  std::vector<StorageIntegrityReadRef> events;
+  for (const auto &root : read_roots)
+    if (root) collectReadRefs(root, events, InOperandReading::SelectRewrite);
+  for (const auto &event : events) {
+    std::string database;
+    std::string table;
+    if (event.kind == StorageIntegrityReadRef::Kind::Table) {
+      if (event.split_one_part) continue;
+      database = event.database;
+      table = event.table;
+    } else if (event.namespace_ref.source == NamespaceRefSource::InTable
+               && event.namespace_ref.resolved && !event.namespace_ref.uses_current_database) {
+      database = event.namespace_ref.database;
+      table = event.namespace_ref.table;
+    }
+    if (database.empty() || table.empty() || !isStorageIntegrityPhysicalDatabase(database, args))
       continue;
-    }
-    if (isStorageIntegrityPhysicalDatabase(target->table, args)) {
-      // A bare name in a database position: TRUNCATE DATABASE hg_safe,
-      // TRUNCATE ALL TABLES FROM hg_unsafe, ALTER DATABASE hg_safe ...
-      response->set_message(storageIntegrityPhysicalDatabaseRejectMessage(target->table));
-      return;
-    }
-    if (auto hit = lookupStorageIntegrity("", target->table, args)) {
-      response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
-      return;
-    }
+    response->set_message(storageIntegrityPhysicalRejectMessage(database + "." + table));
+    return;
+  }
+}
+
+} // namespace
+
+void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
+  const DB::ASTPtr &ast,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  if (!response) return;
+  // Runs from a destructor: nothing may escape. The annotation is
+  // message-only, so a failure keeps the caller's refusal exactly as it was
+  // (its code is never touched, and Success never reaches this point).
+  std::string original;
+  bool saved = false;
+  try {
+    original = response->message();
+    saved = true;
+    annotateStorageIntegrityRejectUnguarded(response, ast, args);
+  } catch (const std::exception &e) {
+    if (saved) response->set_message(original);
+    std::cerr << "[si-annotate] warn: annotation skipped: " << e.what() << std::endl;
+  } catch (...) {
+    if (saved) response->set_message(original);
+    std::cerr << "[si-annotate] warn: annotation skipped: unknown exception" << std::endl;
   }
 }
 

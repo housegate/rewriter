@@ -19,9 +19,18 @@
 
 #include <string>
 
+#include "handlers/name_rewrite.h"
 #include "rewriter.grpc.pb.h"
 
 namespace rewriter_handlers {
+
+// The storage-integrity write preflight (SI targets, embedded SI reads, SI
+// namespaces) for any statement. Returns true when it populated a rejection.
+// The table-reference preflight runs it for an unmodelled statement class
+// while the SI surface is active, so an SI target still names the outcome.
+bool storageIntegrityWritePreflight(const DB::ASTPtr &ast,
+                                    const TableRewriteSelection &sel,
+                                    rewriter::RewriteSQLResponse *response);
 
 enum class WriteDispatchResult {
   Handled,     // Accepted: response holds the normalized SQL + classification.

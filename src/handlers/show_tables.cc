@@ -10,7 +10,10 @@
 
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
+#include "handlers/sql_tokens.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/system_tables.h"
+#include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
 
@@ -138,7 +141,31 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   if (show_query->clusters || show_query->cluster
       || show_query->dictionaries || show_query->m_settings
       || show_query->merges || show_query->caches) {
-    // DICTIONARIES is an exact passthrough family. ASTShowTablesQuery's
+    // SHOW CHANGED SETTINGS is a kind the SI surface does not model; the SI
+    // catch-all answers it (rewriter-go showKindClass).
+    if (show_query->changed && storageIntegrityActive(dynamic)) {
+      rejectUnsupported(response, std::string(kStorageIntegrityUnmodelledMessage));
+      return true;
+    }
+    // Spec 2026-09-26 R7: the trailing clauses are forwarded as written.
+    if (rejectShowBody(*show_query, request->sql(), dynamic, response)) return true;
+    // Spec 2026-09-26 §5 "The system database": a SHOW form that reads a
+    // system table outside the allowlist, after its SI namespace check and
+    // its body check (rewriter-go systemTableShowRefusal).
+    if (dynamic) {
+      // R5 outranks it in both SI states (rewriter-go).
+      if (rejectQuerySettings(ast, response, &request->sql())) return true;
+      const char *system_table = show_query->dictionaries ? "dictionaries"
+        : show_query->merges                             ? "merges"
+        : show_query->caches                             ? "filesystem_cache_settings"
+                                                         : nullptr;
+      if (system_table) {
+        rejectShowSystemTable(response, system_table);
+        return true;
+      }
+    }
+    // DICTIONARIES (static / no-rewrite mode only, from here on) is an exact
+    // passthrough family. ASTShowTablesQuery's
     // formatter omits the legal FULL prefix, so formatting here would
     // silently change SHOW FULL [TEMPORARY] DICTIONARIES after its namespace
     // guard has succeeded. Other legacy SHOW families keep their normalized
@@ -187,6 +214,27 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
       "SHOW TABLES target logical database '" + logical
         + "' is not in database_map and not a known physical database; "
           "user does not have this database");
+    return true;
+  }
+
+  // Spec 2026-09-26 R7 holds for every SHOW trailing clause. The synthetic
+  // enumeration below does not carry the WHERE / LIMIT, so nothing there
+  // reaches ClickHouse today; the clause is refused rather than silently
+  // dropped when it could read a table.
+  if (rejectShowBody(*show_query, request->sql(), dynamic, response)) return true;
+
+  // The synthetic enumeration models only SHOW TABLES [{FROM | IN} <db>]: it
+  // would drop a LIKE / ILIKE (an empty pattern included), WHERE, LIMIT,
+  // FORMAT, INTO OUTFILE or SETTINGS clause and answer SHOW FULL / TEMPORARY
+  // TABLES as SHOW TABLES, so those are refused rather than silently changed
+  // (rewriter-go dispatchShowTables, the same order: after the database is
+  // resolved). R5 outranks it in both SI states (with the surface inactive the
+  // preflight already ran it).
+  if (rejectQuerySettings(ast, response, &request->sql())) return true;
+  if (show_query->full || show_query->temporary || !show_query->like.empty()
+      || textHasWord(request->sql(), "like") || textHasWord(request->sql(), "ilike")
+      || show_query->where_expression || show_query->limit_length || show_query->hasOutputOptions()) {
+    rejectUnsupported(response, std::string(kUnsupportedStatementMessage));
     return true;
   }
 
@@ -293,6 +341,52 @@ bool handleShowColumnsQuery(DB::ASTPtr ast,
       }
       return true;
     }
+  }
+
+  // Spec 2026-09-26 R7: the trailing clauses are forwarded as written.
+  if (rejectShowBody(*ast, request->sql(), dynamic, response)) return true;
+
+  // A table clause of three or more parts: ClickHouse reads database = the
+  // first part and table = the last, which the AST holds with the part count
+  // dropped. The preflight's system-table scan already named a refused
+  // system table in either reading; what is left is refused fail-closed
+  // (rewriter-go DBLevelInfo.ShowTableMultiPart).
+  if (dynamic && showTargetIsMultiPart(request->sql())) {
+    response->clear_statement_type();
+    rejectUnsupported(response, std::string(kUnsupportedStatementMessage));
+    return true;
+  }
+
+  // Spec 2026-09-26 R7: an unqualified target resolves like a FROM reference
+  // (a bare quoted `db2.x` is a table named db2.x in the session's logical
+  // database); passed through, ClickHouse would bind it in the physical
+  // database. An explicit database stays verbatim.
+  if (dynamic && target.database.empty()) {
+    const auto sel = findActiveTableRewrite(request->options());
+    recordAccessedTable(response, "", target.table, sel);
+    const auto outcome = applyDynamicRewrite("", target.table, *dynamic, "SHOW COLUMNS");
+    if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
+      rejectInvalid(response, outcome.reject_reason);
+      return true;
+    }
+    if (outcome.status == DynamicRewriteStatus::OkRemote) {
+      rejectUnsupported(response,
+        "SHOW COLUMNS target's logical resolves to a remote upstream "
+        "(via dynamic_args.logical_database_to_remote_upstream_index); "
+        "remote() can only appear as a SELECT-side table function");
+      return true;
+    }
+    if (auto *columns = ast->as<DB::ASTShowColumnsQuery>()) {
+      columns->database = outcome.physical_db;
+      columns->table = outcome.new_table;
+    } else if (auto *indexes = ast->as<DB::ASTShowIndexesQuery>()) {
+      indexes->database = outcome.physical_db;
+      indexes->table = outcome.new_table;
+    }
+    recordTableRewrite(response, "", target.table, outcome.physical_db, outcome.new_table);
+    // ClickHouse's formatter spells the database as a second FROM clause.
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    return true;
   }
 
   // The namespace is ordinary (or no storage-integrity contract is active):

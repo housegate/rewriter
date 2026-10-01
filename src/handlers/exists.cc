@@ -8,6 +8,7 @@
 #include "handlers/common.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
 
@@ -75,6 +76,15 @@ ExistsDispatchResult handleExistsQuery(DB::ASTPtr ast,
 
   const std::string origin_db = q->getDatabase();
   const std::string origin_table = q->getTable();
+  // Spec 2026-09-26 T2 / T12: an Identifier parameter target has an empty
+  // name. setTable("") would erase it and the formatter would dereference
+  // the missing table (the v0.15.0 segfault). Refuse it in every mode.
+  if (origin_table.empty() || isIdentifierParameter(q->table.get())
+      || isIdentifierParameter(q->database.get())) {
+    rejectExists(response, rewriter::RewriteCode::InvalidRewriteRequest,
+      std::string(kIdentifierParameterMessage));
+    return ExistsDispatchResult::Handled;
+  }
 
   // Record the access regardless of mode/outcome so callers see what target
   // the rewriter processed even on static-mode passthrough or eventual reject.

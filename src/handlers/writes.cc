@@ -31,6 +31,7 @@
 #include "handlers/name_rewrite.h"
 #include "handlers/select.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
 
@@ -89,6 +90,20 @@ bool beginsNonLiveCreateObject(const DB::Token &token) {
     || tokenEqualsKeyword(token, "NAMED")
     || tokenEqualsKeyword(token, "UNIQUE")
     || tokenEqualsKeyword(token, "INDEX");
+}
+
+// The formatted write. An INSERT … SELECT / CTAS body that reads an Active
+// table carries the derived read, whose projection spelling is restored
+// exactly as the SELECT path restores it.
+std::string formatWrite(const DB::ASTPtr &ast, const rewriter::RewriteSQLResponse &response,
+                        const TableRewriteSelection &sel) {
+  std::string sql = formatAst(ast);
+  if (sel.mode != TableRewriteMode::Dynamic) return sql;
+  for (const auto &entry : response.original_accessed_tables()) {
+    if (entry.is_storage_integrity())
+      return restoreStorageIntegrityProjectionSyntax(std::move(sql), reservedRowIdColumn(*sel.dynamic_args));
+  }
+  return sql;
 }
 
 void acceptWrite(const DB::ASTPtr &ast,
@@ -223,9 +238,8 @@ bool hasActiveStorageIntegrity(const TableRewriteSelection &sel) {
 // an empty part), so a write target's getTable() is "" and the rewrite's
 // setTable("") erases the target: `DROP TABLE db1.{p:Identifier}` would be
 // formatted as `DROP DATABASE phys` (TRUNCATE as `TRUNCATE DATABASE`, CREATE
-// TABLE as `CREATE DATABASE`). Every write target must be a literal name.
-constexpr std::string_view kQueryParameterWriteTargetMessage =
-  "query parameters are not supported as write targets";
+// TABLE as `CREATE DATABASE`). Every write target must be a literal name; the
+// refusal carries the spec 2026-09-26 T2 text (kIdentifierParameterMessage).
 
 bool isParameterOrEmptyName(const DB::ASTPtr &node) {
   if (!node) return false;
@@ -336,6 +350,24 @@ bool rejectStorageIntegrityWriteDatabase(
   return true;
 }
 
+// Record a write target ahead of every entry already present, with its
+// table rewrite: a rejection that fired on a table source still reports the
+// target first, as rewriter-go does (spec 2026-09-26 §5 "What the engines
+// report").
+void prependAccessedTable(rewriter::RewriteSQLResponse *response,
+                          const TableRewriteSelection &sel,
+                          const std::string &database,
+                          const std::string &table) {
+  recordAccessedTable(response, database, table, sel);
+  auto *list = response->mutable_original_accessed_tables();
+  for (int i = list->size() - 1; i > 0; --i) list->SwapElements(i, i - 1);
+  if (sel.mode == TableRewriteMode::Dynamic) {
+    const auto outcome = applyDynamicRewrite(database, table, *sel.dynamic_args, "write target");
+    if (outcome.status == DynamicRewriteStatus::OK)
+      recordTableRewrite(response, database, table, outcome.physical_db, outcome.new_table);
+  }
+}
+
 DB::ASTPtr ownedChild(const DB::IAST &parent, const DB::IAST *child) {
   if (!child) return nullptr;
   for (const auto &candidate : parent.children)
@@ -353,14 +385,18 @@ bool preflightStorageIntegrityWrite(
   if (!hasActiveStorageIntegrity(sel)) return false;
   const auto &args = *sel.dynamic_args;
 
+  // CREATE and INSERT only: their SELECT body is rewritten (spec 2026-09-26
+  // T4), so a dotted one-part IN operand is also read as one table of the
+  // current database; the split reading and its SI refusal stay.
   auto reject_namespaces = [&] {
     return rejectStorageIntegrityNamespaces(
-      response, collectStorageIntegrityNamespaceRefs(ast), args,
+      response, collectStorageIntegrityNamespaceRefs(ast, InOperandReading::SplitAndWhole), args,
       rewriter::RewriteCode::UnsupportedStatement);
   };
 
   if (auto *create = ast->as<DB::ASTCreateQuery>()) {
     if (reject_namespaces()) return true;
+    const bool ctas = !create->is_ordinary_view && !create->is_materialized_view && create->select;
     if (!create->table) {
       return rejectStorageIntegrityWriteDatabase(
         response, sel, create->getDatabase());
@@ -374,6 +410,13 @@ bool preflightStorageIntegrityWrite(
           response, sel, create->as_database, create->as_table, false)) {
       return true;
     }
+    // Spec 2026-09-26 T12: a materialized view writes into its TO / APPEND TO
+    // target, so an Active target is refused like any other write.
+    if (create->targets && create->hasTargetTableID(DB::ViewTarget::To)) {
+      const auto to = create->getTargetTableID(DB::ViewTarget::To);
+      if (rejectStorageIntegrityWriteTarget(response, sel, to.database_name, to.table_name, false))
+        return true;
+    }
     // Column declarations and table constraints are expression-bearing AST
     // carriers too: DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL and CHECK may contain
     // subqueries. Walk the owned definitions as one ordered subtree so the
@@ -381,14 +424,17 @@ bool preflightStorageIntegrityWrite(
     // reach ClickHouse.
     if (auto definitions = ownedChild(*create, create->columns_list);
         definitions && rejectEmbeddedStorageIntegrityRead(
-          definitions, sel, response,
-          rewriter::RewriteCode::UnsupportedStatement)) {
+          definitions, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+          /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
       return true;
     }
-    if (!create->is_ordinary_view && !create->is_materialized_view
-        && create->select) {
+    if (ctas) {
+      bool table_source = false;
       if (auto body = ownedChild(*create, create->select);
-          body && rejectEmbeddedStorageIntegrityRead(body, sel, response)) {
+          body && rejectEmbeddedStorageIntegrityRead(
+            body, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+            /*allow_logical_reads=*/true, &table_source, /*r2_position=*/false, /*rewritten_body=*/true)) {
+        if (table_source) prependAccessedTable(response, sel, create->getDatabase(), create->getTable());
         return true;
       }
     }
@@ -439,29 +485,33 @@ bool preflightStorageIntegrityWrite(
         if (command->type == DB::ASTAlterCommand::UPDATE) {
           if (auto assignments = ownedChild(*command, command->update_assignments);
               assignments && rejectEmbeddedStorageIntegrityRead(
-                assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+                assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
             return true;
           }
           if (auto predicate = ownedChild(*command, command->predicate);
               predicate && rejectEmbeddedStorageIntegrityRead(
-                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
             return true;
           }
         } else if (command->type == DB::ASTAlterCommand::DELETE) {
           if (auto predicate = ownedChild(*command, command->predicate);
               predicate && rejectEmbeddedStorageIntegrityRead(
-                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+                predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
             return true;
           }
         } else if (command->type == DB::ASTAlterCommand::MODIFY_QUERY) {
           if (auto body = ownedChild(*command, command->select);
               body && rejectEmbeddedStorageIntegrityRead(
-                body, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+                body, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
             return true;
           }
         } else if (rejectEmbeddedStorageIntegrityRead(
-                     raw, sel, response,
-                     rewriter::RewriteCode::UnsupportedStatement)) {
+                     raw, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                     /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
           // ALTER has several expression-bearing command carriers besides
           // mutations and MODIFY QUERY. In particular, compound column
           // declarations (DEFAULT/MATERIALIZED/ALIAS/EPHEMERAL), constraints,
@@ -482,10 +532,29 @@ bool preflightStorageIntegrityWrite(
       return true;
     }
     if (insert->select) {
+      // An ordinary target reads an Active source through the derived read;
+      // an SI target keeps the refusal (spec 2026-09-26 §7 "Sources"), and so
+      // does INSERT INTO FUNCTION, whose body is never rewritten.
+      const bool ordinary_target = insert->table
+        && !lookupStorageIntegrity(insert->getDatabase(), insert->getTable(), args).has_value();
+      bool table_source = false;
       if (rejectEmbeddedStorageIntegrityRead(
-            insert->select, sel, response)) {
+            insert->select, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+            /*allow_logical_reads=*/ordinary_target, &table_source, /*r2_position=*/false,
+            /*rewritten_body=*/insert->table != nullptr)) {
+        if (table_source && insert->table)
+          prependAccessedTable(response, sel, insert->getDatabase(), insert->getTable());
         return true;
       }
+    }
+    // A VALUES row is an expression no rewrite reaches. rewriter-go's SI
+    // namespace policy names an SI physical table, an IN operand or a table
+    // function there; a logical Active table in a FROM position is left to
+    // R2, which refuses every table read in a row afterwards.
+    for (const auto &row : insertValuesRows(ast)) {
+      if (rejectEmbeddedStorageIntegrityRead(row, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+                                             /*allow_logical_reads=*/true, nullptr, /*r2_position=*/true))
+        return true;
     }
     return false;
   }
@@ -496,11 +565,13 @@ bool preflightStorageIntegrityWrite(
       return true;
     }
     if (update->assignments && rejectEmbeddedStorageIntegrityRead(
-          update->assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+          update->assignments, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+          /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
       return true;
     }
     if (update->predicate && rejectEmbeddedStorageIntegrityRead(
-          update->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+          update->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+          /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
       return true;
     }
     return false;
@@ -512,7 +583,8 @@ bool preflightStorageIntegrityWrite(
       return true;
     }
     if (delete_query->predicate && rejectEmbeddedStorageIntegrityRead(
-          delete_query->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement)) {
+          delete_query->predicate, sel, response, rewriter::RewriteCode::UnsupportedStatement,
+          /*allow_logical_reads=*/false, nullptr, /*r2_position=*/true)) {
       return true;
     }
     return false;
@@ -628,6 +700,12 @@ WriteDispatchResult handleViewCreate(
 
 } // namespace
 
+bool storageIntegrityWritePreflight(const DB::ASTPtr &ast,
+                                    const TableRewriteSelection &sel,
+                                    rewriter::RewriteSQLResponse *response) {
+  return preflightStorageIntegrityWrite(ast, sel, response);
+}
+
 bool handleRemovedLiveViewCompatibility(
   const std::string &query,
   const rewriter::RewriteSQLRequest *request,
@@ -705,6 +783,10 @@ bool handleRemovedLiveViewCompatibility(
   create->is_ordinary_view = false;
   const auto sel = findActiveTableRewrite(request->options());
   if (preflightStorageIntegrityWrite(ast, sel, response)) return true;
+  // A live view is a view: its body may not read an Active table, which the
+  // CREATE preflight (now a CTAS-shaped create) no longer refuses (T4).
+  if (auto body = ownedChild(*create, create->select);
+      body && rejectEmbeddedStorageIntegrityRead(body, sel, response)) return true;
 
   rejectUnsupported(
     response, "CREATE LIVE VIEW / WINDOW VIEW is not supported");
@@ -724,13 +806,23 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
   const auto *dynamic = findDynamicArgs(request->options());
 
   // Before storage-integrity preflight, which skips an empty table name, and
-  // before any rewrite (see kQueryParameterWriteTargetMessage).
+  // before any rewrite. In dynamic mode the table-reference preflight has
+  // refused these already; this keeps Mode None and static requests safe.
   if (hasParameterWriteTarget(ast)) {
-    rejectInvalidRequest(response, std::string(kQueryParameterWriteTargetMessage));
+    rejectInvalidRequest(response, std::string(kIdentifierParameterMessage));
     return WriteDispatchResult::Rejected;
   }
 
   if (preflightStorageIntegrityWrite(ast, sel, response))
+    return WriteDispatchResult::Rejected;
+  // The table-reference checks that the preflight runs while the SI surface
+  // is inactive run here, after the SI write preflight, while it is active,
+  // so an SI-owned message wins (spec 2026-09-26 §5 precedence).
+  if (hasActiveStorageIntegrity(sel)
+      && (ast->as<DB::ASTCreateQuery>() || ast->as<DB::ASTInsertQuery>() || ast->as<DB::ASTAlterQuery>()
+          || ast->as<DB::ASTUpdateQuery>() || ast->as<DB::ASTDeleteQuery>())
+      && (rejectDisallowedCarriers(ast, response) || rejectQuerySettings(ast, response, &request->sql())
+          || rejectUngovernedReads(ast, request->sql(), response, &sel)))
     return WriteDispatchResult::Rejected;
 
   if (auto *create_query = ast->as<DB::ASTCreateQuery>()) {
@@ -830,6 +922,17 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       return WriteDispatchResult::Rejected;
     }
 
+    // Spec 2026-09-26 T4: a CREATE TABLE … AS SELECT body (EMPTY and OR
+    // REPLACE included) is rewritten and reported like a view body; its
+    // sources follow the target in original_accessed_tables.
+    if (create_query->select) {
+      if (auto body = ownedChild(*create_query, create_query->select)) {
+        rewriteEmbeddedBody(request->options(), body, response, EmbeddedBodyKind::CreateSelect);
+        if (response->code() != rewriter::RewriteCode::Success)
+          return WriteDispatchResult::Rejected;
+      }
+    }
+
     // CREATE TABLE x AS y — rewrite the AS source the same way. as_database /
     // as_table are plain Strings; the lambdas assign through to them.
     if (sel.mode != TableRewriteMode::None && !create_query->as_table.empty()) {
@@ -843,7 +946,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
       }
     }
 
-    acceptWrite(ast, response, rewriter::STATEMENT_TYPE_CREATE_TABLE);
+    setSuccessResponse(response, formatWrite(ast, *response, sel), rewriter::STATEMENT_TYPE_CREATE_TABLE);
     return WriteDispatchResult::Handled;
   }
 
@@ -1023,6 +1126,13 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
         [&](const std::string &s){ insert_query->setTable(s); })) {
       return WriteDispatchResult::Rejected;
     }
+    if (insert_query->select) {
+      if (auto body = ownedChild(*insert_query, insert_query->select.get())) {
+        rewriteEmbeddedBody(request->options(), body, response, EmbeddedBodyKind::InsertSelect);
+        if (response->code() != rewriter::RewriteCode::Success)
+          return WriteDispatchResult::Rejected;
+      }
+    }
     // ASTInsertQuery::formatImpl only emits the prelude (`INSERT INTO ...
     // [columns] [SETTINGS ...] [VALUES|FORMAT <fmt>]`); the inline payload
     // for `VALUES (...)` / `FORMAT <fmt> <bytes>` lives off-AST as raw
@@ -1033,7 +1143,7 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     // bytes verbatim so the downstream sees `... VALUES (1)` instead of a
     // bare `... FORMAT Values` (which would put the upstream into "wait for
     // wire-format data" mode and hang the client).
-    std::string sql = formatAst(ast);
+    std::string sql = formatWrite(ast, *response, sel);
     if (insert_query->data && insert_query->end > insert_query->data) {
       if (insert_query->format == "Values") {
         const std::string suffix = " FORMAT Values";

@@ -74,7 +74,7 @@
       "engine.test",
       "harness.test"
     ],
-    "cpp_tests": 1252,
+    "cpp_tests": 2217,
     "execution_fixtures": 102,
     "execution_states": 228,
     "analyzer_refusals": 78,

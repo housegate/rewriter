@@ -28,7 +28,35 @@ ffi=$(get files ffi)
 tool=$(get files profile_tool)
 ch=$(get files clickhouse)
 tz=$(get files tzdata)
-[[ $(git -C "$rc/third_party/rewriter-proto" rev-parse HEAD) == "$rp_sha" ]]
+# rewriter-proto: the RC build's gitlink may advance past the manifest's `rp`
+# pin (the pin names the protocol the prerequisites were measured against).
+# It is accepted only when (a) `rp` is an ancestor of the gitlink and (b) the
+# snapshot-query wire surface (the AnalyzeSnapshotQuery/PrepareSnapshotQuery
+# rpcs, the messages/enums they carry and their field-type closure, plus the
+# syntax/package lines; `snapshot-query-ci.py protocol`) is byte-identical at
+# both commits. History comes from a task-owned public fetch, because CI's
+# submodule checkout is shallow. Every other pin is unchanged.
+rp_head=$(git -C "$rc" ls-tree "$expected_rc" -- third_party/rewriter-proto | awk '$1 == "160000" && $2 == "commit" { print $3 }')
+if [[ ! $rp_head =~ ^[0-9a-f]{40}$ ]]; then
+ echo 'error: RC commit has no valid rewriter-proto gitlink' >&2; exit 1
+fi
+if [[ $(git -C "$rc/third_party/rewriter-proto" rev-parse HEAD) != "$rp_head" ]]; then
+ echo "error: rewriter-proto checkout is not at the RC gitlink $rp_head" >&2; exit 1
+fi
+rp_history=$work/rewriter-proto-history
+git init -q "$rp_history"
+git -C "$rp_history" remote add origin https://github.com/housegate/rewriter-proto.git
+git -C "$rp_history" fetch --no-tags -q origin "$rp_head"
+[[ $(git -C "$rp_history" rev-parse 'FETCH_HEAD^{commit}') == "$rp_head" ]]
+[[ -z $(git -C "$rp_history" for-each-ref --format='%(refname)' refs/replace/) ]]
+if ! git -C "$rp_history" merge-base --is-ancestor "$rp_sha" "$rp_head"; then
+ echo "error: pinned rewriter-proto $rp_sha is not an ancestor of the RC gitlink $rp_head" >&2; exit 1
+fi
+if ! python3 "$helper" protocol "$rp_history" "$rp_sha" "$rp_head" > "$work/protocol-surface.log" 2>&1; then
+ echo "error: snapshot-query proto surface differs between pinned rewriter-proto $rp_sha and the RC gitlink $rp_head" >&2
+ cat "$work/protocol-surface.log" >&2; exit 1
+fi
+cat "$work/protocol-surface.log"
 
 # Local rehearsal may provide exact bundle-derived checkouts via argv5/6. They
 # receive the same raw object/index/worktree verification as public CI fetches.
@@ -135,7 +163,7 @@ docker run --rm --name "$cpp" --label housegate.task="$prefix" --network none --
  ctest --test-dir /result/ctest --output-on-failure > /result/ctest.log 2>&1
  binary=/home/sentio/ci/rewriter-ci/build/tests/rewriter_tests
  GTEST_OUTPUT=xml:/result/si.xml "$binary" --gtest_filter="SpecG/StorageIntegrityGolden.*:StorageIntegrityCorpus.*:SINormalize.*" > /result/si.log 2>&1
- for spec in "SpecG/StorageIntegrityGolden.* 256" "StorageIntegrityCorpus.* 2" "SINormalize.* 11"; do
+ for spec in "SpecG/StorageIntegrityGolden.* 1106" "StorageIntegrityCorpus.* 2" "SINormalize.* 11"; do
   read -r family expected <<< "$spec"
   count=$(GTEST_OUTPUT= "$binary" --gtest_filter="$family" --gtest_list_tests | awk "/^  / { count++ } END { print count + 0 }")
   echo "$family cases: $count"
@@ -164,7 +192,7 @@ for attempt in range(100):
 # Native DSO/compiler fixtures require this compiler-capable pinned image and
 # executable private tmpfs. /src is also the original runtime.Caller path.
 docker run --rm --name "$native" --label housegate.task="$prefix" --network "$network" --read-only --user "$(id -u):$(id -g)" --cpus 4 --memory 8g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges=true --tmpfs /tmp:rw,exec,nosuid,nodev,size=2g --tmpfs /usr/share/zoneinfo:ro,size=1m --tmpfs /apex:ro,size=1m --tmpfs /data:ro,size=1m --tmpfs /system:ro,size=1m --tmpfs /config:ro,size=1m --tmpfs /pkg:ro,size=1m -v "$rg:/src:ro" -v "$work:/qualification:ro" -v "$work/native-run:/result:rw" -v "$ffi:/ffi.so:ro" -v "$ch:/clickhouse:ro" -v "$tz:/tzdata.tar:ro" -v "$work/timezone/zoneinfo:/tzdata:ro" -w /src -e REWRITER_ORACLE_ADDR=rewriter:50051 -e SNAPSHOT_CLICKHOUSE=/clickhouse -e SNAPSHOT_TZDATA_ARCHIVE=/tzdata.tar -e SNAPSHOT_DEADLINE_PROFILE=/qualification/deadline-profiles.json -e SNAPSHOT_RUN_LOG_DIR=/result -e TZDIR=/tzdata -e TZ=UTC "$native_image" bash scripts/test-snapshot-measured.sh run /qualification/native /ffi.so /qualification/service-profiles.json /qualification/service-corpus.json > "$work/native-run/all.log" 2>&1
-python3 "$verifier" "$rg" "$rg_sha" '' '' "$hg" "$hg_sha" '' '' "$rc" "$expected_rc" build 'clickHouse,third_party/rewriter-proto' "$rc/third_party/rewriter-proto" "$rp_sha" '' '' > "$work/source-after-run.log"
+python3 "$verifier" "$rg" "$rg_sha" '' '' "$hg" "$hg_sha" '' '' "$rc" "$expected_rc" build 'clickHouse,third_party/rewriter-proto' "$rc/third_party/rewriter-proto" "$rp_head" '' '' > "$work/source-after-run.log"
 git -C "$rc/clickHouse" status --porcelain=v1 --untracked-files=all > "$work/clickhouse-state-after.txt"
 cmp "$work/clickhouse-state-before.txt" "$work/clickhouse-state-after.txt"
 cat "$work/cpp-counts.json" "$work/native-run/counts.json" "$work/identities.json"

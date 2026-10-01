@@ -153,6 +153,15 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
     rejectUnsupported(response, "GRANT CURRENT GRANTS is not supported");
     return GrantDispatchResult::Rejected;
   }
+  // A prefix wildcard grant (`db1.o*`, `db1*.*`) covers every matching
+  // object; a delta has no shape for it. rewriter-go cannot structure it and
+  // answers the same message.
+  for (const auto &elem : grant->access_rights_elements) {
+    if (elem.wildcard) {
+      rejectUnsupported(response, std::string(kind) + " form is not supported");
+      return GrantDispatchResult::Rejected;
+    }
+  }
 
   // Validation context.
   if (!dynamic) {
@@ -177,6 +186,21 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
     rejectInvalidRequest(response,
       std::string(kind) + " has no grantees");
     return GrantDispatchResult::Rejected;
+  }
+
+  // A database or table name containing '*' (db1.`*`, `db1.*`, `*`.o, any
+  // quoting or escape ClickHouse decodes to '*') is one object to ClickHouse,
+  // but a delta consumer could read the name as a wildcard: refuse rather
+  // than risk widening it. Checked for every element before the per-element
+  // rejects, in rewriter-go's order (after grantees, before *.*).
+  for (const auto &elem : grant->access_rights_elements) {
+    if (elem.anyDatabase()) continue;
+    if (elem.database.find('*') != std::string::npos
+        || (!elem.anyTable() && elem.table.find('*') != std::string::npos)) {
+      rejectUnsupported(response, std::string(kind)
+        + " target names a database or table whose name contains '*', which a privilege delta cannot represent");
+      return GrantDispatchResult::Rejected;
+    }
   }
 
   const auto action = is_revoke ? rewriter::PrivilegeDelta::ACTION_REVOKE

@@ -419,8 +419,12 @@ void materialize(const rewriter::MaterializeSQLRequest *request,
   if (auto *insert = ast->as<DB::ASTInsertQuery>()) {
     if (insert->data && insert->data != insert->end) {
       has_insert_tail = true;
-      const std::string &fmt = insert->format;
-      if (fmt.empty() || fmt == "Values") {
+      // ClickHouse resolves a FORMAT name case-insensitively: `FORMAT values`
+      // rows run as Values and must be materialized like VALUES rows.
+      std::string fmt = insert->format;
+      std::transform(fmt.begin(), fmt.end(), fmt.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (fmt.empty() || fmt == "values") {
         if (!materializeValuesData(insert->data, insert->end, m, insert_tail)) {
           response->set_code(rewriter::MaterializeCode::MaterializeError);
           response->set_message("could not materialize INSERT VALUES data section");

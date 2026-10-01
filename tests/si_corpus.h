@@ -45,9 +45,9 @@ inline uint64_t Fingerprint(const std::string &raw) {
 // This repo locally pins its own exact corpus bytes, catching accidental edits
 // and stale local pins. Intentional updates require paired PRs with rewriter-go,
 // an explicit byte-for-byte cmp, and a SHA-256 recorded in each PR description.
-constexpr uint64_t kCorpusFingerprint = 7051648083520101593ULL;
-constexpr size_t kCorpusBytes = 254170;
-constexpr size_t kCorpusCases = 256;
+constexpr uint64_t kCorpusFingerprint = 12039323447960595199ULL;
+constexpr size_t kCorpusBytes = 1175400;
+constexpr size_t kCorpusCases = 1106;
 
 struct Accessed {
   std::string original_database;
@@ -104,7 +104,7 @@ inline const std::set<std::string> &DynamicKeys() {
     "database_map", "known_physical_databases",
     "upstream_logical_database_in_context", "upstream_physical_database_in_context",
     "delim", "logical_database_to_remote_upstream_index", "remote_upstreams",
-    "storage_integrity",
+    "storage_integrity", "protected_databases",
   };
   return keys;
 }
@@ -234,6 +234,7 @@ inline void ValidateDynamicSchema(const Poco::JSON::Object::Ptr &dynamic,
   JsonString(dynamic, "upstream_logical_database_in_context", path);
   JsonString(dynamic, "upstream_physical_database_in_context", path);
   JsonString(dynamic, "delim", path);
+  JsonStrings(dynamic, "protected_databases", path);
 
   const auto remote_upstreams = JsonObject(dynamic, "remote_upstreams", path);
   if (remote_upstreams) {
@@ -382,6 +383,10 @@ inline std::vector<std::string> ValidateCorpus(const std::vector<Case> &cases) {
     if (c.contract_version != "V1" && c.contract_version != "V2") {
       add("R8", "contract_version must be \"V1\" or \"V2\", got \""
                 + c.contract_version + "\"");
+    }
+    if (c.name.rfind("si_tr_", 0) == 0
+        && (!c.dynamic || JsonStrings(c.dynamic, "protected_databases").empty())) {
+      add("R9", "a si_tr_ case must set a non-empty dynamic.protected_databases");
     }
 
     if (c.want_code.empty()) {

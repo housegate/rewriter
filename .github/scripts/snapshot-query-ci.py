@@ -101,18 +101,141 @@ def generate(config, work, rg, rc):
 def counts(work):
     w = Path(work)
     suite = ET.parse(w/"cpp-run/gtest.xml").getroot()
-    assert int(suite.attrib["tests"]) == 1252
+    assert int(suite.attrib["tests"]) == 2217
     assert all(int(suite.attrib.get(k, "0")) == 0 for k in ("failures", "disabled", "errors"))
     cases = suite.findall(".//testcase")
-    assert len(cases) == 1252 and not suite.findall(".//skipped")
+    assert len(cases) == 2217 and not suite.findall(".//skipped")
     assert sum(c.attrib["classname"] == "SnapshotQuery" for c in cases) == 636
     text = (w/"cpp-run/ctest.log").read_text()
     assert "100% tests passed, 0 tests failed out of 3" in text
     assert not re.search(r"(?:Skipped|Not Run|DISABLED)", text)
     startup = (w/"cpp-run/ctest/Testing/Temporary/LastTest.log").read_text()
     assert "SKIP:" not in startup
-    print(json.dumps({"cpp_tests":1252,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
+    print(json.dumps({"cpp_tests":2217,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
+
+
+# The snapshot-query wire surface of rewriter-proto: the two RPCs the lane
+# calls (AnalyzeSnapshotQuery, PrepareSnapshotQuery; RC/RG snapshot handlers,
+# harness snapshot tests, tests/SNAPSHOT_QUERY.md) and the messages/enums they
+# carry. SURFACE_TYPES are the seeds; the check closes over every field type
+# they reference, so a referenced type (e.g. MaterializationInputs) is part of
+# the surface without being listed. Unknown names fail closed.
+SURFACE_RPCS = ("AnalyzeSnapshotQuery", "PrepareSnapshotQuery")
+SURFACE_TYPES = ("AnalyzeSnapshotQueryRequest", "AnalyzeSnapshotQueryResponse",
+                 "PrepareSnapshotQueryRequest", "PrepareSnapshotQueryResponse",
+                 "SnapshotQueryCatalogTable", "SnapshotQueryColumn",
+                 "SnapshotQueryColumnGeneration", "SnapshotQueryCode", "SnapshotScratchBinding")
+SCALARS = {"double", "float", "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32",
+           "fixed64", "sfixed32", "sfixed64", "bool", "string", "bytes"}
+
+
+def proto_code(line, where):
+    """The line without its // comment and with string literals blanked."""
+    out, i, quote = [], 0, None
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+            i += 1
+            continue
+        if line.startswith("//", i):
+            break
+        if line.startswith("/*", i):
+            raise SystemExit("error: unsupported block comment in " + where)
+        if c in "\"'":
+            quote = c
+        else:
+            out.append(c)
+        i += 1
+    if quote:
+        raise SystemExit("error: unterminated string literal in " + where)
+    return "".join(out)
+
+
+def proto_blocks(text):
+    """Top-level message/enum/service blocks, byte-exact, keyed by name."""
+    blocks, lines, i = {}, text.split("\n"), 0
+    while i < len(lines):
+        m = re.match(r"(message|enum|service)\s+([A-Za-z_]\w*)\s*\{", lines[i])
+        if not m:
+            if re.match(r"\s*(message|enum|service)\b", lines[i]) and not lines[i].startswith(" "):
+                raise SystemExit("error: unrecognised top-level declaration: " + lines[i])
+            i += 1
+            continue
+        start, depth = i, 0
+        while True:
+            code = proto_code(lines[i], m.group(2))
+            depth += code.count("{") - code.count("}")
+            i += 1
+            if depth == 0:
+                break
+            if i == len(lines):
+                raise SystemExit("error: unterminated block " + m.group(2))
+        name = m.group(2)
+        if name in blocks:
+            raise SystemExit("error: duplicate top-level declaration " + name)
+        blocks[name] = (m.group(1), "\n".join(lines[start:i]))
+    return blocks
+
+
+def surface(text):
+    blocks = proto_blocks(text)
+    header = [l for l in text.split("\n") if re.match(r"(syntax|package)\b", l)]
+    if len(header) != 2:
+        raise SystemExit("error: rewriter.proto must declare exactly one syntax and one package line")
+    out, todo = {}, list(SURFACE_TYPES)
+    while todo:
+        name = todo.pop()
+        if name in out:
+            continue
+        if name not in blocks or blocks[name][0] == "service":
+            raise SystemExit("error: snapshot-query surface type not found: " + name)
+        kind, body = blocks[name]
+        out[name] = body
+        if kind != "message":
+            continue
+        nested = set(re.findall(r"^\s+(?:message|enum)\s+([A-Za-z_]\w*)", body, re.M))
+        for line in body.split("\n")[1:]:
+            code = proto_code(line, name).strip()
+            f = re.fullmatch(r"(?:repeated\s+|optional\s+)?(map<\s*\w+\s*,\s*[\w.]+\s*>|[\w.]+)\s+\w+\s*=\s*\d+\s*(?:\[[^]]*\])?\s*;", code)
+            if not f:
+                if code and not re.fullmatch(r"\}|(?:message|enum|oneof)\s+\w+\s*\{|reserved\b.*;", code):
+                    raise SystemExit("error: unrecognised field in %s: %s" % (name, code))
+                continue
+            t = f.group(1)
+            m = re.fullmatch(r"map<\s*\w+\s*,\s*([\w.]+)\s*>", t)
+            t = m.group(1) if m else t
+            if t in SCALARS or t in nested:
+                continue
+            todo.append(t)
+    service = [b for k, b in blocks.values() if k == "service"]
+    if len(service) != 1 or not service[0].startswith("service RewriterService {"):
+        raise SystemExit("error: rewriter.proto must declare exactly one service RewriterService")
+    for rpc in SURFACE_RPCS:
+        found = [l.strip() for l in service[0].split("\n") if re.match(r"\s*rpc\s+%s\s*\(" % rpc, l)]
+        if len(found) != 1:
+            raise SystemExit("error: snapshot-query rpc not found exactly once: " + rpc)
+        out["rpc " + rpc] = found[0]
+    out["header"] = "\n".join(header)
+    return out
+
+
+def protocol(repo, pinned, head):
+    """The snapshot-query surface is byte-identical at the pinned and build proto."""
+    show = lambda sha: subprocess.check_output(["git", "-C", repo, "show", sha + ":proto/rewriter.proto"]).decode()
+    a, b = surface(show(pinned)), surface(show(head))
+    if a.keys() != b.keys():
+        raise SystemExit("error: snapshot-query proto surface names differ: %s vs %s" % (sorted(a), sorted(b)))
+    changed = sorted(k for k in a if a[k] != b[k])
+    if changed:
+        raise SystemExit("error: snapshot-query proto surface changed between %s and %s: %s" % (pinned, head, ", ".join(changed)))
+    for k in sorted(a):
+        print("%s %s" % (hashlib.sha256(a[k].encode()).hexdigest(), k))
+    print("snapshot-query proto surface identical: %d blocks, %s -> %s" % (len(a), pinned, head))
 
 
 if __name__ == "__main__":
-    {"inputs": inputs, "generate": generate, "counts": counts}[sys.argv[1]](*sys.argv[2:])
+    {"inputs": inputs, "generate": generate, "counts": counts, "protocol": protocol}[sys.argv[1]](*sys.argv[2:])

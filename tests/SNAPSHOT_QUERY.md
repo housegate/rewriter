@@ -26,6 +26,8 @@ a name/type hash cannot conceal changed generation semantics. Ineligible
 untouched tables remain in the input catalog; full-state preservation is a
 later executor obligation because these RPCs return only target/read closure.
 
+The private paired CI lane pins the rewriter-proto commit its prerequisites were measured against (`rp` in `testdata/snapshot_query_ci_pins.json`). A newer build gitlink is accepted only when `rp` is its ancestor and the snapshot-query proto surface is byte-identical. The surface is the two rpcs, the messages and enums they carry with their field-type closure, and the syntax/package lines. The rule is in `.github/scripts/snapshot-query-ci.md`.
+
 ## Initial profile
 
 `testdata/snapshot_query_profile_record.json` is an unmeasured record template

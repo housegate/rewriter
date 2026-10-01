@@ -1,5 +1,7 @@
 #include "handlers/describe.h"
 
+#include <Parsers/ASTIdentifier.h>
+#include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/TablePropertiesQueriesASTs.h>
 
 #include <algorithm>
@@ -65,6 +67,16 @@ std::optional<DescribeTarget> parseDescribeTarget(const std::string &sql) {
   return out;
 }
 
+// The table a DESCRIBE names, as ClickHouse parsed it (decoded, whatever
+// comments or spacing surround it); nullptr for a table-function or subquery
+// target.
+DB::ASTTableIdentifier *describeTableIdentifier(const DB::ASTPtr &ast) {
+  const auto *describe = ast->as<DB::ASTDescribeQuery>();
+  auto *te = describe && describe->table_expression
+    ? describe->table_expression->as<DB::ASTTableExpression>() : nullptr;
+  return te && te->database_and_table_name ? te->database_and_table_name->as<DB::ASTTableIdentifier>() : nullptr;
+}
+
 void reject(
   rewriter::RewriteSQLResponse *response, rewriter::RewriteCode code, const std::string &message) {
   response->set_code(code);
@@ -77,8 +89,19 @@ bool handleDescribeQuery(DB::ASTPtr ast,
   const rewriter::RewriteSQLRequest *request,
   rewriter::RewriteSQLResponse *response) {
   if (!ast->as<DB::ASTDescribeQuery>()) return false;
-  const auto parsed = parseDescribeTarget(request->sql());
+  auto *identifier = describeTableIdentifier(ast);
+  auto parsed = parseDescribeTarget(request->sql());
+  // The object keyword (TABLE / DATABASE / VIEW / DICTIONARY) comes from the
+  // text; a table target's name comes from the AST, since the text pattern
+  // misreads a comment or line break around the name (`DESCRIBE TABLE /*c*/
+  // hg_safe.db1__t` read as a table named TABLE).
+  if (!parsed && identifier) parsed = DescribeTarget{};
   if (!parsed) return false;
+  if (parsed->object == "TABLE" && identifier && !identifier->isParam()) {
+    const auto &parts = identifier->name_parts;
+    parsed->database = parts.size() >= 2 ? parts.front() : std::string();
+    parsed->table = parts.back();
+  }
   const auto selection = findActiveTableRewrite(request->options());
 
   if (selection.mode == TableRewriteMode::Dynamic) {
@@ -119,11 +142,42 @@ bool handleDescribeQuery(DB::ASTPtr ast,
           storageIntegrityUnauthorizedMessage(logical));
         return true;
       }
+      // The synthetic metadata SELECT carries no FORMAT / INTO OUTFILE /
+      // SETTINGS: refused rather than dropped (rewriter-go refuses them).
+      if (ast->as<DB::ASTDescribeQuery>()->hasOutputOptions()) {
+        reject(response, rewriter::RewriteCode::UnsupportedStatement, "statement is not supported");
+        return true;
+      }
       setSuccessResponse(response,
         describeMetadataSQL(hit->table->safe_table(), reservedRowIdColumn(args)),
         rewriter::STATEMENT_TYPE_DESCRIBE);
       return true;
     }
+  }
+
+  // Spec 2026-09-26 R7: an unqualified target resolves like a FROM reference
+  // (a bare quoted `db2.x` is a table named db2.x in the session's logical
+  // database); passed through, ClickHouse would bind it in the physical
+  // database. A qualified target stays verbatim.
+  if (selection.mode == TableRewriteMode::Dynamic && identifier && !identifier->isParam()
+      && parsed->database.empty()) {
+    const auto outcome = applyDynamicRewrite("", parsed->table, *selection.dynamic_args, "DESCRIBE");
+    if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
+      reject(response, rewriter::RewriteCode::InvalidRewriteRequest, outcome.reject_reason);
+      return true;
+    }
+    if (outcome.status == DynamicRewriteStatus::OkRemote) {
+      reject(response,
+        rewriter::RewriteCode::UnsupportedStatement,
+        "DESCRIBE target's logical resolves to a remote upstream "
+        "(via dynamic_args.logical_database_to_remote_upstream_index); "
+        "remote() can only appear as a SELECT-side table function");
+      return true;
+    }
+    identifier->resetTable(outcome.physical_db, outcome.new_table);
+    recordTableRewrite(response, "", parsed->table, outcome.physical_db, outcome.new_table);
+    setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_DESCRIBE);
+    return true;
   }
 
   setSuccessResponse(response, request->sql(), rewriter::STATEMENT_TYPE_DESCRIBE);

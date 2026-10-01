@@ -1,4 +1,5 @@
 #include "ASTTransformers.h"
+#include "handlers/common.h"
 
 #include <Common/SettingsChanges.h>
 #include <Common/SipHash.h>
@@ -51,6 +52,7 @@ std::unordered_map<String, ASTPtr> parseCTEMapToAST(
       ParserQuery sub_parser(sub_end, false);
       ASTPtr sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
       if (sub_ast) {
+        rewriter_handlers::registerFieldOnlyChildren(*sub_ast);
         out.emplace(alias, std::move(sub_ast));
       } else {
         // parseQuery returned nullptr without throwing — treat as failure so

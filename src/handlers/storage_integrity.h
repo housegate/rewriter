@@ -10,6 +10,10 @@
 
 #include "rewriter.grpc.pb.h"
 
+namespace DB {
+class ASTFunction;
+}
+
 namespace rewriter_handlers {
 
 constexpr std::string_view kDefaultReservedRowIdColumn = "_hg_row_id";
@@ -112,6 +116,9 @@ struct NamespaceRef {
   std::string table;
   bool resolved = false;
   bool uses_current_database = false;
+  // InTable only: the SELECT handler rewrites this operand itself (see
+  // collectStorageIntegrityNamespaceRefs), so the exact-key check is skipped.
+  bool rewritten_read = false;
 };
 
 // One read-bearing AST event in grammar/source order. Keeping ordinary table
@@ -122,6 +129,16 @@ struct StorageIntegrityReadRef {
   std::string database;
   std::string table;
   NamespaceRef namespace_ref;
+  // Table only: database/table come from splitting a one-part quoted name
+  // (`db1.t`) at its first dot. The name is one table of the current
+  // database, so it never becomes the derived read of the SI table the split
+  // names; that reading can only be refused, never admitted.
+  bool split_one_part = false;
+  // Table only: the table sits inside the arguments of a table function
+  // other than view() (viewIfPermitted, viewExplain, executable, …). An
+  // INSERT … SELECT / CTAS body never admits an Active table there as a
+  // derived read (spec 2026-09-26 T4); T5 decides the function itself.
+  bool inside_non_view_table_function = false;
 };
 
 // Compatibility shim for SI syntax accepted by the Go parser but absent from
@@ -149,8 +166,56 @@ bool prepareStorageIntegritySQL(const std::string &sql,
 void restoreStorageIntegritySQL(
   rewriter::RewriteSQLResponse *response, const StorageIntegritySQLCompatibility &compatibility);
 
-std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast);
-std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast);
+// How a one-part IN operand is read by collectStorageIntegrityNamespaceRefs.
+enum class InOperandReading {
+  // The conservative default, required wherever the operand reaches
+  // ClickHouse verbatim (mutations): a dotted one-part name is split at its
+  // first dot (`db1.t` is refused as the SI table db1.t) and an Active table
+  // is refused.
+  Split,
+  // A write statement whose body the SELECT pipeline rewrites (INSERT …
+  // SELECT, CTAS, view bodies): inside the rewritten body a one-part operand
+  // is read like SelectRewrite (the whole name against the current database,
+  // exempt from the exact-SI-key refusal: the rewrite turns an Active table
+  // into the derived read); in an R2 position of the statement (unbound) the
+  // split reading above, and also the whole name. Either refusal wins there.
+  SplitAndWhole,
+  // The SELECT handler, which rewrites the operand itself: the whole name
+  // against the current database only, exempt from the exact-SI-key refusal
+  // because the rewrite turns an Active table into the derived read.
+  SelectRewrite,
+};
+std::vector<NamespaceRef> collectStorageIntegrityNamespaceRefs(const DB::ASTPtr &ast,
+  InOperandReading reading = InOperandReading::Split);
+
+// The refs minus the qualified (two or more parts) IN-operand targets: the
+// SELECT walk collects those as read sources keyed by (database, table)
+// identity, so its target check classifies them (spec 2026-09-26 T4). A
+// one-part operand stays: it reads through the current database, and whether
+// that database is resolvable or an SI physical one is only decided here
+// (rejectStorageIntegrityNamespaces, which exempts an IN ref from the
+// exact-SI-key check because the derived read handles an Active table).
+std::vector<NamespaceRef> withoutQualifiedInOperandRefs(std::vector<NamespaceRef> refs);
+
+// The (database, table) a namespace-carrying table function or table engine
+// names in its literal arguments, or nullopt for any other function. Shared
+// with the table-reference preflight (T3), which reads only `database`.
+std::optional<NamespaceRef> decodeTableFunctionNamespace(const DB::ASTFunction &fn);
+std::optional<NamespaceRef> decodeTableEngineNamespace(const DB::ASTFunction &engine);
+
+// The static string a namespace-carrying argument spells: a string literal's
+// value or an identifier's dotted name; nullopt for anything else.
+std::optional<std::string> staticNamespaceArgValue(const DB::ASTPtr &arg);
+// Whether a WITH alias binds a later FROM / IN name (cte_scope.h). A SELECT
+// body binds its CTEs and qualifying WITH / projection aliases; ClickHouse
+// binds none in a structured mutation, a column / constraint / storage
+// expression or a structured ALTER action (measured on 26.2 and 25.8:
+// `DELETE … WHERE a IN (WITH c AS (…) SELECT x FROM c)` reads the table c, and
+// so do WITH RECURSIVE, CHECK / ASSUME, TTL and INDEX expressions), so R2
+// collects those with every name read as a table (Unbound).
+enum class CTEBinding { Bound, Unbound };
+std::vector<StorageIntegrityReadRef> collectStorageIntegrityReadRefs(const DB::ASTPtr &ast,
+  CTEBinding binding = CTEBinding::Bound, InOperandReading reading = InOperandReading::Split);
 bool rejectStorageIntegrityNamespaces(rewriter::RewriteSQLResponse *response,
   const std::vector<NamespaceRef> &refs,
   const rewriter::RewriteTableDynamicArgs &args,
@@ -169,10 +234,12 @@ bool rejectUnmodelledStorageIntegrityStatement(const DB::ASTPtr &ast,
 // storage-integrity object the statement addressed (Spec I D2). Message-only:
 // Success is never touched, a response that already carries an SI-flagged
 // accessed table keeps its own message, and a statement that names nothing
-// storage-integrity keeps the caller's message.
+// storage-integrity keeps the caller's message. Only names `ast` proves count
+// (rewriter-go AnnotateStorageIntegrityRejectAST): `ast` is the statement as
+// parsed, before any handler rewrote it. Never throws: it runs from a
+// destructor, and on an internal error the caller's message is kept.
 void annotateStorageIntegrityReject(rewriter::RewriteSQLResponse *response,
   const DB::ASTPtr &ast,
-  const std::string &sql,
   const rewriter::RewriteTableDynamicArgs &args);
 
 } // namespace rewriter_handlers

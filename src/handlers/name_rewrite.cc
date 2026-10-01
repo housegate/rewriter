@@ -4,6 +4,7 @@
 #include <sstream>
 
 #include "handlers/storage_integrity.h"
+#include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
 
@@ -104,9 +105,13 @@ std::optional<std::string> resolvePhysicalDatabase(
   if (auto it = args.database_map().find(logical_db); it != args.database_map().end()) {
     return it->second;
   }
-  // 2) Already a physical DB the user knows about -> passthrough.
+  // 2) Already a physical DB the user knows about -> passthrough, unless it
+  //    is protected (spec 2026-09-26 §6: a name in both lists is protected).
   for (const auto &p : args.known_physical_databases()) {
-    if (p == logical_db) return logical_db;
+    if (p == logical_db) {
+      if (protectedDatabase(logical_db, args)) return std::nullopt;
+      return logical_db;
+    }
   }
   return std::nullopt;
 }

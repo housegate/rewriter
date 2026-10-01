@@ -21,6 +21,10 @@
 //
 // Variants rejected as UnsupportedStatement:
 //   * `ON *.*` (global scope).
+//   * A prefix wildcard target (`db1.o*`, `db1*.*`): `<KIND> form is not
+//     supported`.
+//   * A target whose database or table name contains '*' (db1.`*`, `db1.*`,
+//     `*`.o): a delta consumer could read it as a wildcard.
 //   * `GRANT role TO user` / `REVOKE role FROM user` (role-membership grants
 //     — distinct from granting a privilege whose recipient name happens to
 //     refer to a role; the latter cannot be distinguished at parse time).

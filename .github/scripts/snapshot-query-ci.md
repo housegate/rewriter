@@ -15,6 +15,13 @@ Docker image IDs must already exist. Missing, different or unsupported inputs fa
 before qualification. There is no `/tmp` fallback, source-label digest override,
 mutable image tag or automatic cache refresh.
 
+The manifest's `rp` pin names the rewriter-proto commit the prerequisites were measured against. The RC build's `third_party/rewriter-proto` gitlink may advance past it, for example when a branch adds Rewrite-only fields. It is accepted only when both conditions hold:
+
+- `rp` is an ancestor of the gitlink. This is checked in a task-owned full-history public fetch, because CI's submodule checkout is shallow.
+- `snapshot-query-ci.py protocol` finds the snapshot-query wire surface byte-identical at both commits. The surface is the `AnalyzeSnapshotQuery` / `PrepareSnapshotQuery` rpc lines, the messages and enums they carry with the closure of their field types (including `MaterializationInputs`), and the `syntax` / `package` lines.
+
+A missing name, an unrecognised declaration or any changed block fails closed with an explicit error. The post-run source verifier checks the checkout against the gitlink. RG's own `rewriter-proto` dependency must still equal `rp`, and every other pin and prerequisite is unchanged.
+
 Every required run freshly builds RC through `./scripts.sh rebuild` and explicit
 `ninja -C build rewriter_tests`, then freshly compiles the pinned RG root, engine
 and harness test binaries in the pinned Go 1.26.4 image. All ordinary Go tests and
