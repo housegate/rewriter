@@ -11414,8 +11414,9 @@ TEST(TableRefBinding, NamesThatBindAreLeftUnreported) {
     {"WITH (1, 2) AS s SELECT * FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN s)", "s"},
     {"WITH (SELECT 1) AS s SELECT * FROM db1.o WHERE a IN s", "s"},
     {"WITH [1, 2] AS s SELECT * FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a GLOBAL IN s)", "s"},
-    // ((-1, 'x')) is refused as a meaning-changing fold (MeaningChangingLiteralFoldsAreRefused).
     {"WITH ((-1), 'x') AS s SELECT * FROM db1.o WHERE (a, b) IN s", "s"},
+    // A grouped literal tuple keeps its grouping (MeaningChangingLiteralFoldsAreRefused).
+    {"WITH ((-1, 'x')) AS s SELECT * FROM db1.o WHERE (a, b) IN s", "s"},
     {"WITH identity(secret) AS s SELECT * FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE notIn(a, s))", "s"},
     {"WITH NULL AS s SELECT * FROM db1.o AS s WHERE a IN s", "s"},
     {"WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN c)", "c"},
@@ -11764,54 +11765,62 @@ int main(int argc, char **argv) {
 
 // Task I3 fix round 2 (re-review I-1): the embedded 26.3 parser folds a
 // literal tuple wrapped in an extra pair of grouping parentheses, `((1, 2))`,
-// into the flat `(1, 2)` and re-emits it. ClickHouse 25.8 and 26.2 read the
-// source as a one-element tuple of a tuple (measured: `SELECT ((1, 2))` gives
-// `((1,2))` of type Tuple(Tuple(UInt8, UInt8)); `1 IN ((1, 2))` is error 43;
-// `((1, 2)).1` is `(1,2)`), so the re-emitted SQL means something else there.
-// The source spelling cannot be preserved, so such a statement is refused
-// (`statement is not supported`) on a would-be Success, in both SI states.
-// Same for a float literal that underflows to zero (`1e-400`): 25.8 rejects it
-// (error 62), the formatter re-emits `0.`. A call's own parentheses, a tuple
-// that is not a literal for those parsers (an expression, an array, a trailing
-// comma) and the inline VALUES data (forwarded verbatim) are admitted.
+// into the flat `(1, 2)`. ClickHouse 25.8 and 26.2 read the source as a
+// one-element tuple of a tuple (measured: `SELECT ((1, 2))` gives `((1,2))` of
+// type Tuple(Tuple(UInt8, UInt8)); `1 IN ((1, 2))` is error 43; `((1, 2)).1`
+// is `(1,2)`), so re-emitting the flat form would change the meaning there.
+// Since the Sentio driver report (gap 2) such a group is preserved: the output
+// spells `((1, 2))` as the source did (adoptLiteralFolds), with at most the
+// formatter's own outer priority parentheses added or dropped and its usual
+// literal spelling (`+2` -> `2`, `x'30'` -> `'0'`); measured on 25.8, 26.2
+// and 26.3, input and output read the same. What cannot be preserved stays
+// refused (`statement is not supported`) on a would-be Success, in both SI
+// states: a float literal below the smallest normal double (`1e-400`: 25.8
+// rejects it, error 62, the formatter re-emits `0.`), a group in a clause the
+// marked parse cannot take (`DROP PARTITION ((1, 2))`), a group whose marked
+// tree differs from the source's (a fold beside other tuple elements, where
+// the parser merges the literals into one), and a source that spells the
+// marker itself.
 TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
-           "SELECT ((1, 2))",
-           "SELECT (((1, 2)))",
-           "SELECT toTypeName(((1, 2)))",
-           "SELECT ((1, 2)).1 AS v FROM db1.o",
-           "SELECT a FROM db1.o WHERE a IN ((1, 2))",
-           "SELECT ((1, 2)) FROM db1.t",
-           "SELECT a FROM db1.t WHERE (a, b) = ((1, 2))",
-           "SELECT untuple(((1, 2)))",
-           "SELECT tupleElement(((1, 2)), 1)",
-           "SELECT ((1, 2)) FORMAT JSONEachRow",
-           "SELECT toString(((1, 2))), -((1, 2)), ((1, 2)) + ((3, 4))",
-           "INSERT INTO db1.o SELECT ((1, 2)).1 FROM db1.o",
-           "SELECT ( /*c*/ (1, 2) /*d*/ )",
-           "SELECT (((1, 2), (3, 4)))",
-           "SELECT [((1, 2))], map(1, ((1, 2)))",
-           "SELECT ((1, 2) AS x) FROM db1.o",
-           "SELECT (((1, 2)) AS x)",
-           "SELECT ((-1, +2)), ((x'30', $$a$$)), ((NULL, true, inf, nan))",
-           "SELECT ((1, (2, 3)))",
-           "WITH ((-1, 'x')) AS s SELECT * FROM db1.o WHERE (a, b) IN s",
-           "CREATE TABLE db1.n (a Tuple(Tuple(UInt8, UInt8)) DEFAULT ((1, 2))) ENGINE = MergeTree ORDER BY tuple()",
-           "CREATE VIEW db1.v AS SELECT ((1, 2)) AS x",
-           "ALTER TABLE db1.o DELETE WHERE a IN ((1, 2))",
            "ALTER TABLE db1.o DROP PARTITION ((1, 2))",
            "SELECT 1e-400",
            "SELECT a FROM db1.o WHERE a > -1e-0400",
-           // Fix round 3 (re-review 2 I-2a): any fold in the source is refused,
-           // even one the formatter keeps (`IN ((1, 2) AS z)`) or one inside a
-           // call whose name is a keyword word (`array(((1, 2)))` is emitted
-           // as `array((1, 2))`: Array(Tuple(Tuple(…))) becomes
-           // Array(Tuple(…)) on 25.8 / 26.2).
-           "SELECT * FROM db1.t WHERE a IN ((1, 2) AS z)",
-           "SELECT * FROM db1.o WHERE (a, b) IN ((1,2) AS z)",
-           "SELECT any (((1, 2)))",
-           "SELECT array (((1, 2))) FROM db1.o",
+           "SELECT (((1, 2)), 3)",
+           "SELECT (((1,2), ((3,4))))",
+           "SELECT ((1, 2)), __housegate_grouped_literal_tuple",
+           "SELECT ((1, 2)) FROM db1.o WHERE a > 1e-400",
+           // Fix round 1 (review I-1): a group of literal-tuple shape whose
+           // nested brackets are not literal tuples for 25.8 / 26.2. The
+           // embedded parser folds them into a literal anyway, so a preserved
+           // grouping would print `((1, 2))` where 25.8 / 26.2 read `(1, 2)`
+           // in the source (measured): refused, as v0.16.0 refused them.
+           "SELECT toString(((1, (2))))",
+           "SELECT 1 IN ((1, (2)))",
+           "SELECT a FROM db1.o WHERE a IN ((1, (2)))",
+           "INSERT INTO db1.o (a, b, s) SELECT 9, 9, toString(((1, (2))))",
+           "SELECT toTypeName(((1, (2, 3), (4))))",
+           "SELECT ((1, (2)))", "SELECT (((1), 2))", "SELECT ((1, ((2))))", "SELECT ((1, (-2)))",
+           "SELECT ((+(1), 2))", "SELECT ((1, ('a')))", "SELECT ((1, (NULL)))", "SELECT ((1, (inf)))",
+           "SELECT ((1, (2, 3,)))", "SELECT (((1, 2), (3)))", "SELECT ((1, (2, 3), (4)))",
+           "SELECT ((1, ((2, 3))))", "SELECT ((1, -(2, 3)))", "SELECT ((1, ()))",
+           // Fix round 2 (re-review R1-I-1): a sign before anything but a
+           // number or inf / infinity / nan makes the tuple an expression on
+           // 25.8 / 26.2, while the embedded parser drops a `+` and folds it.
+           "SELECT toString(((1, +'a')))",
+           "SELECT a FROM db1.o WHERE s IN ((+'a', +'b'))",
+           "INSERT INTO db1.o (a, b, s) SELECT 9, 9, toString(((1, +'a')))",
+           "CREATE TABLE db1.n (a UInt8, q String DEFAULT toString(((1, +'a')))) ENGINE = MergeTree ORDER BY a",
+           "CREATE VIEW db1.n AS SELECT a FROM db1.o WHERE s IN ((+'a', +'b'))",
+           "SELECT ((+NULL, 1))", "SELECT ((1, +x'31'))", "SELECT ((1, +b'1'))", "SELECT ((1, +$$a$$))",
+           "SELECT ((1, +$t$a$t$))", "SELECT ((1, +true))", "SELECT ((1, +FALSE))", "SELECT ((1, +null))",
+           "SELECT ((1, + 'a'))", "SELECT ((1, +/*c*/'a'))", "SELECT ((1, -'a'))", "SELECT ((1, -NULL))",
+           "SELECT ((1, (1, +'a')))", "SELECT (((1, +'a'), 1))",
+           // Fix round 2 (R1-M-1): `NOT (` is a call to 25.8 / 26.2 and an
+           // operator over a grouping to 26.3; a fold right after it is refused.
+           "SELECT NOT ((1, 2)) = ((1, 2))", "SELECT NOT ((1, 2)) != ((3, 4))", "SELECT NOT ((1, 2)) IN ((1, 2))",
+           "SELECT NOT ((0, 1)) IN ((0, 1))", "SELECT NOT ((1, 2))", "SELECT not /*c*/ ((1, 2))",
            // I-2b: a non-zero float below the smallest normal double. 25.8
            // rejects it (error 62); the formatter re-emits a value it accepts
            // (`2.2250738585072013e-308` -> `2.2250738585072014e-308`).
@@ -11825,6 +11834,75 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.sql_after_rewrite();
       EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
       EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    }
+    const std::string t = si ? "(SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS `db1.t`"
+                             : "phys.`db1.t` AS `db1.t`";
+    for (const auto &[sql, want] : std::vector<std::pair<std::string, std::string>>{
+           {"SELECT ((1, 2))", "SELECT ((1, 2))"},
+           {"SELECT (((1, 2)))", "SELECT ((1, 2))"},
+           {"SELECT ((((1, 2))))", "SELECT ((1, 2))"},
+           {"SELECT toTypeName(((1, 2)))", "SELECT toTypeName(((1, 2)))"},
+           {"SELECT ((1, 2)).1 AS v FROM db1.o", "SELECT (((1, 2))).1 AS v FROM phys.`db1.o` AS `db1.o`"},
+           {"SELECT a FROM db1.o WHERE a IN ((1, 2))", "SELECT a FROM phys.`db1.o` AS `db1.o` WHERE a IN ((1, 2))"},
+           {"SELECT ((1, 2)) FROM db1.t", "SELECT ((1, 2)) FROM " + t},
+           {"SELECT a FROM db1.t WHERE (a, b) = ((1, 2))", "SELECT a FROM " + t + " WHERE (a, b) = ((1, 2))"},
+           {"SELECT untuple(((1, 2)))", "SELECT untuple(((1, 2)))"},
+           {"SELECT tupleElement(((1, 2)), 1)", "SELECT tupleElement(((1, 2)), 1)"},
+           {"SELECT ((1, 2)) FORMAT JSONEachRow", "SELECT ((1, 2)) FORMAT JSONEachRow"},
+           {"SELECT toString(((1, 2))), -((1, 2)), ((1, 2)) + ((3, 4))",
+            "SELECT toString(((1, 2))), -((1, 2)), ((1, 2)) + ((3, 4))"},
+           {"INSERT INTO db1.o SELECT ((1, 2)).1 FROM db1.o",
+            "INSERT INTO phys.`db1.o` SELECT (((1, 2))).1 FROM phys.`db1.o` AS `db1.o`"},
+           {"SELECT ( /*c*/ (1, 2) /*d*/ )", "SELECT ((1, 2))"},
+           {"SELECT (((1, 2), (3, 4)))", "SELECT (((1, 2), (3, 4)))"},
+           {"SELECT [((1, 2))], map(1, ((1, 2)))", "SELECT [((1, 2))], map(1, ((1, 2)))"},
+           {"SELECT ((1, 2) AS x) FROM db1.o", "SELECT ((1, 2) AS x) FROM phys.`db1.o` AS `db1.o`"},
+           {"SELECT (((1, 2)) AS x)", "SELECT ((1, 2)) AS x"},
+           {"SELECT ((-1, +2)), ((x'30', $$a$$)), ((NULL, true, inf, nan))",
+            "SELECT ((-1, 2)), (('0', 'a')), ((NULL, true, inf, nan))"},
+           {"SELECT ((1, (2, 3)))", "SELECT ((1, (2, 3)))"},
+           {"SELECT ((1, (-2, +3), ('a', NULL), (inf, nan), (2, (3, 4)), ((2, 3), (4, 5))))",
+            "SELECT ((1, (-2, 3), ('a', NULL), (inf, nan), (2, (3, 4)), ((2, 3), (4, 5))))"},
+           // Review M-1: a GROUPING SETS set's own parenthesis is syntax, so
+           // `(((1, 2)))` there is the set `((1, 2))` and is re-emitted as is.
+           {"SELECT a FROM db1.o GROUP BY GROUPING SETS (((1, 2)))",
+            "SELECT a FROM phys.`db1.o` AS `db1.o` GROUP BY GROUPING SETS (((1, 2)))"},
+           {"SELECT a FROM db1.o GROUP BY GROUPING SETS (((1, 2)), (a))",
+            "SELECT a FROM phys.`db1.o` AS `db1.o` GROUP BY GROUPING SETS (((1, 2)), (a))"},
+           {"SELECT a FROM db1.o GROUP BY GROUPING SETS ((((1, 2))), (a))",
+            "SELECT a FROM phys.`db1.o` AS `db1.o` GROUP BY GROUPING SETS ((((1, 2))), (a))"},
+           {"WITH ((-1, 'x')) AS s SELECT * FROM db1.o WHERE (a, b) IN s",
+            "WITH ((-1, 'x')) AS s SELECT * FROM phys.`db1.o` AS `db1.o` WHERE (a, b) IN (s)"},
+           {"CREATE TABLE db1.n (a Tuple(Tuple(UInt8, UInt8)) DEFAULT ((1, 2))) ENGINE = MergeTree ORDER BY tuple()",
+            "CREATE TABLE phys.`db1.n` (`a` Tuple(Tuple(UInt8, UInt8)) DEFAULT ((1, 2))) ENGINE = MergeTree ORDER BY tuple()"},
+           {"CREATE VIEW db1.v AS SELECT ((1, 2)) AS x", "CREATE VIEW phys.`db1.v` AS SELECT ((1, 2)) AS x"},
+           {"ALTER TABLE db1.o DELETE WHERE a IN ((1, 2))", "ALTER TABLE phys.`db1.o` (DELETE WHERE a IN ((1, 2)))"},
+           {"ALTER TABLE db1.o UPDATE b = 1 WHERE a IN ((1, 2))",
+            "ALTER TABLE phys.`db1.o` (UPDATE  b = 1 WHERE a IN ((1, 2)))"},
+           {"DELETE FROM db1.o WHERE a IN ((1, 2))", "DELETE FROM phys.`db1.o` WHERE a IN ((1, 2))"},
+           {"SELECT * FROM db1.t WHERE a IN ((1, 2) AS z)", "SELECT * FROM " + t + " WHERE a IN ((1, 2) AS z)"},
+           {"SELECT * FROM db1.o WHERE (a, b) IN ((1,2) AS z)",
+            "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE (a, b) IN ((1, 2) AS z)"},
+           {"SELECT * FROM db1.o WHERE (a, b) IN ((1, 2) AS z) AND c IN ((3, 4))",
+            "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE ((a, b) IN ((1, 2) AS z)) AND (c IN ((3, 4)))"},
+           {"SELECT any (((1, 2)))", "SELECT any(((1, 2)))"},
+           {"SELECT array (((1, 2))) FROM db1.o", "SELECT array(((1, 2))) FROM phys.`db1.o` AS `db1.o`"},
+           {"SELECT ((1, 2))[1], ((1, 2)) = ((1, 2))", "SELECT ((1, 2))[1], ((1, 2)) = ((1, 2))"},
+           // Fix round 2: a sign before a number or inf / infinity / nan keeps
+           // the tuple literal (measured on 25.8 / 26.2 / 26.3).
+           {"SELECT ((1, +1, -0x10, +1e3, +inf, -Infinity, +NaN, - 1, +/*c*/2))",
+            "SELECT ((1, 1, -16, 1000., inf, -inf, nan, -1, 2))"},
+           {"SELECT CAST(((1, 2)) AS String)", "SELECT CAST(((1, 2)), 'String')"},
+           {"WITH ((1, 2)) AS s SELECT s", "WITH ((1, 2)) AS s SELECT s"},
+           {"INSERT INTO db1.o (a) SELECT ((1, 2)) FROM db1.p",
+            "INSERT INTO phys.`db1.o` (a) SELECT ((1, 2)) FROM phys.`db1.p` AS `db1.p`"},
+           {"SELECT ((1, 2)) FROM db1.o UNION ALL SELECT ((3, 4)) FROM db1.p",
+            "SELECT ((1, 2)) FROM phys.`db1.o` AS `db1.o` UNION ALL SELECT ((3, 4)) FROM phys.`db1.p` AS `db1.p`"},
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(), want);
     }
     for (const std::string sql : {
            "SELECT (1, 2)",
@@ -11840,12 +11918,14 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
            "INSERT INTO db1.o VALUES ((1, 2))",
            "INSERT INTO db1.o (a) VALUES (((1, 2)))",
            "SELECT 0e-400, 1e-30, 2.3e-308, -1e-307",
+           "SELECT __housegate_grouped_literal_tuple((1, 2))",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
     }
-    // Every keyword-named single-argument call the re-review found admitted.
+    // Keyword-named single-argument calls: the inner group is preserved and
+    // the call re-emitted as written.
     for (const std::string name : {"if", "and", "or", "array", "left", "right", "replace", "date", "any", "file",
                                    "view", "values", "default", "key", "index", "user", "database", "format",
                                    "first", "last", "mod", "div", "in", "like", "interval", "case", "timestamp",
@@ -11853,7 +11933,8 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
       const std::string sql = "SELECT " + name + "(((1, 2)))";
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
-      EXPECT_NE(resp.code(), rewriter::RewriteCode::Success) << resp.sql_after_rewrite();
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
     }
   }
 }
@@ -11929,5 +12010,327 @@ TEST(TableRefGrant, StarNamedAndWildcardTargetsAreRefused) {
     }
     const auto global = RunTableRef("GRANT SELECT ON *.* TO u", si);
     EXPECT_EQ(global.message(), "GRANT ON *.* (global scope) is not supported");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sentio indexer driver compatibility (report driver-sql-engine-compat.md,
+// 2026-10-02).
+//
+// Gap 1: the storage-integrity compatibility scan (prepareStorageIntegritySQL)
+// compared the upper-cased decoded text of every name token with its clause
+// keywords, so a quoted column named `from` or `join` opened a FROM list. In a
+// CREATE TABLE column list the scan then read `, `ts` DateTime64(6, 'UTC')` as
+// a table `ts` with implicit alias `DateTime64` and a column-alias list, cut
+// the type arguments out of the parse text and, unable to put them back,
+// refused the statement with the SI wrapper message. A quoted or escaped name
+// is never a keyword for ClickHouse; only a bare word is.
+TEST(DriverCompat, QuotedKeywordNameIsNotAFromListBoundary) {
+  for (const std::string name : {"`from`", "`join`", "`From`", "`JOIN`", "\"from\"", "`fr\\x6fm`", "`\\x66rom`"}) {
+    for (const std::string type : {"DateTime64(6, 'UTC')", "DateTime64(6)", "Nullable(String)", "Decimal(76, 30)"}) {
+      const std::string sql =
+        "CREATE TABLE db1.e (" + name + " String, `ts` " + type + ") ENGINE = MergeTree() ORDER BY ts";
+      SCOPED_TRACE(sql);
+      const auto off = RunTableRef(sql, /*si=*/false);
+      const auto on = RunTableRef(sql, /*si=*/true);
+      ASSERT_EQ(off.code(), rewriter::RewriteCode::Success) << off.message();
+      EXPECT_EQ(on.code(), rewriter::RewriteCode::Success) << on.message();
+      EXPECT_EQ(on.sql_after_rewrite(), off.sql_after_rewrite());
+    }
+  }
+  // Report shape 61: the driver's timeseries event table (ERC-20 Transfer).
+  const std::string event =
+    "CREATE TABLE db1.event_Transfer (`amount` Decimal(76, 30), `data` JSON, `distinctId` String, `from` String, "
+    "`meta.address` String COMMENT '@SeriesLabel', `meta.block_number` Int64 COMMENT '@SlotNumber', "
+    "`meta.chain` String COMMENT '@ChainID', `timestamp` DateTime64(6, 'UTC') COMMENT '@Timestamp', "
+    "INDEX `idx_data_x` CAST(`data.x`, 'String') TYPE bloom_filter GRANULARITY 1) ENGINE = MergeTree() "
+    "PARTITION BY `meta.chain` ORDER BY (`timestamp`)";
+  const auto off = RunTableRef(event, false);
+  const auto on = RunTableRef(event, true);
+  ASSERT_EQ(off.code(), rewriter::RewriteCode::Success) << off.message();
+  EXPECT_EQ(on.code(), rewriter::RewriteCode::Success) << on.message();
+  EXPECT_EQ(on.sql_after_rewrite(), off.sql_after_rewrite());
+}
+
+// The audit of the same scan: every keyword it matches (WITH OFFSET, AS, the
+// FROM-list ends WHERE / ORDER / …, RENAME, SELECT) is likewise a bare word
+// only. A quoted alias spelling one is an ordinary name.
+TEST(DriverCompat, QuotedKeywordNameIsNotAnSICompatibilityKeyword) {
+  // `with` `offset` is a column with a quoted implicit alias, not WITH OFFSET
+  // bound to the preceding comma's "table".
+  for (const std::string sql : {"SELECT a, `with` `offset` FROM db1.o", "SELECT a, \"with\" \"offset\" FROM db1.o",
+                                "SELECT a, `with` `offset`, b FROM db1.o WHERE a = 1"}) {
+    SCOPED_TRACE(sql);
+    const auto off = RunTableRef(sql, false);
+    const auto on = RunTableRef(sql, true);
+    ASSERT_EQ(off.code(), rewriter::RewriteCode::Success) << off.message();
+    EXPECT_EQ(on.code(), rewriter::RewriteCode::Success) << on.message();
+    EXPECT_EQ(on.sql_after_rewrite(), off.sql_after_rewrite());
+  }
+  // A quoted alias spelling a FROM-list end (`where`, `order`, …) does not end
+  // the FROM list: the next table's alias column list is still kept.
+  for (const std::string alias : {"w", "`where`", "`order`", "`limit`", "`settings`", "\"group\""}) {
+    const std::string sql = "SELECT * FROM db1.o AS " + alias + ", db1.p AS x (c1, c2)";
+    SCOPED_TRACE(sql);
+    const auto on = RunTableRef(sql, true);
+    EXPECT_EQ(on.code(), rewriter::RewriteCode::Success) << on.message();
+    EXPECT_NE(on.sql_after_rewrite().find("AS x(c1, c2)"), std::string::npos) << on.sql_after_rewrite();
+  }
+  // ... and the star-RENAME check still sees the Active table behind it.
+  for (const std::string alias : {"w", "`where`", "`order`"}) {
+    const std::string sql = "SELECT * RENAME (_hg_row_id AS x) FROM db1.o AS " + alias + ", db1.t";
+    SCOPED_TRACE(sql);
+    const auto on = RunTableRef(sql, true);
+    EXPECT_EQ(on.code(), rewriter::RewriteCode::RewriteError) << on.message();
+    EXPECT_EQ(on.message(), "reserved column _hg_row_id is not addressable");
+  }
+}
+
+// Gap 2: the embedded 26.3 parser folds a literal tuple in an extra pair of
+// grouping parentheses, `x IN ((1, 0, '0'))`, into the flat `(1, 0, '0')`,
+// which ClickHouse 25.8 / 26.2 read differently (a set of three scalars rather
+// than a set of one tuple), so rule N1 refused it. The driver's IN filter on a
+// Tuple-encoded BigInt entity field builds exactly that operand. The output
+// now keeps the source's grouping (adoptLiteralFolds), so every server reads it
+// as it reads the source; it is otherwise the statement's ordinary rewrite,
+// the one its `tuple((…))` spelling gets.
+TEST(DriverCompat, SingleTupleInOperandKeepsItsGrouping) {
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, kept] : std::vector<std::pair<std::string, std::string>>{
+           {"SELECT id FROM db1.o WHERE x IN ((1,0,'0'))", "x IN ((1, 0, '0'))"},
+           {"SELECT id FROM db1.o WHERE x NOT IN ((1,1,'1'))", "x NOT IN ((1, 1, '1'))"},
+           {"SELECT id FROM db1.o WHERE x GLOBAL IN ((1, 0))", "x GLOBAL IN ((1, 0))"},
+           {"SELECT id FROM db1.o WHERE x GLOBAL NOT IN ((1, 0))", "x GLOBAL NOT IN ((1, 0))"},
+           {"SELECT id FROM db1.o WHERE (a, b) IN ((1, 2))", "(a, b) IN ((1, 2))"},
+           {"SELECT id FROM db1.o WHERE 1 IN ((1, 2))", "1 IN ((1, 2))"},
+           {"SELECT id FROM db1.o WHERE (`x` NOT IN ((1,1,'1')) OR x = (false,0,0)) ORDER BY id LIMIT 10",
+            "x NOT IN ((1, 1, '1'))"},
+           {"SELECT id FROM db1.o WHERE x IN ((1,0,'0')) AND y IN ((2, 3))", "y IN ((2, 3))"},
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_NE(resp.sql_after_rewrite().find(kept), std::string::npos) << resp.sql_after_rewrite();
+      // The same statement spelled with tuple((…)) is rewritten identically
+      // but for that spelling.
+      std::string spelled = sql;
+      for (size_t at = spelled.find("(("); at != std::string::npos; at = spelled.find("((", at + 7))
+        spelled.replace(at, 1, "tuple(");
+      const auto twin = RunTableRef(spelled, si);
+      ASSERT_EQ(twin.code(), rewriter::RewriteCode::Success) << twin.message();
+      std::string want = twin.sql_after_rewrite();
+      for (size_t at = want.find("tuple(("); at != std::string::npos; at = want.find("tuple((", at))
+        want.erase(at, 5);
+      EXPECT_EQ(resp.sql_after_rewrite(), want);
+    }
+  }
+}
+
+namespace {
+
+// The request HouseGate sends for a Sentio driver session (report "The
+// request"): the ClientHello database is the physical database, so the
+// session carries no logical context; delim is empty (the sentio-node chart
+// sets none). `si` adds contract V2 with one Active table of another tenant.
+rewriter::RewriteSQLRequest DriverSessionRequest(const std::string &sql, bool si) {
+  rewriter::RewriteSQLRequest req;
+  req.set_sql(sql);
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  auto *dyn = opt->mutable_table_name_args()->mutable_dynamic_args();
+  (*dyn->mutable_database_map())["hw1kzqe3_0"] = "devnet2";
+  dyn->add_known_physical_databases("devnet2");
+  for (const char *p : {"devnet2", "hg_safe", "hg_unsafe", "hg_promote"}) dyn->add_protected_databases(p);
+  dyn->set_upstream_logical_database_in_context("");
+  dyn->set_upstream_physical_database_in_context("devnet2");
+  dyn->set_delim("");
+  if (si) {
+    auto *args = dyn->mutable_storage_integrity();
+    args->set_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+    args->set_read_mode(rewriter::StorageIntegrityArgs::READ_MODE_SAFE);
+    args->set_reserved_row_id_column("_hg_row_id");
+    for (const char *r : {"hg_safe", "hg_unsafe", "hg_promote"}) args->add_reserved_databases(r);
+    auto &t = (*args->mutable_tables())["si_db.events"];
+    t.set_safe_table("hg_safe.si_db__events");
+    t.set_unsafe_table("hg_unsafe.si_db__events");
+  }
+  return req;
+}
+
+struct DriverStatement {
+  std::string expect;  // ok | filter | na
+  std::string source;  // A<n> | R<n> | X (testdata header)
+  std::string sql;
+};
+
+std::vector<DriverStatement> LoadDriverStatements() {
+  std::ifstream in(std::string(REWRITER_TEST_DATA_DIR) + "/driver_compat_statements.tsv");
+  std::vector<DriverStatement> out;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    const size_t a = line.find('\t');
+    const size_t b = a == std::string::npos ? a : line.find('\t', a + 1);
+    if (b == std::string::npos) {
+      ADD_FAILURE() << "malformed line: " << line;
+      continue;
+    }
+    out.push_back({line.substr(0, a), line.substr(a + 1, b - a - 1), line.substr(b + 1)});
+  }
+  return out;
+}
+
+}  // namespace
+
+// Every statement of the driver corpus (tests/testdata/driver_compat_statements.tsv)
+// through Rewrite with the driver session's request, SI off and on. All must
+// answer Success except the external-table filter, a known deferred
+// limitation (the session has no logical context, and the external table's
+// blocks arrive after the Query packet), and the four statements the driver
+// cannot reach today, each pinned to its current answer.
+TEST(DriverCompat, EveryDriverStatementIsAccepted) {
+  const auto statements = LoadDriverStatements();
+  ASSERT_EQ(statements.size(), 1083u);
+  std::map<std::string, size_t> by_expect;
+  for (const auto &st : statements) ++by_expect[st.expect];
+  EXPECT_EQ(by_expect["ok"], 1035u);
+  EXPECT_EQ(by_expect["filter"], 44u);
+  EXPECT_EQ(by_expect["na"], 4u);
+
+  const std::regex filter_table("FROM `(filter_[0-9a-f]{16})`");
+  const std::regex single_tuple_in("IN \\(\\([^()]*\\)\\)");
+  size_t grouped_in = 0;
+  for (const bool si : {false, true}) {
+    for (const auto &st : statements) {
+      SCOPED_TRACE(st.source + (si ? " [V2] " : " [inactive] ") + st.sql.substr(0, 200));
+      const auto resp = RunDirectRewrite(DriverSessionRequest(st.sql, si));
+      if (st.expect == "filter") {
+        std::smatch m;
+        ASSERT_TRUE(std::regex_search(st.sql, m, filter_table));
+        EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest) << resp.sql_after_rewrite();
+        EXPECT_EQ(resp.message(), UnresolvedUnqualifiedMessage(m[1].str()));
+        continue;
+      }
+      if (st.source == "A971") {
+        EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.sql_after_rewrite();
+        EXPECT_EQ(resp.message(), "table engine ReplicatedMergeTree is not accepted");
+        continue;
+      }
+      if (st.source == "A972") {
+        EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.sql_after_rewrite();
+        EXPECT_EQ(resp.message(), si ? kSIUnmodelled : "statement is not supported");
+        continue;
+      }
+      ASSERT_TRUE(st.expect == "ok" || st.source == "A973" || st.source == "A974") << st.expect;
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      if (resp.code() != rewriter::RewriteCode::Success) continue;
+      // The output is a statement the embedded parser reads back.
+      const std::string &out = resp.sql_after_rewrite();
+      try {
+        DB::ParserQuery parser(out.data() + out.size(), false);
+        DB::parseQuery(parser, out.data(), out.data() + out.size(), /*description=*/"", 0, 0, 0);
+      } catch (const DB::Exception &e) {
+        ADD_FAILURE() << "output does not parse: " << e.displayText() << " | " << out;
+      }
+      // Gap 2: a single-tuple IN operand keeps its grouping parentheses.
+      if (std::regex_search(st.sql, single_tuple_in)) {
+        ++grouped_in;
+        EXPECT_TRUE(std::regex_search(out, single_tuple_in)) << out;
+      }
+    }
+  }
+  EXPECT_EQ(grouped_in, 8u);  // 4 statements, both SI states
+}
+
+// Fix round 2 (re-review R1-N-1): a statement may preserve at most
+// kMaxLiteralFolds grouped literal tuples; one more refuses it.
+TEST(TableRefFidelity, LiteralFoldCountIsCapped) {
+  const auto statement = [](size_t folds) {
+    std::string sql = "SELECT [";
+    for (size_t i = 0; i < folds; ++i) sql += i ? ", ((1, 2))" : "((1, 2))";
+    return sql + "]";
+  };
+  for (const bool si : {false, true}) {
+    const auto at_cap = RunTableRef(statement(rewriter_handlers::kMaxLiteralFolds), si);
+    EXPECT_EQ(at_cap.code(), rewriter::RewriteCode::Success) << at_cap.message();
+    const auto over = RunTableRef(statement(rewriter_handlers::kMaxLiteralFolds + 1), si);
+    EXPECT_EQ(over.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(over.message(), rewriter_handlers::kUnsupportedStatementMessage);
+  }
+}
+
+// Re-review 1 (pre-existing): `NOT (expr) <operator>` is `not(expr) <op>` to
+// ClickHouse 25.8 / 26.2 (a call) and `NOT (expr <op> …)` to the embedded
+// 26.3 parser, which re-emits that grouping. Measured on 25.8, 26.2 and 26.3
+// (a in 1..3): `WHERE NOT (a) = 1` returns no row on 25.8 / 26.2 and the
+// output `NOT (a = 1)` rows 2 and 3; `NOT (p).1` is error 43 there and a value
+// for the output. Refused in both SI states; NOT (…) that ends its
+// expression, and plain `NOT a = 1`, keep their meaning and are admitted.
+TEST(TableRefFidelity, NotCallPrecedenceDivergenceIsRefused) {
+  for (const bool si : {false, true}) {
+    for (const std::string sql : {
+           "SELECT a FROM db1.o WHERE NOT (a) = 1",
+           "SELECT a FROM db1.o WHERE NOT (a) != 1",
+           "SELECT a FROM db1.o WHERE NOT (a) < 2",
+           "SELECT a FROM db1.o WHERE NOT (a) IN (1)",
+           "SELECT a FROM db1.o WHERE NOT (a) NOT IN (1)",
+           "SELECT a FROM db1.o WHERE NOT (a) GLOBAL IN (1)",
+           "SELECT a FROM db1.o WHERE NOT (a) IN (SELECT 1)",
+           "SELECT a FROM db1.o WHERE NOT (a) IS NULL",
+           "SELECT a FROM db1.o WHERE NOT (a) IS NOT NULL",
+           "SELECT a FROM db1.o WHERE NOT (a) BETWEEN 1 AND 2",
+           "SELECT a FROM db1.o WHERE NOT (s) LIKE '%'",
+           "SELECT a FROM db1.o WHERE NOT (a) IS NOT DISTINCT FROM 1",
+           "SELECT a FROM db1.o WHERE NOT (a) = 1 AND b = 1",
+           "SELECT a FROM db1.o WHERE b = 1 AND NOT (a) = 1",
+           "SELECT a FROM db1.o WHERE NOT (a) = 1 OR NOT (b) = 1",
+           "SELECT a FROM db1.o WHERE NOT NOT (a) = 1",
+           "SELECT a FROM db1.o WHERE NOT (a) == 1",
+           "SELECT a FROM db1.o WHERE NOT(a) = 1",
+           "SELECT a FROM db1.o WHERE not (a) = 1",
+           "SELECT a FROM db1.o WHERE NOT /*c*/ (a) = 1",
+           "SELECT a FROM db1.o WHERE NOT ((a)) = 1",
+           "SELECT a FROM db1.o WHERE NOT (a, b) = (1, 1)",
+           "SELECT a FROM db1.o WHERE NOT (SELECT 1) = 1",
+           "SELECT NOT (p).1 FROM db1.o",
+           "SELECT NOT (arr)[1] FROM db1.o",
+           "SELECT NOT (a) || 'x' FROM db1.o",
+           "SELECT NOT (a) % 2 FROM db1.o",
+           "SELECT NOT (a) - 1 FROM db1.o",
+           "SELECT NOT (a) = 1 ? 1 : 0 FROM db1.o",
+           "SELECT NOT (a)::UInt8 FROM db1.o",
+           "SELECT NOT (a) x FROM db1.o",
+           "SELECT a FROM db1.t WHERE NOT (a) = 1",
+           "INSERT INTO db1.o SELECT a FROM db1.p WHERE NOT (a) = 1",
+           "CREATE VIEW db1.v AS SELECT a FROM db1.o WHERE NOT (a) = 1",
+           "ALTER TABLE db1.o DELETE WHERE NOT (a) = 1",
+           "DELETE FROM db1.o WHERE NOT (a) = 1",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.sql_after_rewrite();
+      EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    }
+    for (const std::string sql : {
+           "SELECT a FROM db1.o WHERE NOT (a)",
+           "SELECT a FROM db1.o WHERE NOT (a = 1)",
+           "SELECT a FROM db1.o WHERE NOT a = 1",
+           "SELECT a FROM db1.o WHERE NOT (a) AND b",
+           "SELECT a FROM db1.o WHERE NOT (a) OR b = 2",
+           "SELECT a FROM db1.o WHERE b AND NOT (a)",
+           "SELECT a FROM db1.o WHERE NOT (a) SETTINGS max_threads = 1",
+           "SELECT a FROM db1.o WHERE NOT EXISTS (SELECT 1)",
+           "SELECT a FROM db1.o WHERE (NOT (a)) = 1",
+           "SELECT NOT (a), NOT (a) AS x, [NOT (a)], tuple(NOT (a), 1) FROM db1.o",
+           "SELECT NOT (a) ? 5 : 6, b ? NOT (a) : 0 FROM db1.o",
+           "SELECT CASE WHEN NOT (a) THEN 1 ELSE NOT (b) END FROM db1.o",
+           "SELECT a FROM db1.o ORDER BY NOT (a) DESC, a",
+           "SELECT -(a) = -1, -(p).1, -(arr)[1], -(a) * 2 FROM db1.o",
+           "SELECT a FROM db1.o WHERE a NOT IN (1) AND s NOT LIKE 'x'",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      EXPECT_EQ(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success) << RunTableRef(sql, si).message();
+    }
   }
 }

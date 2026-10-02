@@ -326,6 +326,10 @@ std::optional<DB::ASTPtr> ownedChild(const DB::IAST &parent, const DB::IAST *chi
 struct SQLToken {
   enum class Kind { Word, Identifier, String, Symbol } kind;
   std::string text;
+  // The keyword spelling: the upper-cased text of a bare word, empty for every
+  // other token. Only a bare word can be a keyword; ClickHouse reads a quoted
+  // or escaped name (`from`, "JOIN", `fr\x6fm`) as an identifier wherever it
+  // stands, so comparing `upper` with a keyword never matches one.
   std::string upper;
   size_t begin = 0;
   size_t end = 0;
@@ -366,7 +370,7 @@ std::vector<SQLToken> tokenizeSQL(const std::string &sql) {
       break;
     case DB::TokenType::QuotedIdentifier: {
       const std::string value = decodeIdentifierToken(token).value_or(raw);
-      out.push_back({SQLToken::Kind::Identifier, value, upper(value), begin, end, depth});
+      out.push_back({SQLToken::Kind::Identifier, value, std::string(), begin, end, depth});
       break;
     }
     case DB::TokenType::StringLiteral:
@@ -393,6 +397,12 @@ bool identifierToken(const SQLToken &token) {
   return token.kind == SQLToken::Kind::Word || token.kind == SQLToken::Kind::Identifier;
 }
 
+// Whether `token` is the punctuation `symbol`. A quoted name's decoded text can
+// spell punctuation (`,`, `(`), so a symbol test must check the kind as well.
+bool symbolIs(const SQLToken &token, std::string_view symbol) {
+  return token.kind == SQLToken::Kind::Symbol && token.text == symbol;
+}
+
 struct LexicalTarget {
   std::string database;
   std::string table;
@@ -401,12 +411,12 @@ struct LexicalTarget {
 
 std::optional<LexicalTarget> targetAt(const std::vector<SQLToken> &tokens, size_t index) {
   if (index >= tokens.size() || !identifierToken(tokens[index])) return std::nullopt;
-  if (index + 1 < tokens.size() && tokens[index + 1].text == "(") return std::nullopt;
+  if (index + 1 < tokens.size() && symbolIs(tokens[index + 1], "(")) return std::nullopt;
   LexicalTarget out;
   out.table = tokens[index].text;
   out.next = index + 1;
-  if (index + 2 < tokens.size() && tokens[index + 1].text == "." &&
-      (identifierToken(tokens[index + 2]) || tokens[index + 2].text == "*")) {
+  if (index + 2 < tokens.size() && symbolIs(tokens[index + 1], ".") &&
+      (identifierToken(tokens[index + 2]) || symbolIs(tokens[index + 2], "*"))) {
     out.database = out.table;
     out.table = tokens[index + 2].text;
     out.next = index + 3;
@@ -445,7 +455,7 @@ std::vector<LexicalTarget> collectLexicalSelectTargets(const std::vector<SQLToke
     if (token.upper == "FROM" || token.upper == "JOIN") {
       in_from[token.depth] = true;
       append(targetAt(tokens, i + 1));
-    } else if (token.text == "," && in_from[token.depth]) {
+    } else if (symbolIs(token, ",") && in_from[token.depth]) {
       append(targetAt(tokens, i + 1));
     }
   }
@@ -1184,7 +1194,7 @@ bool prepareStorageIntegritySQL(const std::string &sql,
     if (tokens[1].upper == "GRANT" || tokens[1].upper == "REVOKE") {
       for (size_t i = 2; i < tokens.size(); ++i) {
         if (tokens[i].upper != "ON" || tokens[i].depth != 0) continue;
-        if (i + 1 < tokens.size() && tokens[i + 1].text == "*") {
+        if (i + 1 < tokens.size() && symbolIs(tokens[i + 1], "*")) {
           LexicalTarget target;
           target.database = args.upstream_logical_database_in_context();
           target.table = "*";
@@ -1229,19 +1239,19 @@ bool prepareStorageIntegritySQL(const std::string &sql,
   // reject only when the SELECT actually touches an SI target.
   const std::string rid = reservedRowIdColumn(args);
   for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-    if (tokens[i].upper != "RENAME" || tokens[i + 1].text != "(") continue;
+    if (tokens[i].upper != "RENAME" || !symbolIs(tokens[i + 1], "(")) continue;
     bool star_transformer = false;
     for (size_t j = i; j > 0; --j) {
       const auto &candidate = tokens[j - 1];
       if (candidate.depth != tokens[i].depth) continue;
-      if (candidate.text == "*") star_transformer = true;
+      if (symbolIs(candidate, "*")) star_transformer = true;
       if (candidate.upper == "SELECT" || candidate.upper == "FROM") break;
     }
     if (!star_transformer) continue;
     const int depth = tokens[i + 1].depth;
     bool reserved = false;
     for (size_t j = i + 2; j < tokens.size(); ++j) {
-      if (tokens[j].text == ")" && tokens[j].depth == depth) break;
+      if (symbolIs(tokens[j], ")") && tokens[j].depth == depth) break;
       if (identifierToken(tokens[j]) && tokens[j].text == rid) {
         reserved = true;
         break;
@@ -1284,7 +1294,7 @@ bool prepareStorageIntegritySQL(const std::string &sql,
       const auto &candidate = tokens[j - 1];
       if (candidate.depth != tokens[i].depth) continue;
       if (wrapper_boundaries.count(candidate.upper)) break;
-      if (candidate.upper == "FROM" || candidate.upper == "JOIN" || candidate.text == ",") {
+      if (candidate.upper == "FROM" || candidate.upper == "JOIN" || symbolIs(candidate, ",")) {
         bound = targetAt(tokens, j);
         break;
       }
@@ -1368,7 +1378,7 @@ bool prepareStorageIntegritySQL(const std::string &sql,
     const auto &token = tokens[i];
     if (from_ends.count(token.upper)) in_from[token.depth] = false;
     const bool boundary =
-      token.upper == "FROM" || token.upper == "JOIN" || (token.text == "," && in_from[token.depth]);
+      token.upper == "FROM" || token.upper == "JOIN" || (symbolIs(token, ",") && in_from[token.depth]);
     if (token.upper == "FROM" || token.upper == "JOIN") in_from[token.depth] = true;
     if (!boundary) continue;
     auto target = targetAt(tokens, i + 1);
@@ -1382,14 +1392,14 @@ bool prepareStorageIntegritySQL(const std::string &sql,
     } else if (cursor < tokens.size() && identifierToken(tokens[cursor]) &&
                (tokens[cursor].kind != SQLToken::Kind::Word ||
                 !implicitAliasKeywords.count(tokens[cursor].upper)) &&
-               cursor + 1 < tokens.size() && tokens[cursor + 1].text == "(") {
+               cursor + 1 < tokens.size() && symbolIs(tokens[cursor + 1], "(")) {
       alias = tokens[cursor].text;
       ++cursor;
     }
-    if (alias.empty() || cursor >= tokens.size() || tokens[cursor].text != "(") continue;
+    if (alias.empty() || cursor >= tokens.size() || !symbolIs(tokens[cursor], "(")) continue;
     size_t close = cursor + 1;
     for (; close < tokens.size(); ++close)
-      if (tokens[close].text == ")" && tokens[close].depth == tokens[cursor].depth) break;
+      if (symbolIs(tokens[close], ")") && tokens[close].depth == tokens[cursor].depth) break;
     if (close >= tokens.size()) continue;
     if (targetTouchesStorageIntegrity(*target, args)) {
       return reject_select_surface(*target, std::string(kStorageIntegrityWrapperMessage));

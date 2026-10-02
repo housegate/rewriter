@@ -76,18 +76,56 @@ bool columnDeclarationHasSettings(const DB::ASTPtr &ast);
 //  - N1, a literal tuple wrapped in an extra pair of grouping parentheses,
 //    `((1, 2))` or `((1, 2) AS x)`: 25.8 / 26.2 read a one-element tuple of a
 //    tuple (`SELECT ((1, 2))` is `((1,2))`, `1 IN ((1, 2))` is error 43), the
-//    formatter re-emits the flat `(1, 2)`;
+//    embedded 26.3 parser folds it into the flat `(1, 2)`;
 //  - N2, a float literal below the smallest normal double (`1e-400`,
 //    `1e-310`, `2.2250738585072013e-308`): 25.8 rejects it (error 62), the
 //    formatter re-emits `0.` or a value 25.8 accepts.
 // Read from `parsed_sql` (the text the AST was parsed from) up to an INSERT's
-// inline data, which is forwarded verbatim. Any such literal in the source
-// refuses the statement, whatever the formatter emits (`statement is not
-// supported`, both SI states, applied by the caller to an accepted
-// statement). A `(` counts as a call's own parenthesis only after a
-// non-keyword word naming a call in the tree. Fails closed on a text it
-// cannot tokenize or bracket-match.
-bool foldsMeaningChangingLiteral(const DB::ASTPtr &ast, const std::string &parsed_sql);
+// inline data, which is forwarded verbatim. A `(` counts as a call's own
+// parenthesis only after a non-keyword word naming a call in the tree.
+//
+// An N1 group is preserved rather than refused (Sentio driver report gap 2,
+// `x IN ((1, 0, '0'))`): the caller parses the text again with a marker call
+// before each group's outer `(` (markLiteralFolds), and adoptLiteralFolds
+// checks that the marked tree, each marker replaced by its tuple, is exactly
+// the tree parsed from the source — the markers sit on grouping parentheses
+// and moved nothing else — and then turns each marker into ClickHouse's
+// nameless function, which the formatter prints as its parenthesised argument:
+// the output spells `((1, 0, '0'))` as the source did, so every server reads
+// it as it reads the source. N2, a text that does not tokenize or
+// bracket-match, a source spelling the marker, a group of literal-tuple shape
+// whose nested brackets 25.8 / 26.2 do not read as literal tuples
+// (`((1, (2)))`, which the embedded parser still folds), a sign before
+// anything but a number or inf / nan (`((1, +'a'))`), a group right after
+// NOT, more than kMaxLiteralFolds groups, and a group whose marked parse
+// differs stay refused (`statement is not supported`, both SI states, applied
+// by the caller to an accepted statement).
+// The most N1 groups one statement may preserve; more are refused.
+inline constexpr size_t kMaxLiteralFolds = 10000;
+struct LiteralFoldPlan {
+  bool refuse = false;              // refuse the statement whatever the folds
+  std::vector<size_t> folds;        // byte offset of each N1 group's outer `(`
+};
+LiteralFoldPlan planLiteralFolds(const DB::ASTPtr &ast, const std::string &parsed_sql);
+std::string markLiteralFolds(const std::string &parsed_sql, const LiteralFoldPlan &plan);
+// `marked` is parsed from markLiteralFolds(source); `original` from the
+// source. true (and `marked` rewritten in place) when the folds are preserved.
+bool adoptLiteralFolds(DB::ASTPtr &marked, const DB::ASTPtr &original, size_t folds);
+
+// `NOT (expr)` followed by an operator or a postfix (`NOT (a) = 1`,
+// `NOT (a) IN (1)`, `NOT (a) IS NULL`, `NOT (p).1`, `NOT (arr)[1]`,
+// `NOT (a) - 1`, `NOT (a) || 'x'`): 25.8 / 26.2 read `NOT (` as a call,
+// `not(a) = 1`, while the embedded 26.3 parser (and a 26.3 server) read an
+// operator, `NOT (a = 1)`, which the formatter re-emits as such: measured on
+// 25.8, 26.2 and 26.3, the output changes rows, types or errors on 25.8 /
+// 26.2. The source's own spelling is the only text both read as written, so
+// such a statement is refused (`statement is not supported`, both SI states,
+// applied by the caller to an accepted statement). What may follow `NOT (…)`
+// is an end of the expression: a closing bracket, `,`, `;`, `?`, `:`, a
+// quoted alias, AND / OR, AS, THEN / ELSE / END / WHEN, ASC / DESC, WITH or a
+// clause keyword. Read like planLiteralFolds, up to an INSERT's inline data;
+// a text that does not tokenize or bracket-match is refused.
+bool notCallPrecedenceDiverges(const DB::ASTPtr &ast, const std::string &parsed_sql);
 
 // T5 (spec §5 "Table functions" / "Table engines", rewriter-go
 // internal/engine/allowlists.go).

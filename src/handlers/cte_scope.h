@@ -152,11 +152,11 @@ inline bool plainFunctionCall(const DB::ASTFunction &fn) {
 // Parenthesised-tuple fidelity note (measured 26.2 / 25.8): a server reads
 // `((1, 2))` as a 1-tuple of a 2-tuple, `Tuple(Tuple(...))`, not the 2-tuple
 // `(1, 2)`. The engine's embedded 26.3 parser folds `((1, 2))` into the flat
-// literal `(1, 2)`, so after parsing the two are the identical AST and this
-// classifier cannot tell them apart. A statement whose source holds such a
-// fold is refused as a whole (foldsMeaningChangingLiteral, Task I3 fix
-// rounds 2–3), so a binding decision here never reaches ClickHouse for a
-// folded `((1, 2))`.
+// literal `(1, 2)`. A statement whose source holds such a fold is either
+// refused as a whole or keeps the group as a nameless function around the
+// literal (adoptLiteralFolds, table_reference.h), which this classifier reads
+// as a plain call over a literal: either way not a table reference, and the
+// output spells `((1, 2))` as the source did.
 inline bool withValueIsNotTableReference(const DB::IAST &value) {
   if (value.as<DB::ASTLiteral>() || value.as<DB::ASTSubquery>()) return true;
   if (const auto *fn = value.as<DB::ASTFunction>(); fn && plainFunctionCall(*fn)) return true;

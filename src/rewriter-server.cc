@@ -427,6 +427,9 @@ void RewriterServiceImpl::doRewrite(
   const char *pos = query.data();
   const char *end = pos + query.size();
   DB::ParserQuery parser(end, false);
+  // The text the preserved literal folds are parsed from (N1, below). It must
+  // outlive the AST: an INSERT's inline data points into it.
+  String marked_query;
 
   try {
     // NB: the 7-arg `parseQuery(IParser&, const char* begin, const char* end,
@@ -439,6 +442,36 @@ void RewriterServiceImpl::doRewrite(
     // buffers die on return — leaving INSERT inline payload pointers
     // dangling. See doRewriteErrorMessage below for the same pattern.
     parsed_ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    // A literal the embedded parser folds into SQL that ClickHouse 25.8 / 26.2
+    // read differently. A literal tuple in an extra pair of grouping
+    // parentheses (`x IN ((1, 0, '0'))`, N1) is preserved: the text is parsed
+    // again with a marker on each such group, and the marked tree replaces
+    // the source's when it is that tree but for the groups (adoptLiteralFolds,
+    // table_reference.h). Anything else (`1e-310`, N2, or a group the check
+    // cannot preserve) is refused on a would-be Success, in both SI states.
+    bool refuse_literal_fold = false;
+    // `NOT (a) = 1` is `not(a) = 1` to 25.8 / 26.2 and `NOT (a = 1)` to the
+    // embedded 26.3 parser: refused on a would-be Success, in both SI states
+    // (notCallPrecedenceDiverges, table_reference.h). Read from the source.
+    const bool refuse_not_precedence = rewriter_handlers::notCallPrecedenceDiverges(parsed_ast, query);
+    if (const auto fold_plan = rewriter_handlers::planLiteralFolds(parsed_ast, query); fold_plan.refuse) {
+      refuse_literal_fold = true;
+    } else if (!fold_plan.folds.empty()) {
+      marked_query = rewriter_handlers::markLiteralFolds(query, fold_plan);
+      DB::ASTPtr marked_ast;
+      try {
+        const char *marked_pos = marked_query.data();
+        const char *marked_end = marked_pos + marked_query.size();
+        DB::ParserQuery marked_parser(marked_end, false);
+        marked_ast = DB::parseQuery(marked_parser, marked_pos, marked_end, /*description=*/"", 0, 0, 0);
+      } catch (const DB::Exception &) {
+        marked_ast = nullptr;
+      }
+      if (marked_ast && rewriter_handlers::adoptLiteralFolds(marked_ast, parsed_ast, fold_plan.folds.size()))
+        parsed_ast = marked_ast;
+      else
+        refuse_literal_fold = true;
+    }
     // The annotator's copy is taken before registration (clonePolicyAst):
     // a registered tree's clone would share adopted subtrees with it.
     if (si_active) annotate_ast = rewriter_handlers::clonePolicyAst(parsed_ast);
@@ -486,11 +519,6 @@ void RewriterServiceImpl::doRewrite(
     // Success, in both SI states (rewriter-go refuses it last).
     const bool refuse_column_settings = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
       && rewriter_handlers::columnDeclarationHasSettings(ast);
-
-    // A literal the embedded parser folds into SQL that ClickHouse 25.8 / 26.2
-    // read differently (`((1, 2))`, `1e-310`): refused on a would-be Success,
-    // in both SI states, from the text the AST was parsed from.
-    const bool refuse_literal_fold = rewriter_handlers::foldsMeaningChangingLiteral(ast, query);
 
     [&]() {
       if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
@@ -558,7 +586,7 @@ void RewriterServiceImpl::doRewrite(
     if (refuse_column_settings && response->code() == rewriter::RewriteCode::Success)
       refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                               std::string(rewriter_handlers::kUnsupportedStatementMessage));
-    if (refuse_literal_fold && response->code() == rewriter::RewriteCode::Success)
+    if ((refuse_literal_fold || refuse_not_precedence) && response->code() == rewriter::RewriteCode::Success)
       refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                               std::string(rewriter_handlers::kUnsupportedStatementMessage));
   } catch (const DB::Exception &e) {

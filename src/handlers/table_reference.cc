@@ -756,10 +756,13 @@ bool literalTupleToken(const DB::Token &token) {
   }
 }
 
-// Whether tokens[open..close] (a round-bracket group) is a literal tuple for
-// 25.8 / 26.2: at least one top-level comma, no trailing comma (`(1,)` and
-// `(1, 2,)` are expressions there, measured) and only literal tokens.
-bool literalTupleGroup(const std::vector<DB::Token> &tokens, size_t open, size_t close) {
+// Whether tokens[open..close] (a round-bracket group) has the shape rule N1
+// was first written against: at least one top-level comma, no trailing comma
+// and only literal tokens, a sign opening an element. Brackets inside it are
+// not examined, so it also holds for `((1, (2)))`: v0.16.0 refused every such
+// group, and a group of this shape that is not a literal tuple (below) still
+// is refused.
+bool literalTupleShape(const std::vector<DB::Token> &tokens, size_t open, size_t close) {
   if (close < open + 2 || tokens[close - 1].type == DB::TokenType::Comma) return false;
   bool comma = false;
   int depth = 0;
@@ -776,6 +779,41 @@ bool literalTupleGroup(const std::vector<DB::Token> &tokens, size_t open, size_t
     else if (token.type == DB::TokenType::Comma && depth == 0) comma = true;
   }
   return comma;
+}
+
+// Whether tokens[open..close] is a literal tuple for ClickHouse 25.8 / 26.2:
+// literalTupleShape, every nested round-bracket group a literal tuple in turn,
+// and no sign before a bracket. Measured on 25.8, 26.2 and 26.3
+// (`toTypeName(((1, E)))`): the outer pair is the N1 grouping only when E is
+// a scalar literal or such a tuple (`(2, 3)`, `(-2, +3)`, `('a', NULL)`,
+// `(2, (3, 4))`, `((2, 3), (4, 5))`); a parenthesised scalar (`(2)`, `(-2)`,
+// `('a')`, `(NULL)`, `(inf)`, `((2))`), a trailing comma (`(2, 3,)`), `()`,
+// a signed bracket (`+(1)`, `-(2, 3)`) or a nested group of one of those
+// (`(2, (3))`, `(2, ((3, 4)))`) makes the tuple an expression there, and the
+// outer pair plain grouping.
+bool literalTupleGroup(const std::vector<DB::Token> &tokens, const std::vector<size_t> &match, size_t open,
+                       size_t close) {
+  if (!literalTupleShape(tokens, open, close)) return false;
+  for (size_t i = open + 1; i < close; ++i) {
+    const auto &token = tokens[i];
+    // A sign keeps the tuple literal only before a number or inf / infinity /
+    // nan (any case). Before a string, `x'…'`, `b'…'`, a heredoc, NULL,
+    // TRUE / FALSE or a bracket it makes the tuple an expression on 25.8 /
+    // 26.2 (fix round 2, measured on 25.8, 26.2 and 26.3: `((1, +'a'))` is
+    // `Tuple(UInt8, String)` there; `((1, +1))`, `((1, -inf))`,
+    // `((1, +NaN))` are `Tuple(Tuple(…))`).
+    if (token.type == DB::TokenType::Minus || token.type == DB::TokenType::Plus) {
+      const auto &next = tokens[i + 1];
+      if (next.type != DB::TokenType::Number && !wordIs(next, "inf") && !wordIs(next, "infinity")
+          && !wordIs(next, "nan"))
+        return false;
+    }
+    if (token.type == DB::TokenType::OpeningRoundBracket) {
+      if (!literalTupleGroup(tokens, match, i, match[i])) return false;
+      i = match[i];
+    }
+  }
+  return true;
 }
 
 // A float literal below the smallest normal double: one that underflows to
@@ -796,32 +834,54 @@ bool subnormalNumber(const DB::Token &token) {
   return value != 0 && std::fabs(value) <= std::numeric_limits<double>::min();
 }
 
-// Whether `text` holds a literal-tuple group wrapped in an extra pair of
-// grouping parentheses (with an optional alias), or a subnormal number, or
-// does not tokenize or bracket-match. `is_call` decides whether the `(` at an
-// index opens a call's own argument list.
-bool holdsLiteralFold(std::string_view text,
-                      const std::function<bool(const std::vector<DB::Token> &, size_t)> &is_call) {
+// The literal-fold scan of `text`: `refuse` for a subnormal number or a text
+// that does not tokenize or bracket-match; otherwise the byte offset of the
+// outer `(` of every literal-tuple group wrapped in an extra pair of grouping
+// parentheses (with an optional alias). `is_call` decides whether the `(` at
+// an index opens a call's own argument list.
+LiteralFoldPlan scanLiteralFolds(std::string_view text,
+                                 const std::function<bool(const std::vector<DB::Token> &, size_t)> &is_call) {
+  LiteralFoldPlan out;
   std::vector<DB::Token> tokens;
-  if (!significantTokens(text, tokens)) return true;
+  if (!significantTokens(text, tokens)) {
+    out.refuse = true;
+    return out;
+  }
   std::vector<size_t> match(tokens.size(), 0);
   std::vector<size_t> open;
+  // A `(` that opens one set of a GROUPING SETS list is syntax, like a call's
+  // own parenthesis: `GROUPING SETS (((1, 2)))` is the set `((1, 2))`, whose
+  // key 25.8 / 26.2 read as the literal `(1, 2)` (EXPLAIN AST, measured).
+  std::vector<bool> set_opener(tokens.size(), false);
   for (size_t i = 0; i < tokens.size(); ++i) {
-    if (tokens[i].type == DB::TokenType::Number && subnormalNumber(tokens[i])) return true;
+    if (tokens[i].type == DB::TokenType::Number && subnormalNumber(tokens[i])) {
+      out.refuse = true;
+      return out;
+    }
     if (tokens[i].type == DB::TokenType::OpeningRoundBracket) {
+      if (!open.empty()) {
+        const size_t parent = open.back();
+        set_opener[i] = parent >= 2 && wordIs(tokens[parent - 1], "sets") && wordIs(tokens[parent - 2], "grouping");
+      }
       open.push_back(i);
     } else if (tokens[i].type == DB::TokenType::ClosingRoundBracket) {
-      if (open.empty()) return true;
+      if (open.empty()) {
+        out.refuse = true;
+        return out;
+      }
       match[open.back()] = i;
       match[i] = open.back();
       open.pop_back();
     }
   }
-  if (!open.empty()) return true;
+  if (!open.empty()) {
+    out.refuse = true;
+    return out;
+  }
 
   for (size_t p = 0; p + 1 < tokens.size(); ++p) {
     if (tokens[p].type != DB::TokenType::OpeningRoundBracket
-        || tokens[p + 1].type != DB::TokenType::OpeningRoundBracket || is_call(tokens, p))
+        || tokens[p + 1].type != DB::TokenType::OpeningRoundBracket || set_opener[p] || is_call(tokens, p))
       continue;
     const size_t q = p + 1, q_close = match[q], p_close = match[p];
     // The group's sole content is the inner tuple, with an optional alias.
@@ -830,15 +890,91 @@ bool holdsLiteralFold(std::string_view text,
     if (next < p_close && (tokens[next].type == DB::TokenType::BareWord
                            || tokens[next].type == DB::TokenType::QuotedIdentifier))
       ++next;
-    if (next == p_close && literalTupleGroup(tokens, q, q_close)) return true;
+    if (next != p_close) continue;
+    // `NOT (` is a call to 25.8 / 26.2 and an operator with a grouping to
+    // 26.3 (fix round 2, review R1-M-1): a fold right after NOT is refused,
+    // as v0.16.0 refused it.
+    if (p > 0 && wordIs(tokens[p - 1], "not")
+        && (literalTupleGroup(tokens, match, q, q_close) || literalTupleShape(tokens, q, q_close))) {
+      out.refuse = true;
+      return out;
+    }
+    if (literalTupleGroup(tokens, match, q, q_close)) {
+      out.folds.push_back(static_cast<size_t>(tokens[p].begin - text.data()));
+    } else if (literalTupleShape(tokens, q, q_close)) {
+      // Not a literal tuple for 25.8 / 26.2 (`((1, (2)))`), but one the
+      // embedded parser may still fold into a literal: preserving it would
+      // print a grouping 25.8 / 26.2 do not read in the source. Refused, as
+      // v0.16.0 refused it.
+      out.refuse = true;
+      return out;
+    }
   }
-  return false;
+  // A cap on the folds one statement may preserve: each costs a marker, a
+  // second parse and a tree hash. Far above any realistic statement; beyond
+  // it the statement is refused (fail closed, review R1-N-1).
+  if (out.folds.size() > kMaxLiteralFolds) out.refuse = true;
+  return out;
+}
+
+constexpr std::string_view kLiteralFoldMarker = "__housegate_grouped_literal_tuple";
+
+void collectLiteralFoldMarkers(const DB::ASTPtr &node, std::vector<DB::ASTPtr *> &out, DB::ASTPtr *slot) {
+  if (!node) return;
+  if (const auto *fn = node->as<DB::ASTFunction>(); fn && fn->name == kLiteralFoldMarker && slot) out.push_back(slot);
+  for (auto &child : node->children) collectLiteralFoldMarkers(child, out, &child);
 }
 
 } // namespace
 
-bool foldsMeaningChangingLiteral(const DB::ASTPtr &ast, const std::string &parsed_sql) {
+bool notCallPrecedenceDiverges(const DB::ASTPtr &ast, const std::string &parsed_sql) {
   if (!ast) return false;
+  std::string_view text(parsed_sql);
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>(); insert && insert->data
+      && insert->data >= parsed_sql.data() && insert->data <= parsed_sql.data() + parsed_sql.size())
+    text = text.substr(0, static_cast<size_t>(insert->data - parsed_sql.data()));
+  std::vector<DB::Token> tokens;
+  if (!significantTokens(text, tokens)) return true;
+  std::vector<size_t> match(tokens.size(), 0);
+  std::vector<size_t> open;
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    if (tokens[i].type == DB::TokenType::OpeningRoundBracket) {
+      open.push_back(i);
+    } else if (tokens[i].type == DB::TokenType::ClosingRoundBracket) {
+      if (open.empty()) return true;
+      match[open.back()] = i;
+      open.pop_back();
+    }
+  }
+  if (!open.empty()) return true;
+  // What may follow `NOT (…)` with the same reading on every server: the end
+  // of the expression (a closing bracket, a separator, the ternary, an alias,
+  // AND / OR, which bind looser than NOT everywhere, or a clause keyword).
+  static const std::set<std::string> ends = {"AND", "OR", "AS", "THEN", "ELSE", "END", "WHEN", "FROM", "WHERE",
+    "PREWHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "SETTINGS", "FORMAT", "UNION", "EXCEPT",
+    "INTERSECT", "WINDOW", "QUALIFY", "ASC", "DESC", "ASCENDING", "DESCENDING", "WITH", "INTO"};
+  for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+    if (!wordIs(tokens[i], "not") || tokens[i + 1].type != DB::TokenType::OpeningRoundBracket) continue;
+    const size_t after = match[i + 1] + 1;
+    if (after >= tokens.size()) continue;
+    const auto &next = tokens[after];
+    switch (next.type) {
+    case DB::TokenType::ClosingRoundBracket: case DB::TokenType::ClosingSquareBracket:
+    case DB::TokenType::Comma: case DB::TokenType::Semicolon: case DB::TokenType::QuestionMark:
+    case DB::TokenType::Colon: case DB::TokenType::QuotedIdentifier:
+      continue;
+    case DB::TokenType::BareWord:
+      if (ends.contains(upperWord(std::string(next.begin, next.end)))) continue;
+      return true;
+    default:
+      return true;
+    }
+  }
+  return false;
+}
+
+LiteralFoldPlan planLiteralFolds(const DB::ASTPtr &ast, const std::string &parsed_sql) {
+  if (!ast) return {};
   std::string_view text(parsed_sql);
   // An INSERT's inline data is forwarded verbatim; only the statement before
   // it is re-emitted.
@@ -850,12 +986,75 @@ bool foldsMeaningChangingLiteral(const DB::ASTPtr &ast, const std::string &parse
   // A call's own parentheses, `f((1, 2))`, pass the tuple as written. Only a
   // non-keyword word naming a call in the tree counts; anything else (a
   // keyword word, even one naming a call such as `array` or `any`, a quoted
-  // name, `)`) is read as grouping, failing closed.
-  return holdsLiteralFold(text, [&](const std::vector<DB::Token> &tokens, size_t p) {
+  // name, `)`) is read as grouping. A grouping misread is harmless: its marker
+  // changes the parse, and adoptLiteralFolds then refuses the statement.
+  LiteralFoldPlan plan = scanLiteralFolds(text, [&](const std::vector<DB::Token> &tokens, size_t p) {
     if (p == 0 || tokens[p - 1].type != DB::TokenType::BareWord) return false;
     const std::string word(tokens[p - 1].begin, tokens[p - 1].end);
     return !keywordWords().contains(upperWord(word)) && functions.contains(lowerName(word));
   });
+  // A source already spelling the marker cannot be marked unambiguously.
+  if (!plan.refuse && !plan.folds.empty()) {
+    std::vector<DB::Token> tokens;
+    significantTokens(text, tokens);
+    for (const auto &token : tokens)
+      if (token.type == DB::TokenType::BareWord
+          && lowerName(std::string(token.begin, token.end)) == kLiteralFoldMarker)
+        plan.refuse = true;
+  }
+  return plan;
+}
+
+std::string markLiteralFolds(const std::string &parsed_sql, const LiteralFoldPlan &plan) {
+  // One pass over the text (the offsets ascend): linear in its length.
+  std::string out;
+  out.reserve(parsed_sql.size() + plan.folds.size() * (kLiteralFoldMarker.size() + 1));
+  size_t from = 0;
+  for (const size_t at : plan.folds) {
+    out.append(parsed_sql, from, at - from);
+    out.push_back(' ');
+    out.append(kLiteralFoldMarker);
+    from = at;
+  }
+  out.append(parsed_sql, from, std::string::npos);
+  return out;
+}
+
+bool adoptLiteralFolds(DB::ASTPtr &marked, const DB::ASTPtr &original, size_t folds) {
+  if (!marked || !original) return false;
+  std::vector<DB::ASTPtr *> slots;
+  collectLiteralFoldMarkers(marked, slots, &marked);
+  if (slots.size() != folds) return false;
+  for (auto *slot : slots) {
+    const auto *fn = (*slot)->as<DB::ASTFunction>();
+    if (fn->parameters || fn->isWindowFunction() || fn->getNullsAction() != DB::NullsAction::EMPTY || !fn->arguments
+        || fn->arguments->children.size() != 1)
+      return false;
+    const auto *literal = fn->arguments->children[0]->as<DB::ASTLiteral>();
+    if (!literal || literal->value.getType() != DB::Field::Types::Tuple) return false;
+    if (!fn->alias.empty() && !literal->alias.empty()) return false;
+  }
+  // The marked tree with every marker replaced by its tuple is what the
+  // embedded parser built from the source: the markers moved nothing else.
+  // Both sides are compared as clones: a clone lays some statements'
+  // children out differently from the parser (ALTER and CREATE drop their
+  // name identifiers from `children`), so only like is compared with like.
+  DB::ASTPtr flat = marked->clone();
+  std::vector<DB::ASTPtr *> flat_slots;
+  collectLiteralFoldMarkers(flat, flat_slots, &flat);
+  if (flat_slots.size() != folds) return false;
+  for (auto *slot : flat_slots) {
+    const auto *fn = (*slot)->as<DB::ASTFunction>();
+    DB::ASTPtr tuple = fn->arguments->children[0];
+    if (!fn->alias.empty()) tuple->as<DB::ASTLiteral &>().alias = fn->alias;
+    *slot = tuple;
+  }
+  if (flat->getTreeHash(/*ignore_aliases=*/false) != original->clone()->getTreeHash(/*ignore_aliases=*/false))
+    return false;
+  // ClickHouse's formatter prints a function without a name as its
+  // parenthesised arguments: `((1, 2))` again.
+  for (auto *slot : slots) (*slot)->as<DB::ASTFunction &>().name.clear();
+  return true;
 }
 
 std::string tableFunctionRefusedMessage(const std::string &name) {
