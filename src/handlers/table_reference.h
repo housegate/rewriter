@@ -71,6 +71,30 @@ bool inOperandInUnrewrittenPosition(const DB::ASTPtr &ast);
 // both engines. The caller applies the same refusal to an accepted statement.
 bool columnDeclarationHasSettings(const DB::ASTPtr &ast);
 
+// A call that reveals the shared ClickHouse deployment behind housegate rather
+// than the caller's view of it: the physical session database
+// (currentDatabase / database / current_database / current_schemas), the
+// shared ClickHouse user (currentUser / user / current_user / session_user),
+// the host (hostName / FQDN), the server UUID and its macros (serverUUID,
+// getMacro). Matched case-insensitively. version(), displayName() and
+// timezone() are left alone: the server hello hands them to the client.
+// Returns the first such call in `sql`, in text order, as a bare word or a
+// quoted identifier directly followed by `(` and not preceded by `.`; a
+// quoted name is decoded. rewriter-go engine.FirstDeploymentIdentityCall.
+// In dynamic mode the caller refuses an accepted statement holding one, last,
+// in both SI states, with deploymentIdentityCallMessage.
+std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql);
+// The first unqualified bare identifier, in pre-order over `ast` (a parsed,
+// registered tree, before any handler rewrites it), named case-insensitively
+// currentDatabase, current_database, currentUser or current_user: ClickHouse's
+// analyzer resolves these as the function when no column or alias of that
+// name is in scope (they allow omitting parentheses). The aliases user,
+// DATABASE and SCHEMA resolve the same way but are ordinary column names and
+// are left alone, a known residual. rewriter-go
+// engine.FirstDeploymentIdentityName (its AST walk).
+std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast);
+std::string deploymentIdentityCallMessage(const std::string &name);
+
 // A literal the embedded 26.3 parser folds into SQL that ClickHouse 25.8 and
 // 26.2 read differently (Task I3 fix rounds 2–3, measured on both servers):
 //  - N1, a literal tuple wrapped in an extra pair of grouping parentheses,

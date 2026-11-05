@@ -430,6 +430,11 @@ void RewriterServiceImpl::doRewrite(
     const bool refuse_column_settings = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
       && rewriter_handlers::columnDeclarationHasSettings(ast);
 
+    // A bare deployment-identity name (`SELECT currentDatabase`), read before a
+    // handler rewrites the tree; applied last, below.
+    const auto bare_identity_name = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+      ? rewriter_handlers::firstBareDeploymentIdentityName(ast) : std::nullopt;
+
     [&]() {
       if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
       if (rewriter_handlers::handleShowDatabasesQuery(ast, request, response)) return;
@@ -499,6 +504,17 @@ void RewriterServiceImpl::doRewrite(
     if ((refuse_literal_fold || refuse_not_precedence) && response->code() == rewriter::RewriteCode::Success)
       refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                               std::string(rewriter_handlers::kUnsupportedStatementMessage));
+    // Last, in dynamic mode and both SI states: a call that reveals the
+    // shared deployment (the physical session database, the shared user, the
+    // host), as rewriter-go refuses it after its drop gate.
+    if (si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+        && response->code() == rewriter::RewriteCode::Success) {
+      auto call = rewriter_handlers::firstDeploymentIdentityCall(original_query);
+      if (!call) call = bare_identity_name;
+      if (call)
+        refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                                rewriter_handlers::deploymentIdentityCallMessage(*call));
+    }
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real
     // syntax errors; keep the actual SQL out of the log — it may contain PII.

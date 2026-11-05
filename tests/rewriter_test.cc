@@ -11429,7 +11429,7 @@ TEST(TableRefBinding, NamesThatBindAreLeftUnreported) {
     {"WITH NOW() AS s SELECT a FROM db1.o WHERE a IN s", "s"},
     {"WITH now() AS s SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE a IN s)", "s"},
     {"WITH PI() AS s SELECT a FROM db1.o WHERE in(a, s)", "s"},
-    {"WITH (current_user()) AS s SELECT a FROM db1.o AS s WHERE a IN s", "s"},
+    {"WITH (timezone()) AS s SELECT a FROM db1.o AS s WHERE a IN s", "s"},
     {"SELECT a FROM db1.o WHERE a IN (WITH inf AS s SELECT a FROM db1.p WHERE a IN s)", "s"},
     {"SELECT a FROM db1.o WHERE a IN (WITH -nan AS s SELECT a FROM db1.p WHERE a IN s)", "s"},
     {"SELECT a FROM db1.o WHERE a IN (WITH 0b101 AS s SELECT a FROM db1.p WHERE a IN s)", "s"},
@@ -11480,7 +11480,9 @@ TEST(TableRefBinding, NamesThatDoNotBindAreTables) {
     {"WITH (current_date) AS \"other.secret\" SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE in(a, \"other.secret\"))",
      "other.secret"},
     {"SELECT a FROM db1.o WHERE a IN NOW", "NOW"},
-    {"SELECT a FROM db1.o WHERE a IN (current_user)", "current_user"},
+    // (`IN (current_user)` reads a table too, but a bare current_user is a
+    // deployment-identity name, refused last: MetadataAccess.)
+    {"SELECT a FROM db1.o WHERE a IN (current_date)", "current_date"},
     {"SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.p WHERE globalIn(a, CURRENT_DATE))", "CURRENT_DATE"},
     {"SELECT a FROM db1.o WHERE a IN EXISTS", "EXISTS"},
     {"SELECT a FROM db1.o WHERE a NOT IN (interval)", "interval"},
@@ -11925,9 +11927,10 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
     }
     // Keyword-named single-argument calls: the inner group is preserved and
-    // the call re-emitted as written.
+    // the call re-emitted as written. (`user(…)` and `database(…)` are
+    // deployment-identity calls, refused in dynamic mode: MetadataAccess.)
     for (const std::string name : {"if", "and", "or", "array", "left", "right", "replace", "date", "any", "file",
-                                   "view", "values", "default", "key", "index", "user", "database", "format",
+                                   "view", "values", "default", "key", "index", "format",
                                    "first", "last", "mod", "div", "in", "like", "interval", "case", "timestamp",
                                    "grouping"}) {
       const std::string sql = "SELECT " + name + "(((1, 2)))";

@@ -410,6 +410,18 @@ bool validateProtectedDatabases(const rewriter::RewriteTableDynamicArgs &args, s
       return false;
     }
   }
+  // A logical database routed to a ClickHouse metadata database would turn
+  // every table of the logical database into a metadata table: the
+  // system-table allowlist (spec 2026-09-26 §5) only sees `system.<name>`
+  // when the caller writes it. Checked in key order so the message is stable.
+  std::vector<std::pair<std::string, std::string>> mappings(args.database_map().begin(), args.database_map().end());
+  std::sort(mappings.begin(), mappings.end());
+  for (const auto &[logical, physical] : mappings) {
+    if (physical == "system" || physical == "information_schema" || physical == "INFORMATION_SCHEMA") {
+      if (error) *error = "database_map entry \"" + logical + "\" maps to the metadata database \"" + physical + "\"";
+      return false;
+    }
+  }
   return true;
 }
 
@@ -1417,6 +1429,54 @@ bool rejectDisallowedCarriers(const DB::ASTPtr &ast, rewriter::RewriteSQLRespons
 
 std::string stringLookupUnresolvedMessage(const std::string &function, const std::string &arg) {
   return function + " target \"" + arg + "\" does not resolve through the caller's databases";
+}
+
+std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
+  // ClickHouse 26.3's registrations and aliases: DATABASE, SCHEMA and
+  // current_database for currentDatabase; currentSchemas and current_schemas;
+  // user and current_user for currentUser; fullHostName for FQDN.
+  static const std::set<std::string> identity = {"currentdatabase", "database", "schema", "current_database",
+    "currentschemas", "current_schemas", "currentuser", "user", "current_user", "session_user", "hostname",
+    "fqdn", "fullhostname", "serveruuid", "getmacro"};
+  std::vector<DB::Token> tokens;
+  significantTokens(sql, tokens);  // a lexer error leaves the tokens before it
+  for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+    if (tokens[i + 1].type != DB::TokenType::OpeningRoundBracket) continue;
+    if (i > 0 && tokens[i - 1].type == DB::TokenType::Dot) continue;
+    std::string name;
+    if (tokens[i].type == DB::TokenType::BareWord) {
+      name.assign(tokens[i].begin, tokens[i].end);
+    } else if (tokens[i].type == DB::TokenType::QuotedIdentifier) {
+      const auto decoded = decodeIdentifierToken(tokens[i]);
+      if (!decoded) continue;
+      name = *decoded;
+    } else {
+      continue;
+    }
+    if (identity.contains(lowerName(name))) return name;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast) {
+  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user"};
+  if (!ast) return std::nullopt;
+  std::vector<const DB::IAST *> stack{ast.get()};
+  while (!stack.empty()) {
+    const DB::IAST *node = stack.back();
+    stack.pop_back();
+    if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
+        id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && id->name_parts.size() == 1
+        && bare.contains(lowerName(id->name())))
+      return id->name();
+    for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
+      if (*it) stack.push_back(it->get());
+  }
+  return std::nullopt;
+}
+
+std::string deploymentIdentityCallMessage(const std::string &name) {
+  return "function " + name + " is not accessible";
 }
 
 std::optional<std::string> decodeIdentifierToken(const DB::Token &token) {
