@@ -1443,6 +1443,11 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
   for (size_t i = 0; i + 1 < tokens.size(); ++i) {
     if (tokens[i + 1].type != DB::TokenType::OpeningRoundBracket) continue;
     if (i > 0 && tokens[i - 1].type == DB::TokenType::Dot) continue;
+    // A table name before its column list (`INSERT INTO user (a)`, `CREATE
+    // TABLE IF NOT EXISTS schema (…)`, an MV's `TO database (…)`) is not a call.
+    if (i > 0 && (wordIs(tokens[i - 1], "into") || wordIs(tokens[i - 1], "table") || wordIs(tokens[i - 1], "exists")
+                  || wordIs(tokens[i - 1], "view") || wordIs(tokens[i - 1], "dictionary") || wordIs(tokens[i - 1], "to")))
+      continue;
     std::string name;
     if (tokens[i].type == DB::TokenType::BareWord) {
       name.assign(tokens[i].begin, tokens[i].end);

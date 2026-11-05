@@ -108,7 +108,11 @@ TEST(MetadataAccess, OtherCallsAndNamesAreAccepted) {
   for (const std::string sql : {"SELECT version()", "SELECT 'hostName()' AS s", "SELECT user FROM tenant1.t",
                                 "SELECT timezone()", "SELECT `user` FROM tenant1.t", "SELECT 1 -- hostName()",
                                 "SELECT t.currentUser FROM tenant1.t AS t", "SELECT user, database FROM tenant1.t",
-                                "GRANT SELECT ON tenant1.t TO CURRENT_USER"}) {
+                                "GRANT SELECT ON tenant1.t TO CURRENT_USER",
+                                // A table named like an identity function, before its column list.
+                                "INSERT INTO user (a) VALUES (1)", "INSERT INTO TABLE database (a) VALUES (1)",
+                                "CREATE TABLE schema (a UInt64) ENGINE = MergeTree ORDER BY a",
+                                "CREATE TABLE IF NOT EXISTS hostName (a UInt64) ENGINE = MergeTree ORDER BY a"}) {
     const auto resp = rewrite(sql);
     EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << ": " << resp.message();
   }
@@ -132,6 +136,10 @@ TEST(MetadataAccess, FirstDeploymentIdentityCallReadsTokens) {
   EXPECT_FALSE(firstDeploymentIdentityCall("SELECT 'currentUser()'"));
   EXPECT_FALSE(firstDeploymentIdentityCall("SELECT hostName"));
   EXPECT_FALSE(firstDeploymentIdentityCall("CREATE USER u IDENTIFIED BY 'p'"));
+  EXPECT_FALSE(firstDeploymentIdentityCall("INSERT INTO user (a) VALUES (1)"));
+  EXPECT_FALSE(firstDeploymentIdentityCall("CREATE TABLE IF NOT EXISTS schema (a UInt64) ENGINE = Memory"));
+  EXPECT_FALSE(firstDeploymentIdentityCall("CREATE MATERIALIZED VIEW mv TO database (a UInt64) AS SELECT 1 AS a"));
+  EXPECT_EQ(firstDeploymentIdentityCall("INSERT INTO t (a) SELECT user()"), "user");
 }
 
 namespace {
