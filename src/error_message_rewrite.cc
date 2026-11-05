@@ -376,6 +376,21 @@ std::optional<size_t> findExact(std::string_view haystack, std::string_view need
   return found;
 }
 
+std::optional<bool> containsIdentifier(std::string_view err, std::string_view ident, WorkBudget &budget) {
+  if (ident.empty() || ident.size() > err.size()) return false;
+  if (!budget.charge(err.size() + ident.size())) return std::nullopt;
+  bool found = false;
+  forEachOccurrence(err, ident, [&](size_t start, bool &stop) {
+    const size_t stop_at = start + ident.size();
+    if ((start == 0 || !isIdentChar(err[start - 1])) && (stop_at == err.size() || !isIdentChar(err[stop_at]))) {
+      found = true;
+      stop = true;
+    }
+    return false;
+  });
+  return found;
+}
+
 std::optional<std::string> replaceSqlBlock(
   std::string_view err, std::string_view sql, std::string_view replacement, WorkBudget &budget) {
   if (sql.empty()) return std::string(err);

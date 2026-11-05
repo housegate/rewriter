@@ -98,4 +98,11 @@ std::optional<std::string> replaceIdentifier(
 std::optional<std::string> replaceQualifiedIdentifier(
   std::string_view err, std::string_view qualified, std::string_view replacement, WorkBudget &budget);
 
+// Whether `err` mentions `ident` byte for byte with no [A-Za-z0-9_] on either
+// side (a backtick, dot or quote around it is a boundary). Case-sensitive:
+// ClickHouse prints a stored name as stored, and a case-folded match would
+// read a keyword (`DEFAULT`) as a database called `default`. An empty `ident`
+// is never mentioned. nullopt when the budget runs out.
+std::optional<bool> containsIdentifier(std::string_view err, std::string_view ident, WorkBudget &budget);
+
 } // namespace rewriter_error

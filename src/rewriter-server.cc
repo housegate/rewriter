@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -100,6 +101,108 @@ bool sqlExceedsLimit(
   const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
   const size_t limit = rewriter_limits::maxRequestSqlBytes();
   return limit != 0 && requestSqlBytes(sql, options) > limit;
+}
+
+// What a RewriteErrorMessage result may not contain once the mapping passes
+// have run: the physical side of the request's routing that the caller has no
+// name for. A mention left over means a pass missed one (an error naming a
+// database the statement's rewrite did not touch, a remote host, a protocol
+// database), so the text is withheld rather than returned.
+struct HiddenNames {
+  std::vector<std::string> identifiers;  // physical databases
+  std::vector<std::string> literals;     // remote addresses and credentials
+};
+
+std::string_view databasePart(std::string_view qualified) {
+  const size_t dot = qualified.find('.');
+  return dot == std::string_view::npos ? std::string_view{} : qualified.substr(0, dot);
+}
+
+// A remote address as configured, and every host it names: ClickHouse's
+// remote() takes a comma-separated list of shards and `|`-separated replicas,
+// each `host`, `host:port`, `[ipv6]` or `[ipv6]:port`. An error may name a
+// host without the rest of the address, so each host is a literal of its own.
+// Parts shorter than four bytes are dropped, as they would match ordinary text.
+void addRemoteAddress(std::vector<std::string> &literals, const std::string &addr) {
+  constexpr size_t kMinLiteral = 4;
+  const auto add = [&literals](std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+    if (value.size() >= kMinLiteral) literals.emplace_back(value);
+  };
+  add(addr);
+  std::string_view rest = addr;
+  while (!rest.empty()) {
+    const size_t cut = rest.find_first_of(",|");
+    std::string_view part = rest.substr(0, cut);
+    rest = cut == std::string_view::npos ? std::string_view{} : rest.substr(cut + 1);
+    while (!part.empty() && (part.front() == ' ' || part.front() == '\t')) part.remove_prefix(1);
+    add(part);
+    if (!part.empty() && part.front() == '[') {
+      if (const size_t close = part.find(']'); close != std::string_view::npos) add(part.substr(1, close - 1));
+    } else if (const size_t colon = part.find(':'); colon != std::string_view::npos && part.rfind(':') == colon) {
+      add(part.substr(0, colon));
+    }
+  }
+}
+
+void addSecret(std::vector<std::string> &literals, const std::string &secret) {
+  constexpr size_t kMinLiteral = 4;
+  if (secret.size() >= kMinLiteral) literals.push_back(secret);
+}
+
+HiddenNames hiddenNamesFor(
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
+  HiddenNames hidden;
+  std::set<std::string> physical;
+  std::set<std::string> visible;  // names the caller may write itself
+  const auto selection = rewriter_handlers::findActiveTableRewrite(options);
+  if (selection.mode == rewriter_handlers::TableRewriteMode::Dynamic) {
+    const auto &args = *selection.dynamic_args;
+    // Candidates, kept only when the table-reference policy protects them
+    // (protectedDatabase): the SI databases count while the surface is active,
+    // and reserved_databases only under contract V2, as for every other rule.
+    std::set<std::string> candidates(args.protected_databases().begin(), args.protected_databases().end());
+    for (const auto &[logical, db] : args.database_map()) {
+      visible.insert(logical);
+      candidates.insert(db);
+    }
+    const auto &si = args.storage_integrity();
+    candidates.insert(si.reserved_databases().begin(), si.reserved_databases().end());
+    for (const auto &[logical, table] : si.tables()) {
+      candidates.insert(std::string(databasePart(table.safe_table())));
+      candidates.insert(std::string(databasePart(table.unsafe_table())));
+    }
+    for (const auto &db : candidates)
+      if (rewriter_handlers::protectedDatabase(db, args)) physical.insert(db);
+    for (const auto &db : args.known_physical_databases())
+      if (!physical.contains(db)) visible.insert(db);
+    if (!args.upstream_logical_database_in_context().empty())
+      visible.insert(args.upstream_logical_database_in_context());
+    for (const auto &[key, upstream] : args.remote_upstreams()) {
+      addRemoteAddress(hidden.literals, upstream.addr());
+      addSecret(hidden.literals, upstream.password());
+    }
+  } else if (selection.mode == rewriter_handlers::TableRewriteMode::Static) {
+    const auto &args = *selection.static_args;
+    const auto addOrigin = [&visible](const std::string &origin) {
+      if (const auto db = databasePart(origin); !db.empty()) visible.insert(std::string(db));
+    };
+    for (const auto &[origin, table] : args.table_map()) addOrigin(origin);
+    for (const auto &[origin, target] : args.table_with_database_map()) {
+      addOrigin(origin);
+      physical.insert(target.database());
+    }
+    for (const auto &[origin, remote] : args.remote_table_map()) {
+      addOrigin(origin);
+      physical.insert(remote.database());
+      addRemoteAddress(hidden.literals, remote.addr());
+      addSecret(hidden.literals, remote.password());
+    }
+  }
+  for (const auto &db : physical)
+    if (!db.empty() && !visible.contains(db)) hidden.identifiers.push_back(db);
+  return hidden;
 }
 
 } // namespace
@@ -490,11 +593,9 @@ void RewriterServiceImpl::doRewriteErrorMessage(
   doRewrite(&rewrite_req, &rewrite_resp);
 
   if (rewrite_resp.code() != rewriter::Success) {
-    // We don't know what to invert. Surface the rewrite-side reason and
-    // pass the error message through so the caller can still see it.
-    response->set_error_after_rewrite(request->error_message());
-    response->set_message(rewrite_resp.message());
-    response->set_code(rewrite_resp.code());
+    // Without the rewrite there is nothing to invert, and the raw error can
+    // name physical databases and tables: withhold it.
+    withhold("rewrite failed");
     return;
   }
 
@@ -564,6 +665,20 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     auto replaced = rewriter_error::replaceIdentifier(err, physical, origin, budget);
     if (!replaced) return budgetStopped();
     err = std::move(*replaced);
+  }
+
+  // Fail closed on what the passes left: a physical database, remote address
+  // or credential of this request's routing still in the text.
+  const HiddenNames hidden = hiddenNamesFor(request->options());
+  for (const auto &ident : hidden.identifiers) {
+    const auto mentioned = rewriter_error::containsIdentifier(err, ident, budget);
+    if (!mentioned) return budgetStopped();
+    if (*mentioned) return withhold("physical name remained");
+  }
+  for (const auto &literal : hidden.literals) {
+    const auto found = rewriter_error::findExact(err, literal, budget);
+    if (budget.exhausted()) return budgetStopped();
+    if (found) return withhold("physical name remained");
   }
 
   response->set_error_after_rewrite(err);
