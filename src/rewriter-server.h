@@ -9,6 +9,7 @@
 #include <Parsers/parseQuery.h>
 #include <grpc++/grpc++.h>
 
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -68,8 +69,11 @@ public:
     const MaterializeSQLRequest *request, MaterializeSQLResponse *response);
   void doRewrite(
     const RewriteSQLRequest *request, RewriteSQLResponse *response);
+  // `cancelled`, when set, reports that the caller gave up; the error text is
+  // then withheld rather than finished.
   void doRewriteErrorMessage(
-    const RewriteErrorMessageRequest *request, RewriteErrorMessageResponse *response);
+    const RewriteErrorMessageRequest *request, RewriteErrorMessageResponse *response,
+    std::function<bool()> cancelled = {});
   void doOptimize(
     const OptimizeRequest *request, OptimizeResponse *response);
 

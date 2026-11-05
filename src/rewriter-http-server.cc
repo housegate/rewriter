@@ -8,7 +8,6 @@
 #include <Poco/Net/HTTPServerResponse.h>
 #include <Poco/Net/ServerSocket.h>
 #include <Poco/Net/SocketAddress.h>
-#include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
 #include <google/protobuf/util/json_util.h>
 
@@ -17,6 +16,7 @@
 #include <sstream>
 #include <string>
 
+#include "request_limits.h"
 #include "rewriter-server.h"
 #include "rewriter.pb.h"
 
@@ -52,6 +52,13 @@ void writeError(HTTPServerResponse &response, const std::string &msg,
   writeJson(response, std::string("{\"error\":\"") + escaped + "\"}", status);
 }
 
+// The unread rest of an oversized body would be parsed as the next request on
+// a kept-alive connection, so the 413 closes it instead of draining the body.
+void rejectOversizedBody(HTTPServerResponse &response) {
+  response.setKeepAlive(false);
+  writeError(response, "request body too large", HTTPResponse::HTTP_REQUEST_ENTITY_TOO_LARGE);
+}
+
 template <typename Req, typename Resp, typename HandlerFn>
 void handleProtoEndpoint(HTTPServerRequest &request, HTTPServerResponse &response,
                          HandlerFn &&handler) {
@@ -61,9 +68,29 @@ void handleProtoEndpoint(HTTPServerRequest &request, HTTPServerResponse &respons
     return;
   }
 
-  std::ostringstream oss;
-  Poco::StreamCopier::copyStream(request.stream(), oss);
-  const std::string body_in = oss.str();
+  // Read at most the configured cap: the body used to be read whole, however
+  // large, before anything looked at it.
+  const size_t max_body = rewriter_limits::maxHttpBodyBytes();
+  if (max_body != 0 && request.hasContentLength()
+      && request.getContentLength64() > static_cast<Poco::Int64>(max_body)) {
+    rejectOversizedBody(response);
+    return;
+  }
+  std::string body_in;
+  {
+    std::istream &in = request.stream();
+    std::string chunk(64 * 1024, '\0');
+    while (in) {
+      in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+      const auto got = static_cast<size_t>(in.gcount());
+      if (got == 0) break;
+      if (max_body != 0 && body_in.size() + got > max_body) {
+        rejectOversizedBody(response);
+        return;
+      }
+      body_in.append(chunk.data(), got);
+    }
+  }
 
   Req req;
   if (auto status = pb_util::JsonStringToMessage(body_in, &req); !status.ok()) {

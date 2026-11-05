@@ -24,6 +24,7 @@ clickhouse_add_executable(rewriter_tests
     snapshot_query_contract_test.cc
     snapshot_query_test.cc
     snapshot_query_profiles_test.cc
+    dos_hardening_test.cc
     $<TARGET_OBJECTS:rewriter_core>
 )
 

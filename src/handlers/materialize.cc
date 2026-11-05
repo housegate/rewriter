@@ -305,7 +305,7 @@ bool materializeRow(const std::string &interior, Materializer &m, std::string &o
   const char *e = p + interior.size();
   DB::ASTPtr list;
   try {
-    list = DB::parseQuery(parser, p, e, /*description=*/"", 0, 0, 0);
+    list = parseBounded(parser, p, e);
   } catch (const std::exception &) {
     return false;
   }
@@ -381,7 +381,7 @@ void materialize(const rewriter::MaterializeSQLRequest *request,
   DB::ParserQuery parser(end, false);
   DB::ASTPtr ast;
   try {
-    ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    ast = parseBounded(parser, pos, end);
   } catch (const DB::Exception &e) {
     response->set_code(rewriter::MaterializeCode::MaterializeSyntaxError);
     response->set_message(e.displayText());

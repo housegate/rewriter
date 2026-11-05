@@ -210,6 +210,7 @@ message(STATUS "Using headers ${rewriter_grpc_proto_headers}")
 add_library(rewriter_core OBJECT
     src/rewriter-server.cc
     src/query_preprocessor.cc
+    src/error_message_rewrite.cc
     src/snapshot_query_profiles.cc
     src/snapshot_executable_identity.cc
     src/ASTTransformers.cc

@@ -50,7 +50,7 @@ std::unordered_map<String, ASTPtr> parseCTEMapToAST(
       const char *sub_pos = sub_sql.data();
       const char *sub_end = sub_pos + sub_sql.size();
       ParserQuery sub_parser(sub_end, false);
-      ASTPtr sub_ast = parseQuery(sub_parser, sub_pos, sub_end, 0, 0, 0);
+      ASTPtr sub_ast = rewriter_handlers::parseBounded(sub_parser, sub_pos, sub_end);
       if (sub_ast) {
         rewriter_handlers::registerFieldOnlyChildren(*sub_ast);
         out.emplace(alias, std::move(sub_ast));

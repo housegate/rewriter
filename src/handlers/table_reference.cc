@@ -1,5 +1,6 @@
 // src/handlers/table_reference.cc — see table_reference.h.
 #include "handlers/table_reference.h"
+#include "handlers/common.h"
 #include "handlers/sql_tokens.h"
 
 #include <IO/ReadBufferFromMemory.h>
@@ -1288,7 +1289,7 @@ std::optional<DB::ASTs> parseValuesRows(const char *begin, const char *end) {
         if (depth == 0) return std::nullopt;
         if (--depth == 0) {
           DB::ParserExpressionList parser(/*allow_alias_without_as_keyword=*/false);
-          rows.push_back(DB::parseQuery(parser, row_begin, tok.begin, "", 0, 0, 0));
+          rows.push_back(parseBounded(parser, row_begin, tok.begin));
         }
       } else if (depth == 0 && tok.type != DB::TokenType::Whitespace
                  && tok.type != DB::TokenType::Comment && tok.type != DB::TokenType::Comma

@@ -763,7 +763,7 @@ bool handleRemovedLiveViewCompatibility(
     const char *begin = candidate.data();
     const char *end = begin + candidate.size();
     DB::ParserQuery parser(end, false);
-    ast = DB::parseQuery(parser, begin, end, /*description=*/"", 0, 0, 0);
+    ast = parseBounded(parser, begin, end);
   } catch (const DB::Exception &) {
     return false;
   }

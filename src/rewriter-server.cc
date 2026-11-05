@@ -9,13 +9,14 @@
 #include <grpc++/grpc++.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
-#include <regex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "handlers/common.h"
@@ -34,7 +35,9 @@
 #include "handlers/describe.h"
 #include "handlers/use.h"
 #include "handlers/writes.h"
+#include "error_message_rewrite.h"
 #include "query_preprocessor.h"
+#include "request_limits.h"
 #include "rewriter-http-server.h"
 
 #include <s2/s2testing.h>
@@ -68,239 +71,35 @@ inline std::string shortSqlHash(const std::string &sql) {
 
 } // namespace
 
-// Regex helpers used only by doRewriteErrorMessage. Kept here so handler code
-// doesn't depend on them.
+// Bounds shared by the request paths below.
 namespace {
 
-inline void regexEscapeAppend(char c, std::string &out) {
-  switch (c) {
-  case '.':
-  case '^':
-  case '$':
-  case '|':
-  case '(':
-  case ')':
-  case '\\':
-  case '[':
-  case ']':
-  case '*':
-  case '+':
-  case '?':
-  case '{':
-  case '}':
-    out.push_back('\\');
-    out.push_back(c);
-    break;
-  default: out.push_back(c);
+// Shown in place of a ClickHouse error that RewriteErrorMessage cannot map
+// back within its bounds (an oversized request, a spent scan budget, a
+// cancelled call): returned half-rewritten it could still name physical
+// databases and tables.
+constexpr std::string_view kWithheldErrorMessage =
+  "Query failed. The error details were withheld: the rewriter could not map them "
+  "back to the original query within its limits.";
+
+// Bytes of caller SQL a request makes the rewriter parse: the statement plus
+// every CommonTableExprRewrite body.
+size_t requestSqlBytes(
+  const std::string &sql,
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
+  size_t total = sql.size();
+  for (const auto &option : options) {
+    if (option.op() != rewriter::RewriteOp::CommonTableExprRewrite) continue;
+    for (const auto &kv : option.common_table_expr_args().cte_map()) total += kv.second.sql().size();
   }
+  return total;
 }
 
-inline std::string regexEscape(const std::string &s) {
-  std::string out;
-  out.reserve(s.size() * 2);
-  for (unsigned char ch : s) { regexEscapeAppend(static_cast<char>(ch), out); }
-  return out;
-}
-
-// Whitespace-insensitive regex for matching the rewritten SQL inside a
-// (possibly ANSI-colored) error message.
-inline std::regex makeFlexibleSqlRegex(const std::string &sql) {
-  std::string out;
-  out.reserve(sql.size() * 2);
-  bool in_ws = false;
-  for (unsigned char c : sql) {
-    switch (c) {
-    case ' ':
-    case '\t':
-    case '\n':
-    case '\r':
-    case '\f':
-    case '\v':
-      if (!in_ws) {
-        out.append("\\s+");
-        in_ws = true;
-      }
-      break;
-    default: regexEscapeAppend(static_cast<char>(c), out); in_ws = false;
-    }
-  }
-  return std::regex(out, std::regex::ECMAScript | std::regex::icase | std::regex::optimize);
-}
-
-// ECMAScript in std::regex does not support lookbehind, so we use a captured
-// prefix + lookahead and must keep $1 in replacements. Boundary-aware regex
-// matching an identifier optionally wrapped in backticks.
-inline std::regex makeIdentRegex(const std::string &ident) {
-  std::string esc = regexEscape(ident);
-  std::string pat = "(^|[^A-Za-z0-9_])`?" + esc + "`?(?=[^A-Za-z0-9_]|$)";
-  return std::regex(pat, std::regex::ECMAScript | std::regex::icase);
-}
-
-// Forward Myers' O(ND) diff between `rewritten` and `original`, returning a
-// position map: result[i] (for i in [0, rewritten.size()]) is the byte offset
-// in `original` corresponding to byte offset i in `rewritten`. Positions
-// inside a deleted span (chars present in rewritten but not in original)
-// collapse to the boundary of the surrounding equal range — best effort, but
-// stable enough that "position N" inside a rewritten table identifier remaps
-// to the start of the user's original identifier.
-//
-// Caller is responsible for bounding input size if the diff distance D could
-// blow up — runtime is O((N+M)*D), memory O((N+M)*D). For SQL-style edits
-// (a handful of identifier swaps) D is small and this finishes in ms.
-inline std::vector<size_t> buildOffsetMap(std::string_view rewritten,
-                                          std::string_view original) {
-  const size_t N = rewritten.size(), M = original.size();
-  std::vector<size_t> pos_map(N + 1);
-  pos_map[N] = M;
-  if (N == 0) return pos_map;
-  if (M == 0) {
-    for (size_t i = 0; i < N; i++) pos_map[i] = 0;
-    return pos_map;
-  }
-
-  const int MAX = static_cast<int>(N + M);
-  auto kIdx = [MAX](int k) { return k + MAX; };
-  std::vector<int> V(2 * static_cast<size_t>(MAX) + 1, 0);
-  std::vector<std::vector<int>> trace;
-  trace.reserve(static_cast<size_t>(MAX) + 1);
-
-  int found_d = -1;
-  for (int d = 0; d <= MAX; d++) {
-    trace.push_back(V);
-    bool done = false;
-    for (int k = -d; k <= d && !done; k += 2) {
-      int x;
-      const bool down = (k == -d) || (k != d && V[kIdx(k - 1)] < V[kIdx(k + 1)]);
-      if (down) {
-        x = V[kIdx(k + 1)];
-      } else {
-        x = V[kIdx(k - 1)] + 1;
-      }
-      int y = x - k;
-      while (x < static_cast<int>(N) && y < static_cast<int>(M) && rewritten[x] == original[y]) {
-        x++; y++;
-      }
-      V[kIdx(k)] = x;
-      if (x >= static_cast<int>(N) && y >= static_cast<int>(M)) {
-        found_d = d;
-        done = true;
-      }
-    }
-    if (done) break;
-  }
-
-  if (found_d < 0) {
-    for (size_t i = 0; i < N; i++) pos_map[i] = M;
-    return pos_map;
-  }
-
-  int x = static_cast<int>(N), y = static_cast<int>(M);
-  for (int d = found_d; d > 0; d--) {
-    const auto &Vp = trace[d];
-    const int k = x - y;
-    bool down;
-    if (k == -d) {
-      down = true;
-    } else if (k == d) {
-      down = false;
-    } else {
-      down = Vp[kIdx(k - 1)] < Vp[kIdx(k + 1)];
-    }
-    const int prev_k = down ? k + 1 : k - 1;
-    const int prev_x = Vp[kIdx(prev_k)];
-    const int prev_y = prev_x - prev_k;
-    const int slide_start_x = down ? prev_x : prev_x + 1;
-    const int slide_start_y = down ? prev_y + 1 : prev_y;
-
-    while (x > slide_start_x && y > slide_start_y) {
-      x--; y--;
-      if (x < static_cast<int>(N)) pos_map[x] = static_cast<size_t>(y);
-    }
-    if (down) {
-      y = prev_y;
-    } else {
-      if (prev_x < static_cast<int>(N)) pos_map[prev_x] = static_cast<size_t>(prev_y);
-      x = prev_x;
-    }
-  }
-  while (x > 0 && y > 0) {
-    x--; y--;
-    if (x < static_cast<int>(N)) pos_map[x] = static_cast<size_t>(y);
-  }
-  while (x > 0) {
-    x--;
-    pos_map[x] = 0;
-  }
-  return pos_map;
-}
-
-// Patch byte-position references in `err` so they point into the original
-// SQL coordinates instead of the rewritten ones. CH parse errors emit
-// "Syntax error[: ...]: failed at position N (...)" with N being a 1-based
-// byte offset (clickHouse/src/Parsers/parseQuery.cpp). We only see errors on
-// SQL the rewriter parsed successfully, so practically this fires when CH's
-// own parser is stricter than ours and rejects the rewritten output — rare
-// but it does happen, and the position is unhelpful when the user reads it
-// against their original SQL.
-//
-// Line/col `(line L, col C)` is intentionally NOT remapped: the rewriter
-// always emits one-line SQL (formatWithPossiblyHidingSensitiveData,
-// one_line=true), so CH's getLineAndCol guard `nl + 1 < end` is false and
-// CH never prints line/col for our queries.
-inline std::string remapErrorPositions(const std::string &err,
-                                       const std::vector<size_t> &pos_map) {
-  // pos_map.size() - 1 is the rewritten SQL byte length.
-  if (pos_map.size() <= 1) return err;
-  static const std::regex re(R"(([Pp]osition[\s]+)(\d+))");
-  std::string out;
-  out.reserve(err.size());
-  size_t last = 0;
-  for (auto it = std::sregex_iterator(err.begin(), err.end(), re),
-            end = std::sregex_iterator();
-       it != end; ++it) {
-    const auto &m = *it;
-    const size_t mp = static_cast<size_t>(m.position(0));
-    out.append(err, last, mp - last);
-    out.append(m[1].str());
-    size_t pos1 = 0;  // 1-based as printed.
-    bool ok = true;
-    try { pos1 = std::stoull(m[2].str()); } catch (...) { ok = false; }
-    // CH uses 1-based; subtract 1 to index pos_map. Out-of-range stays put
-    // (probably not a SQL position — could be a version digit run).
-    if (!ok || pos1 == 0 || pos1 > pos_map.size() - 1) {
-      out.append(m[2].str());
-    } else {
-      out.append(std::to_string(pos_map[pos1 - 1] + 1));
-    }
-    last = mp + static_cast<size_t>(m.length(0));
-  }
-  out.append(err, last, err.size() - last);
-  return out;
-}
-
-// Boundary-aware regex matching a qualified table reference, allowing each
-// component to be optionally backtick-quoted. Splits on the first dot — that
-// matches how recordTableRewrite encodes "<db>.<table>" (and how the dynamic
-// rewriter packs the prefix-prefixed table into the table half, so its dot is
-// always inside the backticks ClickHouse's WhenNecessary formatter emits).
-inline std::regex makeQualifiedIdentRegex(const std::string &qualified) {
-  const auto dot = qualified.find('.');
-  if (dot == std::string::npos) {
-    return makeIdentRegex(qualified);
-  }
-  const std::string db = qualified.substr(0, dot);
-  const std::string table = qualified.substr(dot + 1);
-  const std::string esc_db = regexEscape(db);
-  const std::string esc_table = regexEscape(table);
-  // If the table half itself contains a dot, ClickHouse's formatter will have
-  // wrapped it in backticks (the dot is illegal bare). Require them so we
-  // don't greedy-match across an unrelated `.foo` suffix.
-  const bool table_has_dot = table.find('.') != std::string::npos;
-  const std::string table_pat =
-    table_has_dot ? ("`" + esc_table + "`") : ("`?" + esc_table + "`?");
-  const std::string pat =
-    "(^|[^A-Za-z0-9_])`?" + esc_db + "`?\\." + table_pat + "(?=[^A-Za-z0-9_]|$)";
-  return std::regex(pat, std::regex::ECMAScript | std::regex::icase);
+bool sqlExceedsLimit(
+  const std::string &sql,
+  const google::protobuf::RepeatedPtrField<rewriter::RewriteOption> &options) {
+  const size_t limit = rewriter_limits::maxRequestSqlBytes();
+  return limit != 0 && requestSqlBytes(sql, options) > limit;
 }
 
 } // namespace
@@ -380,6 +179,14 @@ void RewriterServiceImpl::doRewrite(
   // parser catch below retains its established diagnostic sentinel.
   response->set_sql_after_rewrite(original_query);
 
+  // Bound the SQL this request makes the rewriter preprocess and parse (the
+  // statement and every CTE body) before any of that work starts.
+  if (sqlExceedsLimit(original_query, request->options())) {
+    response->set_message("query exceeds maximum supported size");
+    response->set_code(rewriter::RewriteCode::RewriteError);
+    return;
+  }
+
   // The Go contract accepts a small set of SELECT/ATTACH forms that the
   // pinned ClickHouse parser predates. Token-aware preparation rejects SI
   // wrappers before parsing and temporarily removes ordinary wrappers. The
@@ -441,7 +248,7 @@ void RewriterServiceImpl::doRewrite(
     // form, which converts `pos` and `end` to temporary strings whose
     // buffers die on return — leaving INSERT inline payload pointers
     // dangling. See doRewriteErrorMessage below for the same pattern.
-    parsed_ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    parsed_ast = rewriter_handlers::parseBounded(parser, pos, end);
     // A literal the embedded parser folds into SQL that ClickHouse 25.8 / 26.2
     // read differently. A literal tuple in an extra pair of grouping
     // parentheses (`x IN ((1, 0, '0'))`, N1) is preserved: the text is parsed
@@ -463,7 +270,7 @@ void RewriterServiceImpl::doRewrite(
         const char *marked_pos = marked_query.data();
         const char *marked_end = marked_pos + marked_query.size();
         DB::ParserQuery marked_parser(marked_end, false);
-        marked_ast = DB::parseQuery(marked_parser, marked_pos, marked_end, /*description=*/"", 0, 0, 0);
+        marked_ast = rewriter_handlers::parseBounded(marked_parser, marked_pos, marked_end);
       } catch (const DB::Exception &) {
         marked_ast = nullptr;
       }
@@ -610,33 +417,61 @@ grpc::Status RewriterServiceImpl::Rewrite(
 
 void RewriterServiceImpl::doRewriteErrorMessage(
   const RewriteErrorMessageRequest *request,
-  RewriteErrorMessageResponse *response) {
+  RewriteErrorMessageResponse *response,
+  std::function<bool()> cancelled) {
 
   const std::string sql_id = shortSqlHash(request->sql());
   const size_t sql_len = request->sql().size();
   const size_t err_len = request->error_message().size();
   const auto t0 = std::chrono::steady_clock::now();
+  // Why the error text was withheld, for the access log; empty otherwise.
+  std::string withheld;
 
   struct AccessLog {
     const std::string &sql_id;
     const RewriteErrorMessageResponse *response;
+    const std::string &withheld;
     std::chrono::steady_clock::time_point t0;
     size_t sql_len;
     size_t err_len;
     ~AccessLog() {
       const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - t0).count();
-      std::cerr << "[access] method=RewriteErrorMessage sql=" << sql_id
-                << " code=" << response->code()
-                << " sql_len=" << sql_len
-                << " err_len=" << err_len
-                << " took_us=" << us << std::endl;
+      std::ostringstream line;
+      line << "[access] method=RewriteErrorMessage sql=" << sql_id
+           << " code=" << response->code()
+           << " sql_len=" << sql_len
+           << " err_len=" << err_len;
+      if (!withheld.empty()) line << " withheld=\"" << withheld << "\"";
+      line << " took_us=" << us << '\n';
+      std::cerr << line.str() << std::flush;
     }
-  } _access_log{sql_id, response, t0, sql_len, err_len};
+  } _access_log{sql_id, response, withheld, t0, sql_len, err_len};
 
   if (request->error_message().empty()) {
     response->set_message("Error message is empty");
     response->set_code(rewriter::Success);
+    return;
+  }
+
+  // Fail closed: the caller shows error_after_rewrite to the client, so text
+  // the passes below could not finish with is replaced, never returned raw.
+  const auto withhold = [&](const char *reason) {
+    withheld = reason;
+    response->set_error_after_rewrite(std::string(kWithheldErrorMessage));
+    response->set_message(std::string("error message withheld: ") + reason);
+    response->set_code(rewriter::Success);
+  };
+
+  const size_t max_error_bytes = rewriter_limits::maxErrorMessageBytes();
+  if (sqlExceedsLimit(request->sql(), request->options())
+      || (max_error_bytes != 0 && err_len > max_error_bytes)) {
+    withhold("input too large");
+    return;
+  }
+  const auto isCancelled = [&cancelled] { return cancelled && cancelled(); };
+  if (isCancelled()) {
+    withhold("cancelled");
     return;
   }
 
@@ -663,6 +498,12 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     return;
   }
 
+  // Every pass below is a linear scan charged to one budget, so the work is
+  // bounded however many mappings the statement produced.
+  rewriter_error::WorkBudget budget(rewriter_limits::errorRewriteScanBudget(), isCancelled);
+  const auto budgetStopped = [&]() {
+    withhold(isCancelled() ? "cancelled" : "scan budget exhausted");
+  };
   std::string err = request->error_message();
 
   const std::string &rewritten_sql = rewrite_resp.sql_after_rewrite();
@@ -672,21 +513,31 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     // they still match the rewritten SQL we're about to swap out. Without
     // this the user reads "position N" against their original SQL and ends
     // up at a totally wrong token (the rewritten table prefix shifts every
-    // position past its insertion point).
-    const auto pos_map = buildOffsetMap(rewritten_sql, original_sql);
-    err = remapErrorPositions(err, pos_map);
+    // position past its insertion point). The diff runs only when the error
+    // cites a position, and gives up past kMaxOffsetMapEdits edits, leaving
+    // the positions as ClickHouse printed them.
+    if (!budget.charge(err.size())) return budgetStopped();
+    if (const auto refs = rewriter_error::findPositionRefs(err); !refs.empty()) {
+      const auto pos_map = rewriter_error::buildOffsetMap(
+        rewritten_sql, original_sql, rewriter_error::kMaxOffsetMapEdits, budget);
+      if (budget.exhausted()) return budgetStopped();
+      if (pos_map) err = rewriter_error::remapErrorPositions(err, refs, *pos_map);
+    }
 
     // Whole-SQL replacement: when the error embeds the rewritten SQL (the
     // common "In scope SELECT ..." form), swap the whole block back to the
     // user's original SQL. Catches the remote() case too — its full
     // remote('addr', 'db', 'table', 'user', '[HIDDEN]') call lives only in
-    // sql_after_rewrite, not in table_rewrites.
-    auto p = err.find(rewritten_sql);
-    if (p != std::string::npos) {
-      err.replace(p, rewritten_sql.size(), original_sql);
+    // sql_after_rewrite, not in table_rewrites. An exact first occurrence
+    // wins; otherwise every case- and whitespace-insensitive occurrence.
+    const auto exact = rewriter_error::findExact(err, rewritten_sql, budget);
+    if (budget.exhausted()) return budgetStopped();
+    if (exact) {
+      err.replace(*exact, rewritten_sql.size(), original_sql);
     } else {
-      std::regex flex = makeFlexibleSqlRegex(rewritten_sql);
-      err = std::regex_replace(err, flex, original_sql);
+      auto swapped = rewriter_error::replaceSqlBlock(err, rewritten_sql, original_sql, budget);
+      if (!swapped) return budgetStopped();
+      err = std::move(*swapped);
     }
   }
 
@@ -697,8 +548,9 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     const std::string &origin = kv.first;
     const std::string &rewritten = kv.second;
     if (origin == rewritten || rewritten.empty()) continue;
-    std::regex re = makeQualifiedIdentRegex(rewritten);
-    err = std::regex_replace(err, re, std::string("$1") + origin);
+    auto replaced = rewriter_error::replaceQualifiedIdentifier(err, rewritten, origin, budget);
+    if (!replaced) return budgetStopped();
+    err = std::move(*replaced);
   }
 
   // Per-database substitution: physical -> logical. Runs after table-level
@@ -709,8 +561,9 @@ void RewriterServiceImpl::doRewriteErrorMessage(
     const std::string &origin = kv.first;
     const std::string &physical = kv.second;
     if (origin == physical || physical.empty()) continue;
-    std::regex re = makeIdentRegex(physical);
-    err = std::regex_replace(err, re, std::string("$1") + origin);
+    auto replaced = rewriter_error::replaceIdentifier(err, physical, origin, budget);
+    if (!replaced) return budgetStopped();
+    err = std::move(*replaced);
   }
 
   response->set_error_after_rewrite(err);
@@ -718,12 +571,13 @@ void RewriterServiceImpl::doRewriteErrorMessage(
   response->set_code(rewriter::Success);
 }
 
-// gRPC thin wrapper — delegates to doRewriteErrorMessage.
+// gRPC thin wrapper — delegates to doRewriteErrorMessage, handing it the
+// call's cancellation (the client gave up or its deadline passed).
 grpc::Status RewriterServiceImpl::RewriteErrorMessage(
-  ServerContext * /*context*/,
+  ServerContext *context,
   const RewriteErrorMessageRequest *request,
   RewriteErrorMessageResponse *response) {
-  doRewriteErrorMessage(request, response);
+  doRewriteErrorMessage(request, response, [context] { return context && context->IsCancelled(); });
   return grpc::Status::OK;
 }
 
@@ -759,7 +613,7 @@ void RewriterServiceImpl::doOptimize(
   DB::ParserQuery parser(end, /*allow_settings_after_format_in_insert=*/false);
   DB::ASTPtr ast;
   try {
-    ast = DB::parseQuery(parser, pos, end, /*description=*/"", 0, 0, 0);
+    ast = rewriter_handlers::parseBounded(parser, pos, end);
   } catch (const DB::Exception &e) {
     response->set_code(rewriter::OptimizeCode::OptimizeSyntaxError);
     response->set_message(e.displayText());
@@ -852,8 +706,27 @@ void RunServer(uint16_t grpc_port, uint16_t http_port,
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
+  // Bound the sync server's thread pool: past it, new calls fail fast with
+  // RESOURCE_EXHAUSTED (and the client can retry another replica) instead of
+  // every call slowing down together.
+  const int max_threads = rewriter_limits::maxServerThreads();
+  grpc::ResourceQuota quota("rewriter");
+  quota.SetMaxThreads(max_threads);
+  builder.SetResourceQuota(quota);
+  // gRPC's 4 MiB default would cap requests below the configured SQL and
+  // error-text limits; derive the cap from them.
+  const int max_recv_bytes = rewriter_limits::maxReceiveMessageBytes();
+  builder.SetMaxReceiveMessageSize(max_recv_bytes);
   std::unique_ptr<Server> server(builder.BuildAndStart());
-  std::cout << "Server listening on " << server_address << " (gRPC)" << std::endl;
+  if (!server) {
+    std::cerr << "failed to start the gRPC server on " << server_address << std::endl;
+    std::exit(1);
+  }
+  std::cout << "Server listening on " << server_address << " (gRPC)"
+            << " max_threads=" << max_threads
+            << " max_recv_bytes=" << max_recv_bytes
+            << " max_sql_bytes=" << rewriter_limits::maxRequestSqlBytes()
+            << " max_error_bytes=" << rewriter_limits::maxErrorMessageBytes() << std::endl;
 
   server->Wait();
 }

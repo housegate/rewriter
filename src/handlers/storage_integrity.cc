@@ -1075,7 +1075,7 @@ DB::ASTPtr buildStorageIntegrityDerivedTable(
   const std::string sql = storageIntegritySurfaceSQL(table, args);
   DB::ParserSelectWithUnionQuery parser;
   DB::ASTPtr select =
-    DB::parseQuery(parser, sql.data(), sql.data() + sql.size(), /*description=*/"", 0, 0, 0);
+    parseBounded(parser, sql.data(), sql.data() + sql.size());
   return DB::makeRewriterAST<DB::ASTSubquery>(select);
 }
 
