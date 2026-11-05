@@ -164,7 +164,7 @@ The dynamic-mode policy that `preflightTableReferences` opens (step 2 above) mir
 
 - **AST members outside `children`.** ClickHouse's parser keeps some subtrees only in a field. Every policy walker (T2 / T3 / T5 / T6 / R2, the SI checks, the system-table collector) and the rewrite walk iterate `children`, so a read there was invisible and unrewritten.
   - `registerFieldOnlyChildren` ([handlers/common.h](src/handlers/common.h)) adopts these fields as children right after parsing, for the request ([rewriter-server.cc](src/rewriter-server.cc)) and every CTE option body ([ASTTransformers.cc](src/ASTTransformers.cc)): `ASTWindowListElement::definition` (WINDOW), `ASTColumnsApplyTransformer::lambda` / `parameters` (APPLY), `ASTTTLElement::group_by_key` / `group_by_assignments` (TTL `GROUP BY … SET`) and `recompression_codec` (`RECOMPRESS CODEC`), and `ASTAlterCommand::refresh` (`MODIFY REFRESH … DEPENDS ON`). The formatter keeps reading the fields, which hold the same nodes. ENGINE arguments are already in `children` (R2 refuses a read there).
-  - The list comes from the structural enumeration in [docs/ast-member-enumeration.md](docs/ast-member-enumeration.md): every AST-pointer member of ClickHouse's parser headers is listed, and every expression-capable member reachable from a statement the engine can answer Success for is probed with a marker read. Its recipe (`list_members.sh`, `enum_probe.cc`, `run_probe.sh`) and the results at the pinned submodule are committed beside it. **Re-run it whenever the `clickHouse` submodule moves**: a ClickHouse bump can add a member, and an unadopted one is invisible to every walker.
+  - The list comes from the structural enumeration in the internal AST member enumeration research note: every AST-pointer member of ClickHouse's parser headers is listed, and every expression-capable member reachable from a statement the engine can answer Success for is probed with a marker read. Its recipe (`list_members.sh`, `enum_probe.cc`, `run_probe.sh`) and the results at the pinned submodule are committed beside it. **Re-run it whenever the `clickHouse` submodule moves**: a ClickHouse bump can add a member, and an unadopted one is invisible to every walker.
   - **Clone a parsed tree only through `clonePolicyAst`, before registration.** A registered tree's `clone()` would share adopted subtrees (APPLY's `clone()` copies `children` by pointer, `ASTAlterCommand::clone()` copies `refresh` by pointer). Today the SI reject annotator's copy is the only such clone; the unresolved-name check walks in a check-only mode instead of cloning.
 - **Name binding** ([handlers/cte_scope.h](src/handlers/cte_scope.h), a port of rewriter-go's `readSourceScope`). One `CTEAliasScope` drives the rewrite walk, the unresolved-name check, the SI read and namespace collectors, the system-table collector and the accessed-table collectors.
   - A read-query CTE name binds a one-part FROM / JOIN name and an IN operand in every nested scope.
@@ -346,6 +346,14 @@ backticks. When the corpus changes, update `kCorpusFingerprint`,
 constants, and record `cmp` plus SHA-256 evidence in both PRs.
 
 The current copy is byte-identical to rewriter-go's paired `want_sql_cpp` re-pin (branch `fix/table-reference-cpp-pins`, `3af8d1a`): v0.16.0's 1106 cases with 111 success cases now pinned per engine, 1175400 bytes, FNV-1a/64 `12039323447960595199`, SHA-256 `2afa6c3a9b0942b6150a9e5854cfd57d3c429daa743384a0f354ac201251a585`. The Go differential against this branch's server shows zero divergences.
+
+## Design docs
+
+Specs, implementation plans, rollout plans, roadmaps, reports and decisions for this repo live in the `internal workspace` workspace repo (`internal workspace`, private), not here: `internal design docs/`. Start at its `README.md` (stage timeline, module index; this repo's index is `modules/rewriter/README.md`) and follow its `CONVENTIONS.md` for placement, naming, frontmatter and references.
+
+- Do not add `docs/superpowers/`, `docs/specs/` or `docs/plans/` here. When a workflow skill (brainstorming, writing-plans, …) would save a spec or plan under `docs/superpowers/`, write it to `internal design docs/stages/<stage>/<phase>/` instead and commit it in `internal workspace` (direct to `main`, no PR).
+- From this repo, cite a design as `internal design docs/<path>` (or its GitHub URL).
+- What stays here: README and code-adjacent notes that describe current behavior.
 
 ## Conventions
 
