@@ -37,7 +37,6 @@
 #include "handlers/use.h"
 #include "handlers/writes.h"
 #include "error_message_rewrite.h"
-#include "query_preprocessor.h"
 #include "request_limits.h"
 #include "rewriter-http-server.h"
 
@@ -237,7 +236,7 @@ void RewriterServiceImpl::doRewrite(
   // table-rewrite option as the handlers. V2 activates the surface by
   // version, V1 only with a non-empty table map. Validate the entire active
   // contract before publishing acknowledgement, then stamp it before
-  // preprocessing/parsing so syntax errors and every handler rejection
+  // parsing so syntax errors and every handler rejection
   // retain the proof.
   const auto si_selection =
     rewriter_handlers::findActiveTableRewrite(request->options());
@@ -282,7 +281,7 @@ void RewriterServiceImpl::doRewrite(
   // parser catch below retains its established diagnostic sentinel.
   response->set_sql_after_rewrite(original_query);
 
-  // Bound the SQL this request makes the rewriter preprocess and parse (the
+  // Bound the SQL this request makes the rewriter parse (the
   // statement and every CTE body) before any of that work starts.
   if (sqlExceedsLimit(original_query, request->options())) {
     response->set_message("query exceeds maximum supported size");
@@ -325,11 +324,12 @@ void RewriterServiceImpl::doRewrite(
     }
   } _si_annotate{response, &annotate_ast, si_active ? si_selection.dynamic_args : nullptr};
 
-  // Preprocess the query to split large IN clauses. The preprocessor logs a
-  // single [preprocess] line only when it actually transformed the SQL; the
-  // no-op path is silent and covered by the [access] line at function exit.
-  String query = QueryPreprocessor::preprocess(
-    si_compatibility.parse_sql, sql_id);
+  // Large IN lists are parsed as written: the bounded parser builds them as
+  // one flat tuple (a 100,000-element list is a few levels deep), so the
+  // regex preprocessor that used to split them into OR batches is gone. It
+  // changed `abs(x) IN (...)` into `abs((x) IN (...) OR ...)`, refused
+  // NOT IN / GLOBAL IN, and rewrote matching text inside string literals.
+  const String &query = si_compatibility.parse_sql;
 
   if (rewriter_handlers::handleRemovedLiveViewCompatibility(
         query, request, response)) return;

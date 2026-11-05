@@ -15,7 +15,6 @@
 #include <string>
 
 #include "ASTTransformers.h"
-#include "query_preprocessor.h"
 #include "snapshot_query_profiles.h"
 #include "handlers/snapshot_query.h"
 #include "rewriter.grpc.pb.h"
