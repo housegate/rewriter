@@ -20,8 +20,8 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 
 ### Remote build box
 
-- **SSH:** `ssh -p 30100 sentio@BUILD_HOST`
-- **Dev workdir (has build cache):** `/home/sentio/chen/rewriter-grpc/`
+- **SSH:** `ssh rewriter-build-box`, an `~/.ssh/config` host alias. The address and port are not in this repository; maintainers get them from the internal build-box runbook (internal design doc `2026-11-06-build-box-and-release-runbook`).
+- **Dev workdir (has build cache):** `~/chen/rewriter-grpc/`
 - **Release CI workdir (used by `.github/workflows/release.yml`):** `~/ci/rewriter/`
 - **Pull-request CI workdir (used by `.github/workflows/ci.yml`):** `~/ci/rewriter-ci/`
 - Other directories like `~/chen/sql-rewriter/` or `~/limengyu/sql-rewriter/` are stale — ignore them.
@@ -33,16 +33,15 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 rsync -az --delete \
   --exclude='.git' --exclude='build/' --exclude='clickHouse/' \
   --exclude='contrib' --exclude='docs/' \
-  -e "ssh -p 30100" \
-  ./ sentio@BUILD_HOST:/home/sentio/chen/rewriter-grpc/
+  ./ rewriter-build-box:chen/rewriter-grpc/
 
 # 2. Incremental build (30s-3min).
-ssh -p 30100 sentio@BUILD_HOST \
-  "cd /home/sentio/chen/rewriter-grpc && ./scripts.sh rebuild"
+ssh rewriter-build-box \
+  "cd ~/chen/rewriter-grpc && ./scripts.sh rebuild"
 
 # 3. Run tests.
-ssh -p 30100 sentio@BUILD_HOST \
-  "cd /home/sentio/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
+ssh rewriter-build-box \
+  "cd ~/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
 ```
 
 Use `./scripts.sh build` (not `rebuild`) only when `build/` is missing or the build state looks corrupt — full build is ~15-20min. `rebuild` re-runs `cmake` configure on every invocation (~1-3s no-op when nothing changed), so `CMakeLists.txt` edits and `git describe`-derived version stamps are picked up automatically; you don't need to remember to switch commands.
@@ -324,8 +323,8 @@ risk. Fork PRs never enter the secret-bearing job: the base-controlled
 `.github/workflows/pr-source-policy.yml` rejects them without checkout, code
 execution, or secrets, and the required `Build & test (build box)` wrapper also
 fails when the remote job is skipped or fails. Never change that policy to
-execute an untrusted head under `pull_request_target`. Repository ruleset
-`15503770` is live in strict mode and requires the terminal
+execute an untrusted head under `pull_request_target`. The repository ruleset
+`main` is live in strict mode and requires the terminal
 `Build & test (build box)` context from the GitHub Actions app (app ID `15368`;
 updated 2026-08-24). The base-selected source-policy workflow is not yet an
 enforced required workflow: the organization plan does not enforce
@@ -359,10 +358,10 @@ The current copy is byte-identical to rewriter-go's paired `want_sql_cpp` re-pin
 
 ## Design docs
 
-Specs, implementation plans, rollout plans, roadmaps, reports and decisions for this repo live in the `internal workspace` workspace repo (`internal workspace`, private), not here: `internal design docs/`. Start at its `README.md` (stage timeline, module index; this repo's index is `modules/rewriter/README.md`) and follow its `CONVENTIONS.md` for placement, naming, frontmatter and references.
+Specs, implementation plans, rollout plans, roadmaps, reports and decisions for this repo are kept in an internal design-doc workspace, not here.
 
-- Do not add `docs/superpowers/`, `docs/specs/` or `docs/plans/` here. When a workflow skill (brainstorming, writing-plans, …) would save a spec or plan under `docs/superpowers/`, write it to `internal design docs/stages/<stage>/<phase>/` instead and commit it in `internal workspace` (direct to `main`, no PR).
-- From this repo, cite a design as `internal design docs/<path>` (or its GitHub URL).
+- Do not add `docs/superpowers/`, `docs/specs/` or `docs/plans/` here. When a workflow skill (brainstorming, writing-plans, …) would save a spec or plan under `docs/superpowers/`, save it in the internal design-doc workspace instead.
+- From this repo, cite a design by name or date, never by an internal path or URL: `internal design doc <name>`, `spec 2026-09-26 §5`.
 - What stays here: README and code-adjacent notes that describe current behavior.
 
 ## Conventions

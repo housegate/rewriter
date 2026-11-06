@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "prerequisite_root": "/home/sentio/ci/snapshot-query-prerequisites/issue-153-v2",
+  "prerequisite_root": "~/ci/snapshot-query-prerequisites/issue-153-v2",
   "sources": {
     "rg": "ac49dee21b2d7efd4ad206118b4b15050db68894",
     "hg": "022ee95c919b9b1e4bac177f675cda8f1036d6c7",

@@ -316,8 +316,20 @@ ensure_gcloud_on_path() {
     fi
 }
 
+# Image repository for docker build/push, e.g.
+# <region>-docker.pkg.dev/<project>/<repository>/housegate-rewriter.
+image_repo() {
+    if [ -z "${REWRITER_IMAGE_REPO:-}" ]; then
+        echo "Error: set REWRITER_IMAGE_REPO to the image repository" >&2
+        exit 1
+    fi
+    printf '%s' "$REWRITER_IMAGE_REPO"
+}
+
 docker_build_image() {
     local ver=$1
+    local repo
+    repo=$(image_repo)
     echo "=========================================="
     echo "Build Docker image: $ver"
     echo "=========================================="
@@ -343,7 +355,7 @@ docker_build_image() {
     (
       cd docker/bare
       docker buildx build --platform linux/amd64 . \
-          -t us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:"${ver}"
+          -t "${repo}:${ver}"
     )
 
     echo ">>> [3/3] Docker image built"
@@ -356,11 +368,13 @@ docker_build_image() {
 
 docker_push_image() {
     local ver=$1
+    local repo
+    repo=$(image_repo)
     ensure_gcloud_on_path
     echo ">>> Pushing Docker image with tag: $ver"
     (
       cd docker/bare
-      docker push us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:"${ver}"
+      docker push "${repo}:${ver}"
     )
     echo ">>> Back to project root ($(pwd))"
 }

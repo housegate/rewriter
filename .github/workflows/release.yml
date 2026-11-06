@@ -64,20 +64,30 @@ jobs:
         env:
           REF: ${{ steps.ver.outputs.ref }}
           VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_HOST: ${{ secrets.BUILD_HOST }}
+          BUILD_HOST_USER: ${{ secrets.BUILD_HOST_USER }}
+          IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
         run: |
           set -euo pipefail
           printf -v ref_q '%q' "$REF"
           printf -v version_q '%q' "$VERSION"
+          printf -v image_q '%q' "$IMAGE_REPOSITORY"
+          if [ -z "$BUILD_HOST" ] || [ -z "$BUILD_HOST_USER" ] || \
+             [ -z "$IMAGE_REPOSITORY" ]; then
+            echo 'error: the BUILD_HOST, BUILD_HOST_USER and IMAGE_REPOSITORY secrets must be set' >&2
+            exit 1
+          fi
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 sentio@BUILD_HOST \
-            "bash -s -- $ref_q $version_q" <<'REMOTE'
+            -o ServerAliveCountMax=10 "${BUILD_HOST_USER}@${BUILD_HOST}" \
+            "bash -s -- $ref_q $version_q $image_q" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
           ref=$1
           version=$2
+          export REWRITER_IMAGE_REPO=$3
 
-          lock_path=/home/sentio/ci/rewriter-build-box.lock
+          lock_path=$HOME/ci/rewriter-build-box.lock
           echo 'Waiting up to 120s for the defensive build-host lock.'
           if ! flock --exclusive --wait 120 --close "$lock_path" \
             timeout --signal=TERM --kill-after=30s 85m \
@@ -128,7 +138,7 @@ jobs:
             exit 1
           fi
           # Defensive: if a previous run removed the symlink, re-add it.
-          shared_clickhouse=/home/sentio/chen/rewriter-grpc/clickHouse
+          shared_clickhouse=$HOME/chen/rewriter-grpc/clickHouse
           if [ ! -L clickHouse ] || [ "$(readlink -f clickHouse)" != "$shared_clickhouse" ]; then
             rm -rf clickHouse
             ln -s "$shared_clickhouse" clickHouse
@@ -1357,5 +1367,5 @@ jobs:
             echo "## Release $VERSION"
             echo ""
             echo "- Ref: \`$REF\`"
-            echo "- Image: \`us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:$VERSION\`"
+            echo "- Image tag: \`$VERSION\`"
           } >> "$GITHUB_STEP_SUMMARY"

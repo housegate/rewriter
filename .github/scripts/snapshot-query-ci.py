@@ -35,8 +35,8 @@ def inputs(manifest, output):
     p = read(manifest)
     assert p["version"] == 1
     assert all(re.fullmatch("[0-9a-f]{40}", s) for s in p["sources"].values())
-    root = Path(p["prerequisite_root"])
-    assert root == Path("/home/sentio/ci/snapshot-query-prerequisites/issue-153-v2")
+    root = Path(p["prerequisite_root"]).expanduser()
+    assert root == Path.home() / "ci/snapshot-query-prerequisites/issue-153-v2"
     assert root.resolve() == root and root.is_dir()
     assert p["corpus"] == {"sha256": "3d7c1f1077b1ac6c1bd73d7703b135e95c92bde10d1ce4393c8cb091cca1c933", "analyze": 636, "prepare": 130}
     files = {}

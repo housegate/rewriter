@@ -179,16 +179,17 @@ Run `clickhousegate_rewriter_cli --help` for the full flag list.
 
 ## Docker
 
-Pre-built images are published to Google Artifact Registry:
+Release images are published to a private registry; `<image-repository>`
+below stands for that repository.
 
 ```shell
-docker pull us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
-docker run --rm -p 50051:50051 -p 50052:50052 \
-  us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
+docker pull <image-repository>:<version>
+docker run --rm -p 50051:50051 -p 50052:50052 <image-repository>:<version>
 ```
 
 See `.github/workflows/release.yml` for how releases are produced. The docker
-image is built and pushed by the CI workflow; manual local builds use
+image is built and pushed by the CI workflow, which takes the repository from
+the `IMAGE_REPOSITORY` secret; manual builds set `REWRITER_IMAGE_REPO` and run
 `./scripts.sh docker build <version>` + `./scripts.sh docker push <version>`.
 
 ## Build-box coordination
@@ -199,3 +200,11 @@ submodule via a symlink to save disk. Two concurrent `./scripts.sh build` runs
 will race on submodule patches. If a release workflow is in flight, hold off
 on local builds on the same host until it's green — the CI job's
 `concurrency: group: build-box` guards CI-vs-CI races, not CI-vs-developer.
+
+## License
+
+Copyright 2024-2026 The housegate rewriter authors. Licensed under the
+[GNU Affero General Public License v3.0](LICENSE): if you run a modified
+version as a network service, you must offer its users the corresponding
+source. ClickHouse, which this service is built from and patches, is licensed
+under the Apache License 2.0; see [NOTICE](NOTICE).
