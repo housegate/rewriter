@@ -64,13 +64,18 @@ jobs:
         env:
           REF: ${{ steps.ver.outputs.ref }}
           VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_HOST: ${{ secrets.BUILD_HOST }}
         run: |
           set -euo pipefail
           printf -v ref_q '%q' "$REF"
           printf -v version_q '%q' "$VERSION"
+          if [ -z "$BUILD_HOST" ]; then
+            echo 'error: the BUILD_HOST secret is not set' >&2
+            exit 1
+          fi
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 sentio@BUILD_HOST \
+            -o ServerAliveCountMax=10 "sentio@${BUILD_HOST}" \
             "bash -s -- $ref_q $version_q" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1

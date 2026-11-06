@@ -199,3 +199,11 @@ submodule via a symlink to save disk. Two concurrent `./scripts.sh build` runs
 will race on submodule patches. If a release workflow is in flight, hold off
 on local builds on the same host until it's green — the CI job's
 `concurrency: group: build-box` guards CI-vs-CI races, not CI-vs-developer.
+
+## License
+
+Copyright 2024-2026 The housegate rewriter authors. Licensed under the
+[GNU Affero General Public License v3.0](LICENSE): if you run a modified
+version as a network service, you must offer its users the corresponding
+source. ClickHouse, which this service is built from and patches, is licensed
+under the Apache License 2.0; see [NOTICE](NOTICE).

@@ -1,9 +1,9 @@
 // src/request_limits.h
 //
 // Resource bounds for the request paths, each overridable from the
-// environment. The names and defaults match the upstream sql-rewriter
-// overload protection (sentioxyz/sql-rewriter #29), which bounded the same
-// paths after its 2026-09-03 CPU-saturation incident.
+// environment. The names and defaults match the overload protection of the
+// upstream sql-rewriter this repository was forked from, which bounded the
+// same paths after a 2026-09-03 CPU-saturation incident.
 #pragma once
 
 #include <cerrno>

@@ -51,6 +51,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BUILD_HOST: ${{ secrets.BUILD_HOST }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -72,9 +73,13 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$BUILD_HOST" ]; then
+            echo 'error: the BUILD_HOST secret is not set' >&2
+            exit 1
+          fi
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 sentio@BUILD_HOST \
+            -o ServerAliveCountMax=10 "sentio@${BUILD_HOST}" \
             "bash -s -- '$EVENT_NAME' '$SHA'" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
