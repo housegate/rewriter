@@ -20,8 +20,8 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 
 ### Remote build box
 
-- **SSH:** `ssh rewriter-build-box`, an `~/.ssh/config` host alias (user `sentio`). The address and port are not in this repository; maintainers get them from the internal build-box runbook (internal design doc `2026-11-06-build-box-and-release-runbook`).
-- **Dev workdir (has build cache):** `/home/sentio/chen/rewriter-grpc/`
+- **SSH:** `ssh rewriter-build-box`, an `~/.ssh/config` host alias. The address and port are not in this repository; maintainers get them from the internal build-box runbook (internal design doc `2026-11-06-build-box-and-release-runbook`).
+- **Dev workdir (has build cache):** `~/chen/rewriter-grpc/`
 - **Release CI workdir (used by `.github/workflows/release.yml`):** `~/ci/rewriter/`
 - **Pull-request CI workdir (used by `.github/workflows/ci.yml`):** `~/ci/rewriter-ci/`
 - Other directories like `~/chen/sql-rewriter/` or `~/limengyu/sql-rewriter/` are stale — ignore them.
@@ -33,15 +33,15 @@ The request-handling logic lives in protocol-agnostic `RewriterServiceImpl::doRe
 rsync -az --delete \
   --exclude='.git' --exclude='build/' --exclude='clickHouse/' \
   --exclude='contrib' --exclude='docs/' \
-  ./ rewriter-build-box:/home/sentio/chen/rewriter-grpc/
+  ./ rewriter-build-box:chen/rewriter-grpc/
 
 # 2. Incremental build (30s-3min).
 ssh rewriter-build-box \
-  "cd /home/sentio/chen/rewriter-grpc && ./scripts.sh rebuild"
+  "cd ~/chen/rewriter-grpc && ./scripts.sh rebuild"
 
 # 3. Run tests.
 ssh rewriter-build-box \
-  "cd /home/sentio/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
+  "cd ~/chen/rewriter-grpc && ctest --test-dir build --output-on-failure"
 ```
 
 Use `./scripts.sh build` (not `rebuild`) only when `build/` is missing or the build state looks corrupt — full build is ~15-20min. `rebuild` re-runs `cmake` configure on every invocation (~1-3s no-op when nothing changed), so `CMakeLists.txt` edits and `git describe`-derived version stamps are picked up automatically; you don't need to remember to switch commands.

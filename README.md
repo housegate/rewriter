@@ -179,16 +179,17 @@ Run `clickhousegate_rewriter_cli --help` for the full flag list.
 
 ## Docker
 
-Pre-built images are published to Google Artifact Registry:
+Release images are published to a private registry; `<image-repository>`
+below stands for that repository.
 
 ```shell
-docker pull us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
-docker run --rm -p 50051:50051 -p 50052:50052 \
-  us-west1-docker.pkg.dev/sentio-352722/sentio/housegate-rewriter:<version>
+docker pull <image-repository>:<version>
+docker run --rm -p 50051:50051 -p 50052:50052 <image-repository>:<version>
 ```
 
 See `.github/workflows/release.yml` for how releases are produced. The docker
-image is built and pushed by the CI workflow; manual local builds use
+image is built and pushed by the CI workflow, which takes the repository from
+the `IMAGE_REPOSITORY` secret; manual builds set `REWRITER_IMAGE_REPO` and run
 `./scripts.sh docker build <version>` + `./scripts.sh docker push <version>`.
 
 ## Build-box coordination

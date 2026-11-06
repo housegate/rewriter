@@ -9,7 +9,7 @@ work=${3:?owned output directory}
 verifier=${4:?unchanged workflow raw integrity verifier}
 rg=${5:-$work/rewriter-go}
 hg=${6:-$work/housegate}
-[[ $rc == /home/sentio/ci/rewriter-ci && $expected_rc =~ ^[0-9a-f]{40}$ ]]
+[[ $rc == "$HOME/ci/rewriter-ci" && $expected_rc =~ ^[0-9a-f]{40}$ ]]
 [[ $work == /tmp/rewriter-snapshot-* && -d $work && ! -L $work ]]
 [[ $(git -C "$rc" rev-parse HEAD) == "$expected_rc" ]]
 [[ -z $(git -C "$rc" symbolic-ref -q HEAD || true) ]]
@@ -159,9 +159,9 @@ cp "$rc/build/CTestTestfile.cmake" "$work/cpp-run/ctest/"
 cp "$rc/build/tests/CTestTestfile.cmake" "$work/cpp-run/ctest/tests/"
 
 # Full ordinary/SI/snapshot CTest and startup negatives run in network-none.
-docker run --rm --name "$cpp" --label housegate.task="$prefix" --network none --read-only --user "$(id -u):$(id -g)" --cpus 4 --memory 8g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges=true -v "$rc:$rc:ro" -v "$work:/qualification:ro" -v "$work/cpp-run:/result:rw" -v "$work/cpp-tmp:/tmp:rw" -e SNAPSHOT_QUERY_PROFILE_FILE=/qualification/test-profiles.json -e SNAPSHOT_SERVICE_PROFILE_FILE=/qualification/service-profiles.json -e SNAPSHOT_QUERY_CORPUS=/qualification/test-corpus.json -e GTEST_OUTPUT=xml:/result/gtest.xml "$cpp_image" bash -euc '
+docker run --rm --name "$cpp" --label housegate.task="$prefix" --network none --read-only --user "$(id -u):$(id -g)" --cpus 4 --memory 8g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges=true -v "$rc:$rc:ro" -v "$work:/qualification:ro" -v "$work/cpp-run:/result:rw" -v "$work/cpp-tmp:/tmp:rw" -e SNAPSHOT_QUERY_PROFILE_FILE=/qualification/test-profiles.json -e SNAPSHOT_SERVICE_PROFILE_FILE=/qualification/service-profiles.json -e SNAPSHOT_QUERY_CORPUS=/qualification/test-corpus.json -e GTEST_OUTPUT=xml:/result/gtest.xml -e RC_ROOT="$rc" "$cpp_image" bash -euc '
  ctest --test-dir /result/ctest --output-on-failure > /result/ctest.log 2>&1
- binary=/home/sentio/ci/rewriter-ci/build/tests/rewriter_tests
+ binary=$RC_ROOT/build/tests/rewriter_tests
  GTEST_OUTPUT=xml:/result/si.xml "$binary" --gtest_filter="SpecG/StorageIntegrityGolden.*:StorageIntegrityCorpus.*:SINormalize.*" > /result/si.log 2>&1
  for spec in "SpecG/StorageIntegrityGolden.* 1106" "StorageIntegrityCorpus.* 2" "SINormalize.* 11"; do
   read -r family expected <<< "$spec"

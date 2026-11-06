@@ -10,7 +10,7 @@ Private RC executables are never uploaded to a public repository or artifact.
 `tests/testdata/snapshot_query_ci_pins.json` is the versioned source and prerequisite
 manifest. The four prerequisite files are reviewed prebuilt inputs, not rebuilt
 per job. They must exist as regular files with their exact size and SHA-256 under
-`/home/sentio/ci/snapshot-query-prerequisites/issue-153-v1`; the two exact Linux/AMD64
+`~/ci/snapshot-query-prerequisites/issue-153-v1`; the two exact Linux/AMD64
 Docker image IDs must already exist. Missing, different or unsupported inputs fail
 before qualification. There is no `/tmp` fallback, source-label digest override,
 mutable image tag or automatic cache refresh.

@@ -52,6 +52,7 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BUILD_HOST: ${{ secrets.BUILD_HOST }}
+          BUILD_HOST_USER: ${{ secrets.BUILD_HOST_USER }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -73,13 +74,13 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$BUILD_HOST" ]; then
-            echo 'error: the BUILD_HOST secret is not set' >&2
+          if [ -z "$BUILD_HOST" ] || [ -z "$BUILD_HOST_USER" ]; then
+            echo 'error: the BUILD_HOST and BUILD_HOST_USER secrets must be set' >&2
             exit 1
           fi
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=10 "sentio@${BUILD_HOST}" \
+            -o ServerAliveCountMax=10 "${BUILD_HOST_USER}@${BUILD_HOST}" \
             "bash -s -- '$EVENT_NAME' '$SHA'" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
@@ -98,7 +99,7 @@ jobs:
               ;;
           esac
 
-          lock_path=/home/sentio/ci/rewriter-build-box.lock
+          lock_path=$HOME/ci/rewriter-build-box.lock
           echo 'Waiting up to 120s for the defensive build-host lock.'
           if ! flock --exclusive --wait 120 --close "$lock_path" \
             timeout --signal=TERM --kill-after=30s 85m \
@@ -109,7 +110,7 @@ jobs:
           expected_sha=$2
           echo 'Acquired the shared build-box lock.'
 
-          ci_root=/home/sentio/ci/rewriter-ci
+          ci_root=$HOME/ci/rewriter-ci
           if [ "$(readlink -f "$HOME/ci/rewriter-ci")" != "$ci_root" ]; then
             echo 'error: CI worktree path does not resolve to the approved location' >&2
             exit 1
@@ -144,7 +145,7 @@ jobs:
           git checkout --detach --force "$expected_sha"
           git clean -ffdx -e /build/ -e /clickHouse -e /contrib
 
-          shared_clickhouse=/home/sentio/chen/rewriter-grpc/clickHouse
+          shared_clickhouse=$HOME/chen/rewriter-grpc/clickHouse
           if [ ! -L clickHouse ] || [ "$(readlink -f clickHouse)" != "$shared_clickhouse" ]; then
             rm -rf clickHouse
             ln -s "$shared_clickhouse" clickHouse
