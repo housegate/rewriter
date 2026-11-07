@@ -279,7 +279,7 @@ std::vector<std::string> opaqueTexts(const DB::IAST &ast, const std::string &sql
       create && (create->is_ordinary_view || create->is_materialized_view) && create->columns_list) {
     // Formatted in place: a registered tree is never cloned (common.h).
     const auto format = [](const DB::IAST &item) {
-      return item.formatWithPossiblyHidingSensitiveData(0, true, true, false, kQuotingRule, kQuotingStyle);
+      return item.formatWithPossiblyHidingSensitiveData(0, true, true, false, kQuotingRule, kQuotingStyle, true);
     };
     const auto *columns = create->columns_list;
     for (const DB::IAST *list : {static_cast<const DB::IAST *>(columns->indices),
