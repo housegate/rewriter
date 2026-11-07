@@ -12,6 +12,9 @@ on:
         description: 'Docker tag to publish (default: strip leading v from ref)'
         required: false
 
+# No step uses GITHUB_TOKEN; the build host is reached over SSH only.
+permissions: {}
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -26,18 +29,37 @@ jobs:
     steps:
       - name: Resolve ref and version
         id: ver
+        # Event values reach the shell only through env, never through ${{ }}
+        # inside the script: a ref or input containing quotes or $(...) must
+        # not become shell code in a job that later holds the SSH key.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            REF='${{ inputs.ref }}'
-            VERSION='${{ inputs.version }}'
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            REF=$INPUT_REF
+            VERSION=$INPUT_VERSION
           else
-            REF='${{ github.ref_name }}'
+            REF=$EVENT_REF_NAME
             VERSION=''
           fi
           if [ -z "$VERSION" ]; then
             # Strip a leading 'v' from the ref to form a default version.
             VERSION="${REF#v}"
+          fi
+          # A short tag or branch name (no refs/ prefix, no "..", no leading
+          # "-" or "/"), and a valid Docker tag.
+          if [[ ! "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ ]] || \
+             [[ "$REF" == *..* ]] || [[ "$REF" == refs/* ]]; then
+            echo 'error: ref must be a plain tag or branch name' >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo 'error: version must be a valid Docker tag' >&2
+            exit 1
           fi
           echo "ref=$REF"         >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -105,10 +127,25 @@ jobs:
             exit 1
           fi
           # Submodules are fetched explicitly below (see ci.yml).
-          git fetch --tags --prune --force --no-recurse-submodules origin
-          expected_sha="$(git rev-parse --verify --end-of-options "$ref^{commit}")"
+          git fetch --tags --prune --force --no-recurse-submodules origin \
+            '+refs/heads/*:refs/remotes/origin/*'
+          # Resolve only a fetched tag or a fetched origin branch, never a
+          # stale local branch of this persistent checkout.
+          if expected_sha="$(git rev-parse --verify --quiet --end-of-options "refs/tags/$ref^{commit}")"; then
+            :
+          elif expected_sha="$(git rev-parse --verify --quiet --end-of-options "refs/remotes/origin/$ref^{commit}")"; then
+            :
+          else
+            echo 'error: release ref is neither a tag nor an origin branch' >&2
+            exit 1
+          fi
           if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'error: release ref did not resolve to a lowercase 40-hex commit' >&2
+            exit 1
+          fi
+          # Publish only reviewed code: the commit must already be on main.
+          if ! git merge-base --is-ancestor "$expected_sha" refs/remotes/origin/main; then
+            echo 'error: release commit is not reachable from origin/main' >&2
             exit 1
           fi
           git checkout --detach --force "$expected_sha"
