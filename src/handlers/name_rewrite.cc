@@ -97,6 +97,10 @@ StaticLookupOutcome lookupStaticTableRewrite(
   return out;
 }
 
+bool isClickHouseMetadataDatabase(const std::string &db) {
+  return db == "system" || db == "information_schema" || db == "INFORMATION_SCHEMA";
+}
+
 std::optional<std::string> resolvePhysicalDatabase(
   const std::string &logical_db,
   const rewriter::RewriteTableDynamicArgs &args) {

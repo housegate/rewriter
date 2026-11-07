@@ -357,14 +357,17 @@ bool handleShowColumnsQuery(DB::ASTPtr ast,
     return true;
   }
 
-  // Spec 2026-09-26 R7: an unqualified target resolves like a FROM reference
-  // (a bare quoted `db2.x` is a table named db2.x in the session's logical
-  // database); passed through, ClickHouse would bind it in the physical
-  // database. An explicit database stays verbatim.
-  if (dynamic && target.database.empty()) {
+  // Spec 2026-09-26 R7, amended 2026-11-07: the target resolves like an
+  // EXISTS TABLE target. An unqualified one (a bare quoted `db2.x` is a table
+  // named db2.x) resolves in the session's logical database; an explicit
+  // database (`FROM db.t` or `FROM t FROM db`) is mapped the same way. Echoed
+  // verbatim, ClickHouse would read the logical name as a physical database
+  // (another tenant's, or `default`). Only ClickHouse's metadata databases are
+  // echoed: the preflight's system-table allowlist judged their tables.
+  if (dynamic && !isClickHouseMetadataDatabase(target.database)) {
     const auto sel = findActiveTableRewrite(request->options());
-    recordAccessedTable(response, "", target.table, sel);
-    const auto outcome = applyDynamicRewrite("", target.table, *dynamic, "SHOW COLUMNS");
+    recordAccessedTable(response, target.database, target.table, sel);
+    const auto outcome = applyDynamicRewrite(target.database, target.table, *dynamic, "SHOW COLUMNS");
     if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
       rejectInvalid(response, outcome.reject_reason);
       return true;
@@ -383,7 +386,7 @@ bool handleShowColumnsQuery(DB::ASTPtr ast,
       indexes->database = outcome.physical_db;
       indexes->table = outcome.new_table;
     }
-    recordTableRewrite(response, "", target.table, outcome.physical_db, outcome.new_table);
+    recordTableRewrite(response, target.database, target.table, outcome.physical_db, outcome.new_table);
     // ClickHouse's formatter spells the database as a second FROM clause.
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_SHOW_TABLES);
     return true;

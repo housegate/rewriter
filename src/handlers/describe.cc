@@ -155,13 +155,19 @@ bool handleDescribeQuery(DB::ASTPtr ast,
     }
   }
 
-  // Spec 2026-09-26 R7: an unqualified target resolves like a FROM reference
-  // (a bare quoted `db2.x` is a table named db2.x in the session's logical
-  // database); passed through, ClickHouse would bind it in the physical
-  // database. A qualified target stays verbatim.
+  // Spec 2026-09-26 R7, amended 2026-11-07: the target resolves like an
+  // EXISTS TABLE target. An unqualified one (a bare quoted `db2.x` is a table
+  // named db2.x) resolves in the session's logical database; a qualified one
+  // names a logical (or known physical) database and is mapped the same way.
+  // Forwarded verbatim, ClickHouse would bind the logical name as a physical
+  // database (another tenant's, or `default`) while the accessed-table record
+  // told the caller it was the mapped one. Only ClickHouse's metadata
+  // databases stay verbatim: the preflight's system-table allowlist judged
+  // their tables.
   if (selection.mode == TableRewriteMode::Dynamic && identifier && !identifier->isParam()
-      && parsed->database.empty()) {
-    const auto outcome = applyDynamicRewrite("", parsed->table, *selection.dynamic_args, "DESCRIBE");
+      && !isClickHouseMetadataDatabase(parsed->database)) {
+    const auto outcome =
+      applyDynamicRewrite(parsed->database, parsed->table, *selection.dynamic_args, "DESCRIBE");
     if (outcome.status == DynamicRewriteStatus::InvalidRequest) {
       reject(response, rewriter::RewriteCode::InvalidRewriteRequest, outcome.reject_reason);
       return true;
@@ -175,7 +181,7 @@ bool handleDescribeQuery(DB::ASTPtr ast,
       return true;
     }
     identifier->resetTable(outcome.physical_db, outcome.new_table);
-    recordTableRewrite(response, "", parsed->table, outcome.physical_db, outcome.new_table);
+    recordTableRewrite(response, parsed->database, parsed->table, outcome.physical_db, outcome.new_table);
     setSuccessResponse(response, formatAst(ast), rewriter::STATEMENT_TYPE_DESCRIBE);
     return true;
   }

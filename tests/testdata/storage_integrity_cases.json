@@ -8392,6 +8392,7 @@
     "want_stmt": ""
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -8413,12 +8414,23 @@
         "reserved_row_id_column": "_hg_row_id"
       }
     },
-    "name": "si_show_columns_ordinary_database_passthrough",
+    "name": "si_show_columns_ordinary_database_mapped",
     "sql": "SHOW COLUMNS FROM u FROM other",
-    "want_accessed": [],
+    "want_accessed": [
+      {
+        "original_database": "other",
+        "original_table": "u",
+        "logical_database": "other",
+        "physical_database": "phys"
+      }
+    ],
     "want_code": "Success",
-    "want_sql": "SHOW COLUMNS FROM u FROM other",
-    "want_stmt": "SHOW_TABLES"
+    "want_sql_cpp": "SHOW COLUMNS FROM `other.u` FROM phys",
+    "want_sql_go": "SHOW COLUMNS FROM phys.`other.u`",
+    "want_stmt": "SHOW_TABLES",
+    "want_table_rewrites": {
+      "other.u": "phys.other.u"
+    }
   },
   {
     "contract_version": "V1",
@@ -26807,6 +26819,124 @@
     "want_table_rewrites": {
       "db2.x": "phys.db1.db2.x"
     }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_describe_qualified_rewritten",
+    "sql": "DESCRIBE TABLE db1.o",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "DESCRIBE TABLE phys.`db1.o`",
+    "want_stmt": "DESCRIBE",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_describe_qualified_unmapped_rejected",
+    "reject": true,
+    "sql": "DESCRIBE TABLE db2.x",
+    "want_code": "InvalidRewriteRequest",
+    "want_message_contains": "not in database_map and not a known physical database",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_columns_qualified_unmapped_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM x FROM default",
+    "want_code": "InvalidRewriteRequest",
+    "want_message_contains": "not in database_map and not a known physical database",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
   },
   {
     "contract_version": "V1",
