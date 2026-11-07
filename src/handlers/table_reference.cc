@@ -1432,12 +1432,17 @@ std::string stringLookupUnresolvedMessage(const std::string &function, const std
 }
 
 std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
-  // ClickHouse 26.3's registrations and aliases: DATABASE, SCHEMA and
+  // ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
   // current_database for currentDatabase; currentSchemas and current_schemas;
   // user and current_user for currentUser; fullHostName for FQDN.
   static const std::set<std::string> identity = {"currentdatabase", "database", "schema", "current_database",
     "currentschemas", "current_schemas", "currentuser", "user", "current_user", "session_user", "hostname",
-    "fqdn", "fullhostname", "serveruuid", "getmacro"};
+    "fqdn", "fullhostname", "serveruuid", "getmacro",
+    // authenticatedUser (alias authUser) returns the physical user too.
+    "authenticateduser", "authuser",
+    // ClickHouse 26.8: pgGetUserById returns the session's initial user;
+    // currentRequestURL / currentHandler name the gateway's HTTP request.
+    "pggetuserbyid", "pg_get_userbyid", "currentrequesturl", "currenthandler"};
   std::vector<DB::Token> tokens;
   significantTokens(sql, tokens);  // a lexer error leaves the tokens before it
   for (size_t i = 0; i + 1 < tokens.size(); ++i) {
@@ -1482,6 +1487,26 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
 
 std::string deploymentIdentityCallMessage(const std::string &name) {
   return "function " + name + " is not accessible";
+}
+
+std::optional<std::string> firstDeploymentIdentityColumn(const DB::ASTPtr &ast) {
+  if (!ast) return std::nullopt;
+  std::vector<const DB::IAST *> stack{ast.get()};
+  while (!stack.empty()) {
+    const DB::IAST *node = stack.back();
+    stack.pop_back();
+    if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
+        id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && !id->name_parts.empty()
+        && id->name_parts.back() == "_database")
+      return id->name_parts.back();
+    for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
+      if (*it) stack.push_back(it->get());
+  }
+  return std::nullopt;
+}
+
+std::string deploymentIdentityColumnMessage(const std::string &name) {
+  return "virtual column " + name + " is not accessible";
 }
 
 std::optional<std::string> decodeIdentifierToken(const DB::Token &token) {
@@ -1615,7 +1640,35 @@ bool sqlBearingSetting(const std::string &name) {
     // group (one carrying enable_analyzer = 0 would bypass the list). Any
     // value, any case. The analyzer switch itself is value-dependent
     // (isAnalyzerSetting / trueLiteralSpelling), handled in scanSettingsText.
-    || lower == "legacy_column_name_of_tuple_literal" || lower == "profile";
+    || lower == "legacy_column_name_of_tuple_literal" || lower == "profile"
+    // enable_scopes_for_with_statement switches WITH scoping like
+    // enable_global_with_statement.
+    || lower == "enable_scopes_for_with_statement"
+    // ClickHouse 26.8 settings. select / filter / order / sort are SQL text
+    // the server parses and wraps around the query (`SELECT <select> FROM
+    // (<query>) WHERE <filter> ORDER BY <order>`), outside every walker;
+    // database sets the current database like USE, moving every position the
+    // rewriter does not qualify; format / input_format override the format an
+    // INSERT's inline data is read with (`input_format = 'Values'` over
+    // `FORMAT CSV` data the rewriter left opaque), and output_format /
+    // default_format the result's; asterisk_include_virtual_columns puts
+    // `_database` into `SELECT *`; the cloud-credential and dynamic-disk
+    // switches hand the server's own credentials, environment, Keeper and
+    // config includes to s3() / disk(); url_base / s3_base relocate a relative
+    // url() / s3() target; the analyzer compatibility switches and view
+    // inlining change what a name binds; enable_streaming_queries admits the
+    // STREAM table expression; the AI functions' default credentials name a
+    // server named collection.
+    || lower == "select" || lower == "filter" || lower == "order" || lower == "sort"
+    || lower == "database" || lower == "format" || lower == "input_format" || lower == "output_format"
+    || lower == "default_format" || lower == "asterisk_include_virtual_columns"
+    || lower == "s3_allow_server_credentials_in_user_queries" || lower.starts_with("dynamic_disk_allow_")
+    || lower == "url_base" || lower == "s3_base"
+    || lower == "analyzer_compatibility_allow_cte_redefinition"
+    || lower == "analyzer_compatibility_prefer_alias_over_subcolumn"
+    || lower == "analyzer_compatibility_multiple_joins_qualify_column_names" || lower == "analyzer_inline_views"
+    || lower == "enable_streaming_queries" || lower == "ai_function_text_default_credentials"
+    || lower == "ai_function_embedding_default_credentials";
 }
 
 // The query-analyzer switch (`allow_experimental_analyzer` is its alias): it is

@@ -91,6 +91,13 @@ TEST(MetadataAccess, DeploymentIdentityCallsAreRefusedInDynamicMode) {
     {"SELECT a FROM tenant1.o WHERE a IN (current_user)", "current_user"},
     {"SELECT current_user", "current_user"},
     {"SELECT a FROM tenant1.t WHERE b = CURRENT_DATABASE", "CURRENT_DATABASE"},
+    {"SELECT authenticatedUser()", "authenticatedUser"},
+    {"SELECT authUser()", "authUser"},
+    // ClickHouse 26.8 functions.
+    {"SELECT pgGetUserById(1)", "pgGetUserById"},
+    {"SELECT pg_get_userbyid(1)", "pg_get_userbyid"},
+    {"SELECT currentRequestURL()", "currentRequestURL"},
+    {"SELECT currentHandler()", "currentHandler"},
   };
   for (const bool si : {false, true}) {
     for (const auto &[sql, name] : refused) {
@@ -98,6 +105,31 @@ TEST(MetadataAccess, DeploymentIdentityCallsAreRefusedInDynamicMode) {
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
       EXPECT_EQ(resp.message(), "function " + name + " is not accessible") << sql << " si=" << si;
       EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    }
+  }
+}
+
+// ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
+// system tables a `_database` virtual column holding the physical database.
+TEST(MetadataAccess, DatabaseVirtualColumnIsRefusedInDynamicMode) {
+  for (const bool si : {false, true}) {
+    for (const std::string sql : {
+           "SELECT _database FROM tenant1.o",
+           "SELECT o._database FROM tenant1.o",
+           "SELECT `_database` FROM tenant1.o",
+           "SELECT a FROM tenant1.o WHERE _database != ''",
+           "SELECT a FROM (SELECT a, _database AS d FROM tenant1.o)",
+           "SELECT _database FROM system.one",
+           "INSERT INTO tenant1.p SELECT _database FROM tenant1.o",
+         }) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "virtual column _database is not accessible") << sql << " si=" << si;
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    }
+    // A string, an alias that only spells the name, and another case are not the column.
+    for (const std::string sql : {"SELECT '_database' FROM tenant1.o", "SELECT _DATABASE FROM tenant1.o"}) {
+      EXPECT_EQ(rewrite(sql, si).code(), rewriter::RewriteCode::Success) << sql << " si=" << si;
     }
   }
 }
