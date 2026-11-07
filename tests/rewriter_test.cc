@@ -8564,7 +8564,41 @@ TEST(TableRefSettings, SqlBearingDialectAndValueRules) {
     {"INSERT INTO db1.o (a) SETTINGS `POLYGLOT_DIALECT` = 'sqlite' SELECT 1",
      "table setting POLYGLOT_DIALECT is not accepted"},
     {"SELECT * FROM db1.o SETTINGS max_threads = {'a': 'b'}", std::string(rewriter_handlers::kUnsupportedStatementMessage)},
+    {"SELECT * FROM db1.o SETTINGS enable_scopes_for_with_statement = 0",
+     "table setting enable_scopes_for_with_statement is not accepted"},
+    // ClickHouse 26.8: SQL text the server wraps around the query, the
+    // current database, format overrides and the other switches
+    // sqlBearingSetting lists.
+    {"SELECT * FROM db1.o SETTINGS filter = 'a IN (SELECT a FROM db2.x)'", "table setting filter is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS select = '(SELECT 1 FROM db2.x)'", "table setting select is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS `order` = 'a'", "table setting order is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS sort = 'a'", "table setting sort is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS database = 'db2'", "table setting database is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS DATABASE = 'db2'", "table setting DATABASE is not accepted"},
+    {"INSERT INTO db1.o SETTINGS input_format = 'Values' FORMAT CSV 1", "table setting input_format is not accepted"},
+    {"INSERT INTO db1.o SETTINGS format = 'Values' FORMAT CSV 1", "table setting format is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS output_format = 'JSON'", "table setting output_format is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS default_format = 'JSON'", "table setting default_format is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS asterisk_include_virtual_columns = 1",
+     "table setting asterisk_include_virtual_columns is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS s3_allow_server_credentials_in_user_queries = 1",
+     "table setting s3_allow_server_credentials_in_user_queries is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS dynamic_disk_allow_from_env = 1",
+     "table setting dynamic_disk_allow_from_env is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS url_base = 'file://'", "table setting url_base is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS analyzer_compatibility_allow_cte_redefinition = 1",
+     "table setting analyzer_compatibility_allow_cte_redefinition is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS analyzer_inline_views = 1", "table setting analyzer_inline_views is not accepted"},
+    {"SELECT * FROM db1.o SETTINGS enable_streaming_queries = 1",
+     "table setting enable_streaming_queries is not accepted"},
   };
+  // A session SET is modelled only while the SI surface is inactive.
+  for (const char *sql : {"SET filter = 'a IN (SELECT a FROM db2.x)'", "SET database = 'db2'"}) {
+    SCOPED_TRACE(sql);
+    const auto resp = RunTableRef(sql, false);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+    EXPECT_NE(resp.message().find(" is not accepted"), std::string::npos) << resp.message();
+  }
   for (const bool si : {false, true}) {
     for (const auto &c : refused) {
       SCOPED_TRACE(std::string(c.sql) + (si ? " [V2]" : " [inactive]"));
@@ -11440,6 +11474,11 @@ TEST(TableRefFidelity, TimeSeriesTargetsAreRefused) {
            "CREATE TABLE db1.x ENGINE = TimeSeries TAGS ENGINE = MergeTree ORDER BY id",
            "CREATE TABLE db1.x ENGINE = TimeSeries DATA INNER UUID '01234567-89ab-cdef-0123-456789abcdef'",
            "CREATE TABLE db1.x ENGINE = TimeSeries METRICS db1.t",
+           // ClickHouse 26.8 names DATA as SAMPLES and adds RECENT SAMPLES and
+           // INNER COLUMNS (an inner table's own column declarations).
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries RECENT SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES INNER COLUMNS (id UUID DEFAULT (SELECT max(id) FROM db2.x)) SAMPLES ENGINE = MergeTree ORDER BY id",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);

@@ -94,6 +94,14 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql);
 // engine.FirstDeploymentIdentityName (its AST walk).
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast);
 std::string deploymentIdentityCallMessage(const std::string &name);
+// ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
+// system tables a `_database` virtual column holding the physical database
+// name. Returns `_database` when the parse tree names it as a column (bare or
+// qualified, `t._database`); in dynamic mode the caller refuses an accepted
+// statement holding one, last, in both SI states, with
+// deploymentIdentityColumnMessage.
+std::optional<std::string> firstDeploymentIdentityColumn(const DB::ASTPtr &ast);
+std::string deploymentIdentityColumnMessage(const std::string &name);
 
 // A literal the embedded 26.3 parser folds into SQL that ClickHouse 25.8 and
 // 26.2 read differently (Task I3 fix rounds 2–3, measured on both servers):
