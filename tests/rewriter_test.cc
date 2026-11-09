@@ -11648,6 +11648,9 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
            "SELECT * FROM db1.o AS x LOCAL JOIN db1.p AS y ON x.a = y.a",
            "SELECT * FROM db1.o AS x NATURAL JOIN db1.p AS y",
            "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o AS x LOCAL JOIN db1.p AS y USING (a))",
+           "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a UNIQUE KEY a",
+           "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a UNIQUE KEY (a IN (SELECT 1 FROM db2.x))",
+           "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a UNIQUE KEY a AS SELECT a FROM db1.o",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
@@ -11847,7 +11850,9 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
-      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      // ClickHouse 26.8 backquotes the names `from` and `values` wherever it
+      // prints an identifier, a function name included.
+      EXPECT_EQ(resp.sql_after_rewrite(), name == "values" ? "SELECT `values`(((1, 2)))" : sql);
     }
   }
 }

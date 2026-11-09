@@ -1082,9 +1082,10 @@ DB::ASTPtr buildStorageIntegrityDerivedTable(
 std::string restoreStorageIntegrityProjectionSyntax(
   std::string sql, const std::string &reserved_column) {
   // The pinned ClickHouse formatter erases the parentheses around a single
-  // star-EXCEPT identifier and also forgets quoting for keyword-shaped names
-  // such as `from`. The generated SI surface is trusted, so restore the
-  // canonical cross-engine spelling after formatting.
+  // star-EXCEPT identifier; up to 26.3 it also forgot quoting for
+  // keyword-shaped names such as `from`, which 26.8 quotes. The generated SI
+  // surface is trusted, so restore the canonical cross-engine spelling after
+  // formatting, from either spelling.
   static const std::set<std::string> keywords = {"as",
     "by",
     "except",
@@ -1109,6 +1110,7 @@ std::string restoreStorageIntegrityProjectionSyntax(
   const std::string rendered =
     keywords.count(lower(reserved_column)) ? "`" + reserved_column + "`" : reserved_column;
   const std::string needle = "EXCEPT " + reserved_column;
+  const std::string quoted_needle = "EXCEPT `" + reserved_column + "`";
   const std::string replacement = "EXCEPT (" + rendered + ")";
   std::string out;
   out.reserve(sql.size());
@@ -1137,6 +1139,11 @@ std::string restoreStorageIntegrityProjectionSyntax(
         }
         out += sql[i++];
       }
+      continue;
+    }
+    if (sql.compare(i, quoted_needle.size(), quoted_needle) == 0) {
+      out += replacement;
+      i += quoted_needle.size();
       continue;
     }
     if (sql.compare(i, needle.size(), needle) == 0) {

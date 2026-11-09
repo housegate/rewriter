@@ -136,6 +136,19 @@ bool anyLocalOrNaturalJoin(const DB::IAST &node) {
   return found;
 }
 
+// A MergeTree `UNIQUE KEY` (ClickHouse 26.8): a storage expression neither
+// R2 nor the storage-integrity write path inspects (the AST member
+// enumeration found a read of an SI physical table there answered Success
+// under contract V2), and no backend before 26.8 parses it.
+bool anyStorageUniqueKey(const DB::IAST &node) {
+  if (const auto *storage = node.as<DB::ASTStorage>(); storage && storage->unique_key) return true;
+  bool found = false;
+  forEachChild(node, [&](const DB::ASTPtr &child) {
+    if (!found && child) found = anyStorageUniqueKey(*child);
+  });
+  return found;
+}
+
 // ClickHouse 26.8 shapes of otherwise admitted statement classes that no
 // handler models (see preflightTableReferences).
 bool unmodelledClickHouse268Shape(const DB::IAST &ast) {
@@ -164,7 +177,7 @@ bool unmodelledClickHouse268Shape(const DB::IAST &ast) {
   // `DESCRIBE TEMPORARY TABLE t` names a session temporary table, which the
   // DESCRIBE handler would resolve as a table of the session database.
   if (const auto *describe = ast.as<DB::ASTDescribeQuery>(); describe && describe->temporary) return true;
-  return anyStreamTableExpression(ast) || anyLocalOrNaturalJoin(ast);
+  return anyStreamTableExpression(ast) || anyLocalOrNaturalJoin(ast) || anyStorageUniqueKey(ast);
 }
 
 bool anyIdentifierParameter(const DB::IAST &node) {

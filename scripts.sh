@@ -56,6 +56,20 @@ ensure_patches() {
     fi
 }
 
+# ClickHouse's CMake names a few of its own build outputs by
+# ${CMAKE_BINARY_DIR}/contrib/..., which is build/clickHouse/contrib/... here
+# because ClickHouse is a subdirectory. Since 26.8 every executable (protoc and
+# the other host tools included) links build/contrib/compiler-rt-cmake/
+# libclang_rt_builtins.a (cmake/compiler_rt_link.cmake), so point that
+# directory at the real one. Called after every configure.
+ensure_build_links() {
+    mkdir -p build/contrib
+    if [ ! -L build/contrib/compiler-rt-cmake ]; then
+        rm -rf build/contrib/compiler-rt-cmake
+        ln -s ../clickHouse/contrib/compiler-rt-cmake build/contrib/compiler-rt-cmake
+    fi
+}
+
 # Install build dependencies.
 prepare() {
     echo ">>> Preparing environment"
@@ -138,6 +152,8 @@ build() {
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       ${compiler_target_args[@]+"${compiler_target_args[@]}"} \
       -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
+
+    ensure_build_links
 
     echo ">>> [4/5] Build OpenSSL libraries"
     ARCH=$(uname -m)
@@ -239,6 +255,8 @@ rebuild() {
         getconf _NPROCESSORS_ONLN 2>/dev/null ||
         echo 4
     )
+
+    ensure_build_links
 
     echo ">>> [2/3] Recompile changed sources"
     cd build
