@@ -15,6 +15,13 @@ elseif(OS_LINUX)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++ -nostdinc++ -isystem ${PROJECT_SOURCE_DIR}/clickHouse/contrib/llvm-project/libcxx/include -isystem ${PROJECT_SOURCE_DIR}/clickHouse/contrib/llvm-project/libcxxabi/include")
 endif()
 
+# ClickHouse 26.8 forbids try_compile project-wide
+# (clickHouse/cmake/block_build_time_checks.cmake), and FindThreads, which
+# GoogleTest and this file call, probes libc for pthread with one. The probe's
+# answer is known for the fixed toolchain (glibc and the bundled sysroot have
+# pthread in libc; macOS libSystem too), so it is given here.
+set(CMAKE_HAVE_LIBC_PTHREAD 1)
+
 FetchContent_MakeAvailable(googletest)
 
 find_package(Threads REQUIRED)
