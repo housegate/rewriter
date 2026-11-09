@@ -177,14 +177,17 @@ docker network create --internal --label housegate.task="$prefix" "$network" > "
 network_created=1
 docker run -d --name "$service" --label housegate.task="$prefix" --network "$network" --network-alias rewriter --read-only --user "$(id -u):$(id -g)" --cpus 2 --memory 4g --pids-limit 256 --cap-drop ALL --security-opt no-new-privileges=true --tmpfs /tmp:rw,nosuid,nodev,size=64m -v "$rc/build:/build:ro" -v "$work:/qualification:ro" "$cpp_image" /build/clickhousegate_rewriter 50051 50052 --snapshot-query-profile-file /qualification/rpc-profiles.json > "$work/service-id.txt"
 docker inspect "$service" > "$work/service-isolation.json"
+# A measured-profile startup SHA-256s the whole executable before it listens:
+# about 11s for the ~4 GB 26.8 RelWithDebInfo binary on the build box (no
+# SHA-NI), so allow 60s, like tests/snapshot_profile_startup.py's budget.
 docker exec "$service" python3 -c 'import time,urllib.request
-for attempt in range(100):
+for attempt in range(600):
  try:
   r=urllib.request.urlopen("http://127.0.0.1:50052/healthz",timeout=1)
   assert r.status==200
   break
  except Exception:
-  if attempt==99: raise
+  if attempt==599: raise
   time.sleep(.1)
 '
 [[ $(docker exec "$service" readlink /proc/1/exe) == /build/clickhousegate_rewriter ]]
