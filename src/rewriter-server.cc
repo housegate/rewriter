@@ -434,6 +434,8 @@ void RewriterServiceImpl::doRewrite(
     // handler rewrites the tree; applied last, below.
     const auto bare_identity_name = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
       ? rewriter_handlers::firstBareDeploymentIdentityName(ast) : std::nullopt;
+    const auto identity_column = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+      ? rewriter_handlers::firstDeploymentIdentityColumn(ast) : std::nullopt;
 
     [&]() {
       if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
@@ -514,6 +516,9 @@ void RewriterServiceImpl::doRewrite(
       if (call)
         refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                                 rewriter_handlers::deploymentIdentityCallMessage(*call));
+      else if (identity_column)
+        refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                                rewriter_handlers::deploymentIdentityColumnMessage(*identity_column));
     }
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real
