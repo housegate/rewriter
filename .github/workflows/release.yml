@@ -104,7 +104,8 @@ jobs:
             echo 'error: replacement refs or legacy grafts exist in the release repository' >&2
             exit 1
           fi
-          git fetch --tags --prune --force origin
+          # Submodules are fetched explicitly below (see ci.yml).
+          git fetch --tags --prune --force --no-recurse-submodules origin
           expected_sha="$(git rev-parse --verify --end-of-options "$ref^{commit}")"
           if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'error: release ref did not resolve to a lowercase 40-hex commit' >&2

@@ -131,7 +131,10 @@ jobs:
           fi
           # The only fetch input is the validated event-object SHA. This avoids
           # a queued run racing a later update of main or the PR merge ref.
-          git fetch --force --no-tags origin "$expected_sha"
+          # Submodules are fetched explicitly below: an on-demand recursive
+          # fetch of a gitlink bump would run in the previous run's clickHouse
+          # checkout, whose contrib list belongs to the old commit, and fail.
+          git fetch --force --no-tags --no-recurse-submodules origin "$expected_sha"
           fetched_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
           [[ "$fetched_sha" =~ ^[0-9a-f]{40}$ ]] || {
             echo 'error: fetched object did not resolve to a lowercase 40-hex commit' >&2
