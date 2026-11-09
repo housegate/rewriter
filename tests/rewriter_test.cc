@@ -11472,6 +11472,11 @@ TEST(TableRefFidelity, TimeSeriesTargetsAreRefused) {
            "CREATE TABLE db1.x ENGINE = TimeSeries TAGS ENGINE = MergeTree ORDER BY id",
            "CREATE TABLE db1.x ENGINE = TimeSeries DATA INNER UUID '01234567-89ab-cdef-0123-456789abcdef'",
            "CREATE TABLE db1.x ENGINE = TimeSeries METRICS db1.t",
+           // ClickHouse 26.8 names DATA as SAMPLES and adds RECENT SAMPLES and
+           // INNER COLUMNS (an inner table's own column declarations).
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries RECENT SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES INNER COLUMNS (id UUID DEFAULT (SELECT max(id) FROM db2.x)) SAMPLES ENGINE = MergeTree ORDER BY id",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
