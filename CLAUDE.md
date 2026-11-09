@@ -330,6 +330,11 @@ runs `./scripts.sh rebuild`, a fail-closed `ninja -C build rewriter_tests`,
 `./scripts.sh test` in this persistent worktree: it calls the clean `build`
 path and discards the incremental cache.
 
+Both jobs link `clickHouse` to `~/ci/clickhouse/<gitlink>`, one checkout per
+ClickHouse commit created from the fork on first use (`--depth=1`, contribs
+too), so a submodule bump never moves another commit's tree or the dev
+workdir's.
+
 PR and release jobs share `concurrency: group: build-box`; GitHub's queued
 concurrency is backed by a host-side `flock`, so neither concurrent PRs nor a
 tag release can mutate the shared checkout together. PR builds use
