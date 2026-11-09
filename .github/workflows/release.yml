@@ -104,7 +104,8 @@ jobs:
             echo 'error: replacement refs or legacy grafts exist in the release repository' >&2
             exit 1
           fi
-          git fetch --tags --prune --force origin
+          # Submodules are fetched explicitly below (see ci.yml).
+          git fetch --tags --prune --force --no-recurse-submodules origin
           expected_sha="$(git rev-parse --verify --end-of-options "$ref^{commit}")"
           if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'error: release ref did not resolve to a lowercase 40-hex commit' >&2
@@ -138,7 +139,29 @@ jobs:
             exit 1
           fi
           # Defensive: if a previous run removed the symlink, re-add it.
-          shared_clickhouse=$HOME/chen/rewriter-grpc/clickHouse
+          expected_clickhouse="$(git ls-tree "$expected_sha" -- clickHouse | awk '$1 == "160000" && $2 == "commit" { print $3 }')"
+          if [[ ! "$expected_clickhouse" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'error: release does not contain a valid ClickHouse gitlink' >&2
+            exit 1
+          fi
+          # One persistent ClickHouse checkout per gitlink, created on first
+          # use, so a submodule bump never moves another commit's tree (or a
+          # developer's). Only the fork is ever fetched into it.
+          clickhouse_remote=https://github.com/sentioxyz/ClickHouse.git
+          clickhouse_root=$HOME/ci/clickhouse
+          shared_clickhouse=$clickhouse_root/$expected_clickhouse
+          if [ ! -d "$shared_clickhouse/.git" ] || [ -L "$shared_clickhouse" ]; then
+            mkdir -p "$clickhouse_root"
+            rm -rf "$shared_clickhouse"
+            staging="$(mktemp -d "$clickhouse_root/.staging.XXXXXXXX")"
+            git -C "$staging" init -q
+            git -C "$staging" remote add origin "$clickhouse_remote"
+            mv "$staging" "$shared_clickhouse"
+          fi
+          if [ "$(git -C "$shared_clickhouse" remote get-url origin)" != "$clickhouse_remote" ]; then
+            echo 'error: the ClickHouse checkout does not fetch from the fork' >&2
+            exit 1
+          fi
           if [ ! -L clickHouse ] || [ "$(readlink -f clickHouse)" != "$shared_clickhouse" ]; then
             rm -rf clickHouse
             ln -s "$shared_clickhouse" clickHouse
@@ -148,12 +171,7 @@ jobs:
             ln -s clickHouse/contrib contrib
           fi
 
-          expected_clickhouse="$(git ls-tree "$expected_sha" -- clickHouse | awk '$1 == "160000" && $2 == "commit" { print $3 }')"
-          if [[ ! "$expected_clickhouse" =~ ^[0-9a-f]{40}$ ]]; then
-            echo 'error: release does not contain a valid ClickHouse gitlink' >&2
-            exit 1
-          fi
-          git -C clickHouse fetch --force --no-tags origin "$expected_clickhouse"
+          git -C clickHouse fetch --force --no-tags --depth=1 origin "$expected_clickhouse"
           fetched_clickhouse="$(git -C clickHouse rev-parse --verify 'FETCH_HEAD^{commit}')"
           if [ "$fetched_clickhouse" != "$expected_clickhouse" ]; then
             echo 'error: fetched ClickHouse commit does not match the release gitlink' >&2
@@ -162,7 +180,7 @@ jobs:
           git -C clickHouse checkout --detach --force "$expected_clickhouse" >/dev/null
           git -C clickHouse reset --hard "$expected_clickhouse" >/dev/null
           git -C clickHouse submodule sync --recursive >/dev/null
-          git -C clickHouse submodule update --init --recursive --force >/dev/null
+          git -C clickHouse submodule update --init --recursive --force --depth=1 >/dev/null
           git -C clickHouse submodule foreach --quiet --recursive \
             'git reset --hard >/dev/null && git clean -ffdx >/dev/null'
           git -C clickHouse reset --hard "$expected_clickhouse" >/dev/null

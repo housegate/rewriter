@@ -11472,6 +11472,11 @@ TEST(TableRefFidelity, TimeSeriesTargetsAreRefused) {
            "CREATE TABLE db1.x ENGINE = TimeSeries TAGS ENGINE = MergeTree ORDER BY id",
            "CREATE TABLE db1.x ENGINE = TimeSeries DATA INNER UUID '01234567-89ab-cdef-0123-456789abcdef'",
            "CREATE TABLE db1.x ENGINE = TimeSeries METRICS db1.t",
+           // ClickHouse 26.8 names DATA as SAMPLES and adds RECENT SAMPLES and
+           // INNER COLUMNS (an inner table's own column declarations).
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries RECENT SAMPLES db1.d",
+           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES INNER COLUMNS (id UUID DEFAULT (SELECT max(id) FROM db2.x)) SAMPLES ENGINE = MergeTree ORDER BY id",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
@@ -11610,6 +11615,58 @@ TEST(TableRefFidelity, ExplainAndTypeArgReadsAreRefused) {
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       EXPECT_NE(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success) << RunTableRef(sql, si).sql_after_rewrite();
+    }
+  }
+}
+
+// ClickHouse 26.8 shapes inside admitted statement classes that no handler
+// models are refused with T7 in both SI states before any name is examined
+// (unmodelledClickHouse268Shape): a STREAM table expression at any depth,
+// the fork's privileged `MODIFY SENTIO BINARY TYPE ORIGIN` registration, and
+// `DESCRIBE TEMPORARY TABLE`. The same statements without the 26.8 clause
+// keep their ordinary answers.
+TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
+  for (const bool si : {false, true}) {
+    for (const std::string sql : {
+           "SELECT a FROM db1.o STREAM",
+           "SELECT a FROM db1.o STREAM BOUNDED UNORDERED",
+           "SELECT a FROM db1.o STREAM WATERMARK FOR a AS a - 1",
+           "SELECT a FROM db1.o STREAM WATERMARK FOR a AS (SELECT max(b) FROM db2.x)",
+           "SELECT a FROM (SELECT a FROM db1.o STREAM) AS s",
+           "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o STREAM)",
+           "WITH c AS (SELECT a FROM db1.o STREAM) SELECT a FROM c",
+           "SELECT a FROM db1.o AS l JOIN db1.o AS r STREAM ON l.a = r.a",
+           "SELECT a FROM db1.t STREAM",
+           "INSERT INTO db1.q SELECT a FROM db1.o STREAM",
+           "CREATE VIEW db1.v AS SELECT a FROM db1.o STREAM",
+           "ALTER TABLE db1.o MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.t MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.o MODIFY COMMENT 'c', MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "DESCRIBE TEMPORARY TABLE o",
+           "DESC TEMPORARY TABLE o",
+           "SELECT * FROM numbers(3) local JOIN db1.o ON number = a",
+           "SELECT * FROM db1.o AS x LOCAL JOIN db1.p AS y ON x.a = y.a",
+           "SELECT * FROM db1.o AS x NATURAL JOIN db1.p AS y",
+           "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o AS x LOCAL JOIN db1.p AS y USING (a))",
+           "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a UNIQUE KEY a",
+           "CREATE TABLE db1.n (a UInt8) ENGINE = MergeTree ORDER BY a UNIQUE KEY (a IN (SELECT 1 FROM db2.x))",
+           "CREATE MATERIALIZED VIEW db1.mv ENGINE = MergeTree ORDER BY a UNIQUE KEY a AS SELECT a FROM db1.o",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+      EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+    for (const std::string sql : {
+           "SELECT a FROM db1.o",
+           "SELECT a FROM db1.o AS stream",
+           "ALTER TABLE db1.o MODIFY COMMENT 'c'",
+           "DESCRIBE TABLE o",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      EXPECT_EQ(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success) << RunTableRef(sql, si).message();
     }
   }
 }
@@ -11793,7 +11850,9 @@ TEST(TableRefFidelity, MeaningChangingLiteralFoldsAreRefused) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
-      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      // ClickHouse 26.8 backquotes the names `from` and `values` wherever it
+      // prints an identifier, a function name included.
+      EXPECT_EQ(resp.sql_after_rewrite(), name == "values" ? "SELECT `values`(((1, 2)))" : sql);
     }
   }
 }

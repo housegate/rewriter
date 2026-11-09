@@ -41,6 +41,22 @@ bool RuntimeName(std::string_view name) {
   return name == "libc.so.6" || name == "libm.so.6" || name == "libpthread.so.0" ||
       name == "libdl.so.2" || name == "librt.so.1" || name == "libgcc_s.so.1";
 }
+// The dynamic loader is already the only accepted interpreter (PT_INTERP) and
+// loaded object (RuntimePath). An executable that imports a loader symbol also
+// names it in DT_NEEDED and DT_VERNEED: ClickHouse 26.8 reads glibc 2.35's
+// __rseq_size / __rseq_offset, which ld.so defines.
+bool LoaderName(std::string_view name) {
+#if defined(__x86_64__)
+  return name == "ld-linux-x86-64.so.2";
+#elif defined(__aarch64__)
+  return name == "ld-linux-aarch64.so.1";
+#else
+  return false;
+#endif
+}
+bool DependencyName(std::string_view name) {
+  return RuntimeName(name) || LoaderName(name);
+}
 bool RuntimePath(const char *path) {
   char *resolved = realpath(path, nullptr);
   if (!resolved) return false;
@@ -150,7 +166,7 @@ public:
     for (int64_t tag : {DT_RPATH, DT_RUNPATH, DT_FILTER, DT_AUXILIARY, DT_AUDIT, DT_DEPAUDIT})
       if (tags.count(tag)) Bad("unsupported dependency search/interposition tag");
     strings = Bytes(Offset(Tag(DT_STRTAB), Tag(DT_STRSZ)), Tag(DT_STRSZ));
-    for (auto n : needed) if (!RuntimeName(String(n))) Bad("unsupported semantic dependency");
+    for (auto n : needed) if (!DependencyName(String(n))) Bad("unsupported semantic dependency");
     if (Tag(DT_SYMENT) != sizeof(Elf64_Sym)) Bad("wrong dynamic symbol entry size");
     // Derive the complete loader symbol extent from its hash tables, not the
     // independently mutable SHT_DYNSYM section length (including WEAK imports).
@@ -204,7 +220,7 @@ public:
     if (!n || n > 1000) Bad("invalid version count");
     for (uint64_t i = 0; i < n; ++i) {
       auto need = At<Elf64_Verneed>(Offset(v, sizeof(Elf64_Verneed)));
-      if (need.vn_version != 1 || !need.vn_cnt || need.vn_cnt > 1000 || !RuntimeName(String(need.vn_file))) Bad("unsupported version dependency");
+      if (need.vn_version != 1 || !need.vn_cnt || need.vn_cnt > 1000 || !DependencyName(String(need.vn_file))) Bad("unsupported version dependency");
       uint64_t a = v + need.vn_aux;
       for (unsigned j = 0; j < need.vn_cnt; ++j) {
         auto aux = At<Elf64_Vernaux>(Offset(a, sizeof(Elf64_Vernaux)));

@@ -36,10 +36,17 @@ namespace rewriter_handlers {
 constexpr DB::IdentifierQuotingRule  kQuotingRule  = DB::IdentifierQuotingRule::WhenNecessary;
 constexpr DB::IdentifierQuotingStyle kQuotingStyle = DB::IdentifierQuotingStyle::Backticks;
 
+// Secrets are shown: the output is the statement the backend runs, so a
+// remote() password or an s3() key must reach it as written.
+// ignore_redundant_parentheses: since ClickHouse 26.5 the AST remembers
+// grouping parentheses the caller wrote, `(a = 1)`, and the formatter prints
+// them. They are dropped, as 26.3 and the 25.8 / 26.3 backends did (the
+// literal-fold markers and the fidelity measurements assume that output).
 inline std::string formatAst(const DB::ASTPtr &ast) {
   return ast->formatWithPossiblyHidingSensitiveData(
-    /*max_length=*/0, /*one_line=*/true, /*hilite=*/true,
-    /*show_secrets=*/false, kQuotingRule, kQuotingStyle);
+    /*max_length=*/0, /*one_line=*/true, /*show_secrets=*/true,
+    /*print_pretty_type_names=*/false, kQuotingRule, kQuotingStyle,
+    /*ignore_redundant_parentheses=*/true);
 }
 
 // ClickHouse's parser keeps some subtrees only in a field, outside
@@ -52,8 +59,10 @@ inline std::string formatAst(const DB::ASTPtr &ast) {
 //  - ASTWindowListElement::definition (a WINDOW clause; clone() adds it);
 //  - ASTColumnsApplyTransformer::lambda / parameters (`APPLY(x -> …)`);
 //  - ASTTTLElement::group_by_key / group_by_assignments (TTL `GROUP BY … SET
-//    …`) and recompression_codec (`RECOMPRESS CODEC(…)`);
-//  - ASTAlterCommand::refresh (`ALTER … MODIFY REFRESH … DEPENDS ON …`).
+//    …`) and recompression_codec (`RECOMPRESS CODEC(…)`).
+// ClickHouse 26.8 keeps ASTAlterCommand::refresh (`ALTER … MODIFY REFRESH …
+// DEPENDS ON …`, adopted here up to 26.3) in `children`, and its clone()
+// deep-copies it.
 // registerFieldOnlyChildren adopts them as children right after parsing; the
 // formatter keeps reading the fields, which hold the same nodes. Clone only an
 // unregistered tree (clonePolicyAst): APPLY's clone copies `children` by
@@ -76,8 +85,6 @@ inline void forEachFieldOnlyMember(const DB::IAST &node, F &&f) {
     for (const auto &key : ttl->group_by_key) visit(key);
     for (const auto &assignment : ttl->group_by_assignments) visit(assignment);
     visit(ttl->recompression_codec);
-  } else if (const auto *command = node.as<DB::ASTAlterCommand>()) {
-    visit(command->refresh);
   }
 }
 
@@ -127,18 +134,11 @@ inline DB::ASTPtr parseBounded(DB::IParser &parser, const char *begin, const cha
 }
 
 // A deep copy of an UNREGISTERED parse (before registerFieldOnlyChildren),
-// registered on its own. ASTAlterCommand::clone() copies `refresh` by
-// pointer, so it is deep-copied here; the other adopted fields are
-// deep-copied by their own clone().
+// registered on its own. Every adopted field is deep-copied by its own
+// node's clone(); a registered tree's clone would instead share them (APPLY's
+// clone() copies `children` by pointer).
 inline DB::ASTPtr clonePolicyAst(const DB::ASTPtr &unregistered) {
   DB::ASTPtr copy = unregistered->clone();
-  std::function<void(DB::IAST &)> deepen = [&](DB::IAST &node) {
-    if (auto *command = node.as<DB::ASTAlterCommand>(); command && command->refresh)
-      command->refresh = command->refresh->clone();
-    for (const auto &child : node.children)
-      if (child) deepen(*child);
-  };
-  deepen(*copy);
   registerFieldOnlyChildren(*copy);
   return copy;
 }

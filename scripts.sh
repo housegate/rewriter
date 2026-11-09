@@ -40,16 +40,9 @@ ensure_symlinks() {
 # wipes them, the next build re-adds them — otherwise ninja hits missing symbols
 # like `undefined symbol: resolve_affinity` when relinking numactl.
 ensure_patches() {
-    local thread_status=clickHouse/src/Common/ThreadStatus.cpp
-    local thread_stack_patch="$PWD/patches/clickhouse-thread-stack-alignment.patch"
-    # glibc exposes a CPU-dependent MINSIGSTKSZ. On CPUs with larger XSAVE
-    # state it is not page-aligned, but aligned_alloc requires size to be an
-    # integral multiple of alignment and otherwise returns EINVAL.
-    if [ -f "$thread_status" ] && \
-       ! grep -q 'aligned_alloc requires size to be a multiple of alignment' "$thread_status"; then
-        git -C clickHouse apply "$thread_stack_patch"
-    fi
-
+    # ClickHouse 26.8 rounds the CPU-dependent alternative signal-stack size up
+    # to a page itself (src/Common/ThreadStatus.cpp), so the former
+    # thread-stack-alignment patch is no longer applied.
     local flatbuf=clickHouse/contrib/flatbuffers/include/flatbuffers/stl_emulation.h
     if [ -f "$flatbuf" ] && grep -q 'const size_type count_' "$flatbuf"; then
         sed -i 's/const size_type count_/size_type count_/' "$flatbuf"
@@ -60,6 +53,20 @@ ensure_patches() {
     if [ -f "$numactl" ] && ! grep -q '"${LIBRARY_DIR}/distance.c"' "$numactl"; then
         sed -i 's|"${LIBRARY_DIR}/syscall.c"|"${LIBRARY_DIR}/syscall.c"\n    "${LIBRARY_DIR}/distance.c"\n    "${LIBRARY_DIR}/affinity.c"\n    "${LIBRARY_DIR}/sysfs.c"\n    "${LIBRARY_DIR}/rtnetlink.c"|g' \
             "$numactl"
+    fi
+}
+
+# ClickHouse's CMake names a few of its own build outputs by
+# ${CMAKE_BINARY_DIR}/contrib/..., which is build/clickHouse/contrib/... here
+# because ClickHouse is a subdirectory. Since 26.8 every executable (protoc and
+# the other host tools included) links build/contrib/compiler-rt-cmake/
+# libclang_rt_builtins.a (cmake/compiler_rt_link.cmake), so point that
+# directory at the real one. Called after every configure.
+ensure_build_links() {
+    mkdir -p build/contrib
+    if [ ! -L build/contrib/compiler-rt-cmake ]; then
+        rm -rf build/contrib/compiler-rt-cmake
+        ln -s ../clickHouse/contrib/compiler-rt-cmake build/contrib/compiler-rt-cmake
     fi
 }
 
@@ -75,7 +82,7 @@ prepare() {
                 git cmake ccache python3 ninja-build mold \
                 nasm yasm gawk lsb-release wget software-properties-common gnupg
             echo ">>> Installing LLVM via apt.llvm.org"
-            # ClickHouse 26.3 requires Clang >= 21 (cmake/tools.cmake). Install and
+            # ClickHouse 26.8 requires Clang >= 21 (cmake/tools.cmake). Install and
             # use Clang 22, matching the reference sql-rewriter's 26.3 build.
             wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
             export CC=clang-22
@@ -145,6 +152,8 @@ build() {
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
       ${compiler_target_args[@]+"${compiler_target_args[@]}"} \
       -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
+
+    ensure_build_links
 
     echo ">>> [4/5] Build OpenSSL libraries"
     ARCH=$(uname -m)
@@ -246,6 +255,8 @@ rebuild() {
         getconf _NPROCESSORS_ONLN 2>/dev/null ||
         echo 4
     )
+
+    ensure_build_links
 
     echo ">>> [2/3] Recompile changed sources"
     cd build

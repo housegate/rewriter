@@ -185,13 +185,14 @@ void collectWriteTargets(const DB::IAST &ast, Refs &out) {
     addTarget(out, q->getDatabase(), q->getTable());
   }
   if (const auto *create = ast.as<DB::ASTCreateQuery>()) {
-    // Every named target: an MV's TO table and a TimeSeries table's DATA /
-    // TAGS / METRICS tables (the latter are refused earlier as an unmodelled
-    // CREATE shape, T7; read here too so no target escapes this check).
+    // Every named target, of every kind: an MV's TO table and a TimeSeries
+    // table's SAMPLES / TAGS / METRICS / RECENT SAMPLES tables (the latter
+    // are refused earlier as an unmodelled CREATE shape, T7; read here too so
+    // no target escapes this check).
     if (create->targets) {
-      for (const auto kind : {DB::ViewTarget::To, DB::ViewTarget::Data, DB::ViewTarget::Tags, DB::ViewTarget::Metrics}) {
-        if (!create->targets->hasTableID(kind)) continue;
-        const auto id = create->targets->getTableID(kind);
+      for (const auto &target : create->targets->targets) {
+        if (!create->targets->hasTableID(target.kind)) continue;
+        const auto id = create->targets->getTableID(target.kind);
         addTarget(out, id.database_name, id.table_name);
       }
     }
@@ -279,7 +280,7 @@ std::vector<std::string> opaqueTexts(const DB::IAST &ast, const std::string &sql
       create && (create->is_ordinary_view || create->is_materialized_view) && create->columns_list) {
     // Formatted in place: a registered tree is never cloned (common.h).
     const auto format = [](const DB::IAST &item) {
-      return item.formatWithPossiblyHidingSensitiveData(0, true, true, false, kQuotingRule, kQuotingStyle);
+      return item.formatWithPossiblyHidingSensitiveData(0, true, true, false, kQuotingRule, kQuotingStyle, true);
     };
     const auto *columns = create->columns_list;
     for (const DB::IAST *list : {static_cast<const DB::IAST *>(columns->indices),

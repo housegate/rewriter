@@ -106,6 +106,80 @@ bool anyParametrisedAlias(const DB::IAST &node) {
   return found;
 }
 
+// A `STREAM [BOUNDED] [UNORDERED] [CURSOR …] [WATERMARK …]` table expression
+// (ClickHouse 26.8): a streaming read no handler models. The SI rewrite
+// replaces the table expression it is bound to, and no supported backend
+// before 26.8 parses it.
+bool anyStreamTableExpression(const DB::IAST &node) {
+  if (const auto *te = node.as<DB::ASTTableExpression>(); te && te->stream_settings) return true;
+  bool found = false;
+  forEachChild(node, [&](const DB::ASTPtr &child) {
+    if (!found && child) found = anyStreamTableExpression(*child);
+  });
+  return found;
+}
+
+// A `LOCAL` or `NATURAL` join. ClickHouse 26.8 reads `LOCAL` / `NATURAL`
+// after a table expression as join keywords and prints them, where 25.8 and
+// 26.3 read a bare `local` / `natural` there as the table's alias (and 26.3
+// printed no LOCAL): `FROM numbers(3) local JOIN t` would reach such a backend
+// as `numbers(3) AS local` and a plain join. A NATURAL join has no ON / USING
+// those servers accept.
+bool anyLocalOrNaturalJoin(const DB::IAST &node) {
+  if (const auto *join = node.as<DB::ASTTableJoin>();
+      join && (join->locality == DB::JoinLocality::Local || join->is_natural))
+    return true;
+  bool found = false;
+  forEachChild(node, [&](const DB::ASTPtr &child) {
+    if (!found && child) found = anyLocalOrNaturalJoin(*child);
+  });
+  return found;
+}
+
+// A MergeTree `UNIQUE KEY` (ClickHouse 26.8): a storage expression neither
+// R2 nor the storage-integrity write path inspects (the AST member
+// enumeration found a read of an SI physical table there answered Success
+// under contract V2), and no backend before 26.8 parses it.
+bool anyStorageUniqueKey(const DB::IAST &node) {
+  if (const auto *storage = node.as<DB::ASTStorage>(); storage && storage->unique_key) return true;
+  bool found = false;
+  forEachChild(node, [&](const DB::ASTPtr &child) {
+    if (!found && child) found = anyStorageUniqueKey(*child);
+  });
+  return found;
+}
+
+// ClickHouse 26.8 shapes of otherwise admitted statement classes that no
+// handler models (see preflightTableReferences).
+bool unmodelledClickHouse268Shape(const DB::IAST &ast) {
+  // A view-target clause other than a materialized view's TO target: a
+  // TimeSeries table's SAMPLES / TAGS / METRICS / RECENT SAMPLES target (a
+  // named table, an INNER UUID, INNER COLUMNS or an inner ENGINE), or INNER
+  // COLUMNS on any target. No handler reads or rewrites those targets, and
+  // the inner column declarations are outside every R2 position.
+  if (const auto *create = ast.as<DB::ASTCreateQuery>(); create && create->targets) {
+    for (const auto &target : create->targets->targets) {
+      if ((target.kind != DB::ViewTarget::To && target.kind != DB::ViewTarget::Inner) || target.inner_columns)
+        return true;
+    }
+  }
+  // `ALTER TABLE … MODIFY SENTIO BINARY TYPE ORIGIN '…'`: the fork's
+  // privileged one-time registration of how a table's stored binary type
+  // headers are read. Every tenant reaches ClickHouse as one shared user, so
+  // ClickHouse's privilege check separates nothing; a tenant must never
+  // issue it.
+  if (const auto *alter = ast.as<DB::ASTAlterQuery>(); alter && alter->command_list) {
+    for (const auto &child : alter->command_list->children) {
+      const auto *command = child ? child->as<DB::ASTAlterCommand>() : nullptr;
+      if (command && command->type == DB::ASTAlterCommand::MODIFY_SENTIO_BINARY_TYPE_ORIGIN) return true;
+    }
+  }
+  // `DESCRIBE TEMPORARY TABLE t` names a session temporary table, which the
+  // DESCRIBE handler would resolve as a table of the session database.
+  if (const auto *describe = ast.as<DB::ASTDescribeQuery>(); describe && describe->temporary) return true;
+  return anyStreamTableExpression(ast) || anyLocalOrNaturalJoin(ast) || anyStorageUniqueKey(ast);
+}
+
 bool anyIdentifierParameter(const DB::IAST &node) {
   if (isIdentifierParameter(&node)) return true;
   bool found = false;
@@ -2532,19 +2606,14 @@ bool preflightTableReferences(const DB::ASTPtr &ast,
     return true;
   }
 
-  // A TimeSeries table's DATA / TAGS / METRICS target clause (a named table,
-  // an INNER UUID or an inner ENGINE): no handler reads or rewrites those
-  // targets, so the statement is refused with T7 in both SI states before
-  // its names are examined, as rewriter-go refuses it (Task I2 review M4).
-  if (const auto *create = ast->as<DB::ASTCreateQuery>(); create && create->targets) {
-    for (const auto &target : create->targets->targets) {
-      if (target.kind == DB::ViewTarget::Data || target.kind == DB::ViewTarget::Tags
-          || target.kind == DB::ViewTarget::Metrics) {
-        response->set_code(rewriter::RewriteCode::UnsupportedStatement);
-        response->set_message(std::string(kUnsupportedStatementMessage));
-        return true;
-      }
-    }
+  // Shapes no handler models inside an admitted class, refused with T7 in
+  // both SI states before their names are examined: a TimeSeries table's
+  // target clauses, as rewriter-go refuses them (Task I2 review M4), and the
+  // ClickHouse 26.8 additions listed at unmodelledClickHouse268Shape.
+  if (unmodelledClickHouse268Shape(*ast)) {
+    response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+    response->set_message(std::string(kUnsupportedStatementMessage));
+    return true;
   }
 
   // T7 before T3: an unmodelled class is refused before its names are

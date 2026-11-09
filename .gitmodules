@@ -1,7 +1,7 @@
 [submodule "clickHouse"]
 	path = clickHouse
 	url = https://github.com/sentioxyz/ClickHouse.git
-	branch = 26.3-lts-decimal512
+	branch = 26.8-lts-decimal512
 [submodule "third_party/rewriter-proto"]
 	path = third_party/rewriter-proto
 	url = https://github.com/housegate/rewriter-proto.git
