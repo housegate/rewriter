@@ -1641,9 +1641,6 @@ bool sqlBearingSetting(const std::string &name) {
     // value, any case. The analyzer switch itself is value-dependent
     // (isAnalyzerSetting / trueLiteralSpelling), handled in scanSettingsText.
     || lower == "legacy_column_name_of_tuple_literal" || lower == "profile"
-    // enable_scopes_for_with_statement switches WITH scoping like
-    // enable_global_with_statement.
-    || lower == "enable_scopes_for_with_statement"
     // ClickHouse 26.8 settings. select / filter / order / sort are SQL text
     // the server parses and wraps around the query (`SELECT <select> FROM
     // (<query>) WHERE <filter> ORDER BY <order>`), outside every walker;

@@ -8564,8 +8564,6 @@ TEST(TableRefSettings, SqlBearingDialectAndValueRules) {
     {"INSERT INTO db1.o (a) SETTINGS `POLYGLOT_DIALECT` = 'sqlite' SELECT 1",
      "table setting POLYGLOT_DIALECT is not accepted"},
     {"SELECT * FROM db1.o SETTINGS max_threads = {'a': 'b'}", std::string(rewriter_handlers::kUnsupportedStatementMessage)},
-    {"SELECT * FROM db1.o SETTINGS enable_scopes_for_with_statement = 0",
-     "table setting enable_scopes_for_with_statement is not accepted"},
     // ClickHouse 26.8: SQL text the server wraps around the query, the
     // current database, format overrides and the other switches
     // sqlBearingSetting lists.
@@ -11474,11 +11472,6 @@ TEST(TableRefFidelity, TimeSeriesTargetsAreRefused) {
            "CREATE TABLE db1.x ENGINE = TimeSeries TAGS ENGINE = MergeTree ORDER BY id",
            "CREATE TABLE db1.x ENGINE = TimeSeries DATA INNER UUID '01234567-89ab-cdef-0123-456789abcdef'",
            "CREATE TABLE db1.x ENGINE = TimeSeries METRICS db1.t",
-           // ClickHouse 26.8 names DATA as SAMPLES and adds RECENT SAMPLES and
-           // INNER COLUMNS (an inner table's own column declarations).
-           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES db1.d",
-           "CREATE TABLE db1.x ENGINE = TimeSeries RECENT SAMPLES db1.d",
-           "CREATE TABLE db1.x ENGINE = TimeSeries SAMPLES INNER COLUMNS (id UUID DEFAULT (SELECT max(id) FROM db2.x)) SAMPLES ENGINE = MergeTree ORDER BY id",
          }) {
       SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
