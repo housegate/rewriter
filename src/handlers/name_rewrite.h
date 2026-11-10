@@ -184,6 +184,12 @@ std::optional<std::string> resolvePhysicalDatabase(
   const std::string &logical_db,
   const rewriter::RewriteTableDynamicArgs &args);
 
+// True for ClickHouse's built-in metadata databases, in the spellings
+// ClickHouse accepts (`system`, `information_schema`, `INFORMATION_SCHEMA`).
+// Their tables are judged by the system-table allowlist, not by the
+// logical-to-physical mapping.
+bool isClickHouseMetadataDatabase(const std::string &db);
+
 // Build the dynamic table name:
 //   logical + (delim + extras.join(delim) iff extras non-empty)
 //           + "." + original_table

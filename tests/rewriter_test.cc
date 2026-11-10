@@ -4956,19 +4956,22 @@ TEST(StorageIntegrityShowColumns, ClickHouseOnlySpellingsAreGatedAsThePair) {
   }
 }
 
-// An ordinary namespace passes through with the ORIGINAL text, not formatAst.
-// ASTShowIndexesQuery's formatter canonicalizes SHOW INDEX / KEYS to
-// SHOW INDEXES and IN to FROM, which would make the two engines disagree on
-// every non-canonical spelling.
+// An ordinary logical database named explicitly (`FROM db.t` or
+// `FROM t {FROM | IN} db`) is mapped like an EXISTS TABLE target (spec
+// 2026-09-26 R7, amended 2026-11-07) and reported as accessed.
 //
-// Pre-fix: Success but STATEMENT_TYPE_SELECT with the canonicalized SQL
-// "SHOW INDEXES FROM u FROM other", because the statement reached the SELECT
-// dispatch tail.
-TEST(StorageIntegrityShowColumns, OrdinaryNamespacePassesThroughVerbatim) {
-  for (const char *sql : {"SHOW INDEX FROM other.u", "SHOW FULL COLUMNS FROM u IN other"}) {
-    SCOPED_TRACE(sql);
+// Pre-fix: Success with the original text and no accessed table, so
+// ClickHouse read `other` as a physical database (another tenant's, or
+// `default`) while the caller's permission check saw nothing.
+TEST(StorageIntegrityShowColumns, OrdinaryQualifiedTargetIsMapped) {
+  struct Case { const char *sql; const char *want; };
+  for (const auto &c : std::vector<Case>{
+         {"SHOW INDEX FROM other.u", "SHOW INDEXES FROM `other.u` FROM phys"},
+         {"SHOW FULL COLUMNS FROM u IN other", "SHOW FULL COLUMNS FROM `other.u` FROM phys"},
+       }) {
+    SCOPED_TRACE(c.sql);
     rewriter::RewriteSQLRequest req;
-    req.set_sql(sql);
+    req.set_sql(c.sql);
     AddSIContractOption(req);
     auto *dyn = req.mutable_options(0)->mutable_table_name_args()->mutable_dynamic_args();
     (*dyn->mutable_database_map())["other"] = "phys";
@@ -4976,10 +4979,14 @@ TEST(StorageIntegrityShowColumns, OrdinaryNamespacePassesThroughVerbatim) {
     const auto resp = RunDirectRewrite(std::move(req));
     EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
     EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
-    EXPECT_EQ(resp.sql_after_rewrite(), sql);
-    EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    EXPECT_EQ(resp.sql_after_rewrite(), c.want);
+    ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+    EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "other");
+    EXPECT_EQ(resp.original_accessed_tables(0).original_table(), "u");
+    EXPECT_EQ(resp.original_accessed_tables(0).physical_database(), "phys");
   }
 }
+
 
 // Two inputs where ClickHouse's parser is strictly narrower than polyglot's, so
 // the statement never reaches a handler and the engines answer different codes.
@@ -6184,6 +6191,27 @@ rewriter::RewriteSQLResponse RunTableRef(const std::string &sql, bool si = false
 }
 
 }  // namespace
+
+// A qualified DESCRIBE / SHOW COLUMNS target whose database the caller does
+// not have is refused, not forwarded: ClickHouse would read it as a physical
+// database. ClickHouse's metadata databases are still forwarded verbatim
+// (the system-table allowlist judged them).
+TEST(TableReferenceDescribe, QualifiedTargetOutsideTheCallersDatabasesIsRefused) {
+  for (const char *sql : {"DESCRIBE TABLE default.x", "DESC other.x", "SHOW COLUMNS FROM x FROM default",
+                          "SHOW INDEX FROM default.x", "SHOW FULL COLUMNS FROM x IN other"}) {
+    SCOPED_TRACE(sql);
+    const auto resp = RunTableRef(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest) << resp.sql_after_rewrite();
+    EXPECT_NE(resp.message().find("not in database_map and not a known physical database"), std::string::npos)
+      << resp.message();
+  }
+  for (const char *sql : {"DESCRIBE TABLE system.one", "SHOW COLUMNS FROM tables FROM system"}) {
+    SCOPED_TRACE(sql);
+    const auto resp = RunTableRef(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
+  }
+}
 
 // Inventory §6 (P): the SI compatibility shim took a clause keyword followed
 // by "(" for an implicit alias with a column list and cut the list out of the
@@ -9788,7 +9816,8 @@ TEST(TableRefShow, CarriedReleaseGates) {
          {"describe table `\\x6f`", false, rewriter::RewriteCode::Success, "DESCRIBE TABLE phys.`db1.o`"},
          {"DESCRIBE TABLE /*c*/ hg_safe.db1__t", true, rewriter::RewriteCode::UnsupportedStatement,
           "storage-integrity physical table hg_safe.db1__t is not directly addressable"},
-         {"DESCRIBE TABLE db1.o", false, rewriter::RewriteCode::Success, "DESCRIBE TABLE db1.o"},
+         {"DESCRIBE TABLE db1.o", false, rewriter::RewriteCode::Success, "DESCRIBE TABLE phys.`db1.o`"},
+         {"DESCRIBE TABLE db1.o", true, rewriter::RewriteCode::Success, "DESCRIBE TABLE phys.`db1.o`"},
        }) {
     SCOPED_TRACE(std::string(c.sql) + (c.si ? " [V2]" : " [inactive]"));
     const auto resp = RunTableRef(c.sql, c.si);
@@ -10923,7 +10952,12 @@ TEST(TableRefSystemTables, MultiPartShowTargets) {
     for (const std::string sql : {"SHOW COLUMNS FROM system.one.tables", "SHOW COLUMNS FROM db2.x.y",
            "SHOW INDEX FROM default.x.y", "SHOW COLUMNS FROM a.b.c.d", "SHOW COLUMNS FROM db2 /* c */ . x . y"})
       ExpectRefusal(sql, si, rewriter::RewriteCode::UnsupportedStatement, "statement is not supported");
-    ExpectAllowed("SHOW COLUMNS FROM db2.x", si, "SHOW COLUMNS FROM db2.x");
+    // Spec 2026-09-26 R7, amended 2026-11-07: a two-part target is mapped
+    // like an EXISTS target, so a database the caller does not have is refused.
+    EXPECT_EQ(RunTableRef("SHOW COLUMNS FROM db2.x", si).code(), rewriter::RewriteCode::InvalidRewriteRequest);
+    // The caller's own database maps (with the SI surface active, db1 owns an
+    // SI table and is refused by the SI handler first).
+    if (!si) ExpectAllowed("SHOW COLUMNS FROM db1.x", false, "SHOW COLUMNS FROM `db1.x` FROM phys");
   }
   ExpectRefusal("SHOW COLUMNS FROM db1.x.y", false, rewriter::RewriteCode::UnsupportedStatement,
                 "statement is not supported");
@@ -11548,9 +11582,10 @@ TEST(TableRefShow, SyntheticOutputsRefuseDroppedClauses) {
   }
   EXPECT_EQ(RunTableRef("DESCRIBE TABLE db1.t", true).code(), rewriter::RewriteCode::Success);
   // PARITY (rewriter-go refuses these on its own regeneration gate): an
-  // ordinary DESCRIBE keeps its clause verbatim, so nothing is dropped.
+  // ordinary DESCRIBE is mapped (spec 2026-09-26 R7, amended 2026-11-07) and
+  // formatAst keeps its clause, so nothing is dropped.
   EXPECT_EQ(RunTableRef("DESCRIBE TABLE db1.o FORMAT JSON", true).sql_after_rewrite(),
-            "DESCRIBE TABLE db1.o FORMAT JSON");
+            "DESCRIBE TABLE phys.`db1.o` FORMAT JSON");
 }
 
 // A column declaration's own SETTINGS (…) clause in a CREATE column list or an
