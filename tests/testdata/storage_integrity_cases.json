@@ -45851,5 +45851,330 @@
     "want_code": "UnsupportedStatement",
     "want_message_contains": "virtual column _database is not accessible",
     "want_stmt": ""
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_rewritten",
+    "sql": "INSERT INTO db1.o FORMAT Values",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "INSERT INTO phys.`db1.o` FORMAT Values",
+    "want_sql_go": "INSERT INTO phys.\"db1.o\" FORMAT Values",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_columns_rewritten",
+    "sql": "INSERT INTO db1.o (a, b) FORMAT Values",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "INSERT INTO phys.`db1.o` (a, b) FORMAT Values",
+    "want_sql_go": "INSERT INTO phys.\"db1.o\" (a, b) FORMAT Values",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_lowercase_rewritten",
+    "sql": "INSERT INTO db1.o FORMAT values",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "INSERT INTO phys.`db1.o` FORMAT values",
+    "want_sql_go": "INSERT INTO phys.\"db1.o\" FORMAT values",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_v2_rewritten",
+    "sql": "INSERT INTO db1.o FORMAT Values",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "INSERT INTO phys.`db1.o` FORMAT Values",
+    "want_sql_go": "INSERT INTO phys.\"db1.o\" FORMAT Values",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_si_table_v2_rewritten",
+    "sql": "INSERT INTO db1.t FORMAT Values",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "INSERT INTO phys.`db1.t` FORMAT Values",
+    "want_sql_go": "INSERT INTO phys.\"db1.t\" FORMAT Values",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.t": "phys.db1.t"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_comment_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o FORMAT Values -- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_streamed_format_values_comment_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o FORMAT Values /* c */",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
   }
 ]
