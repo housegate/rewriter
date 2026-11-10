@@ -1319,7 +1319,7 @@ bool rejectEmbeddedStorageIntegrityRead(
           response->set_message(storageIntegrityUnauthorizedMessage(logical));
         } else {
           response->set_code(code);
-          response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+          response->set_message(storageIntegrityReferenceRejectMessage(hit->logical_key));
         }
         return true;
       }
@@ -1408,7 +1408,7 @@ void rewriteEmbeddedBody(
           originals, args, response);
         !key.empty()) {
       response->set_code(rewriter::RewriteCode::UnsupportedStatement);
-      response->set_message(storageIntegrityWriteRejectMessage(key));
+      response->set_message(storageIntegrityReferenceRejectMessage(key));
       return;
     }
     if (hasUnsupportedStorageIntegrityWrapper(body, args)) {

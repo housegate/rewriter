@@ -324,7 +324,7 @@ bool rejectStorageIntegrityWriteTarget(
       return false;
     }
     rejectUnsupported(response,
-      storageIntegrityWriteRejectMessage(hit->logical_key));
+      storageIntegrityAppendOnlyMessage(hit->logical_key, args));
     return true;
   }
   const std::string physical = database.empty()

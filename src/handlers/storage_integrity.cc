@@ -521,7 +521,7 @@ bool rejectLexicalStorageIntegrityTarget(rewriter::RewriteSQLResponse *response,
       response->set_message(storageIntegrityUnauthorizedMessage(logical));
     } else {
       response->set_code(code);
-      response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+      response->set_message(storageIntegrityAppendOnlyMessage(hit->logical_key, args));
     }
     return true;
   }
@@ -765,7 +765,7 @@ std::string namespaceSurface(const NamespaceRef &ref) {
 }
 
 std::string logicalRejectMessage(const NamespaceRef &ref, const std::string &key) {
-  if (ref.source == NamespaceRefSource::TableEngine) return storageIntegrityWriteRejectMessage(key);
+  if (ref.source == NamespaceRefSource::TableEngine) return storageIntegrityReferenceRejectMessage(key);
   return "storage-integrity table " + key + " is not directly addressable through " +
          namespaceSurface(ref);
 }
@@ -1029,9 +1029,21 @@ std::string reservedRowIdColumn(const rewriter::RewriteTableDynamicArgs &args) {
   return std::string(kDefaultReservedRowIdColumn);
 }
 
-std::string storageIntegrityWriteRejectMessage(const std::string &logical_key) {
+std::string storageIntegrityAppendOnlyMessage(const std::string &logical_key,
+  const rewriter::RewriteTableDynamicArgs &args) {
+  std::string message = "storage-integrity table " + logical_key +
+    " is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE"
+    " and other statements on it are refused";
+  if (storageIntegrityDropContract(args))
+    message += "; to change its schema, use a plain DROP TABLE and CREATE it again";
+  return message;
+}
+
+std::string storageIntegrityReferenceRejectMessage(const std::string &logical_key) {
   return "storage-integrity table " + logical_key +
-         " accepts writes only through the signed statement lane";
+    " can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an"
+    " ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a"
+    " storage-integrity table cannot reference it";
 }
 
 std::string storageIntegrityUnauthorizedMessage(const std::string &logical_database) {
@@ -1752,7 +1764,7 @@ bool annotateProvenStorageIntegrityName(
   }
   if (!name_active) return false;
   if (auto hit = lookupStorageIntegrity(database, table, args)) {
-    response->set_message(storageIntegrityWriteRejectMessage(hit->logical_key));
+    response->set_message(storageIntegrityAppendOnlyMessage(hit->logical_key, args));
     return true;
   }
   return false;

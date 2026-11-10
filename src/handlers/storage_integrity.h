@@ -65,7 +65,17 @@ bool authorizeStorageIntegrityLogical(const std::string &origin_db,
   std::string *logical_database);
 
 std::string reservedRowIdColumn(const rewriter::RewriteTableDynamicArgs &args);
-std::string storageIntegrityWriteRejectMessage(const std::string &logical_key);
+// Shared with rewriter-go (nameresolve.StorageIntegrityAppendOnlyMessage):
+// a statement whose target is a logical SI table and that is not an INSERT.
+// SI tables are append-only; under contract V2 the message also says how to
+// change the schema (a plain DROP TABLE is accepted there).
+std::string storageIntegrityAppendOnlyMessage(const std::string &logical_key,
+  const rewriter::RewriteTableDynamicArgs &args);
+// Shared with rewriter-go (nameresolve.StorageIntegrityReferenceRejectMessage):
+// a statement that reads or references a logical SI table where the derived
+// read is not admitted (a view body, a table engine, an ALTER / UPDATE /
+// DELETE operand, the source of a write into an SI table).
+std::string storageIntegrityReferenceRejectMessage(const std::string &logical_key);
 std::string storageIntegrityUnauthorizedMessage(const std::string &logical_database);
 std::string storageIntegrityPhysicalRejectMessage(const std::string &physical_name);
 std::string storageIntegrityPhysicalDatabaseRejectMessage(const std::string &physical_database);

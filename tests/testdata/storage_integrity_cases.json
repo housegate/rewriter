@@ -1363,7 +1363,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1391,7 +1391,7 @@
     "reject": true,
     "sql": "DROP TABLE db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1419,7 +1419,7 @@
     "reject": true,
     "sql": "TRUNCATE TABLE db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1447,7 +1447,7 @@
     "reject": true,
     "sql": "RENAME TABLE db1.t TO db1.t2",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1475,7 +1475,7 @@
     "reject": true,
     "sql": "CREATE TABLE db1.t (a UInt32) ENGINE = MergeTree ORDER BY a",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1513,7 +1513,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1551,7 +1551,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1588,7 +1588,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1633,7 +1633,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": "",
     "want_table_rewrites": {
       "db1.t": "hg_safe.db1__t",
@@ -1689,7 +1689,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": "",
     "want_table_rewrites": {
       "db1.t": "hg_safe.db1__t",
@@ -1742,7 +1742,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": "",
     "want_table_rewrites": {
       "db1.t": "hg_safe.db1__t",
@@ -1783,7 +1783,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1820,7 +1820,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1857,7 +1857,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1894,7 +1894,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -1931,7 +1931,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -2924,7 +2924,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -3293,7 +3293,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -5095,7 +5095,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
@@ -6896,7 +6896,7 @@
     "reject": true,
     "sql": "SYSTEM SYNC REPLICA db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -6925,7 +6925,7 @@
     "reject": true,
     "sql": "CHECK TABLE db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -7070,7 +7070,7 @@
     "reject": true,
     "sql": "CREATE LIVE VIEW other.v AS SELECT * FROM db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
@@ -7109,7 +7109,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
@@ -7221,7 +7221,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
@@ -7296,7 +7296,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
@@ -9009,7 +9009,120 @@
     "reject": true,
     "sql": "TRUNCATE TABLE db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_lightweight_delete_rejected",
+    "reject": true,
+    "sql": "DELETE FROM db1.t WHERE a = 1",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_v2_lightweight_update_rejected",
+    "reject": true,
+    "sql": "UPDATE db1.t SET a = 2 WHERE a = 1",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys",
+        "other": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id"
+      }
+    },
+    "name": "si_v2_alter_update_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE db1.t UPDATE a = 2 WHERE a = 1",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -9075,7 +9188,7 @@
     "reject": true,
     "sql": "DROP TABLE db1.t ON CLUSTER c",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -9104,7 +9217,7 @@
     "reject": true,
     "sql": "DROP VIEW db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -9133,7 +9246,7 @@
     "reject": true,
     "sql": "DROP DICTIONARY db1.t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -9210,7 +9323,7 @@
     "reject": true,
     "sql": "DROP TABLE IF EXISTS db1.t SYNC",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -9240,7 +9353,7 @@
     "reject": true,
     "sql": "DROP TABLE t",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused",
     "want_stmt": ""
   },
   {
@@ -18469,7 +18582,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -20932,7 +21045,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -20981,7 +21094,7 @@
       }
     ],
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   },
   {
@@ -42894,7 +43007,7 @@
     "reject": true,
     "sql": "CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN system.processes USING (a)",
     "want_code": "UnsupportedStatement",
-    "want_message_contains": "storage-integrity table db1.t accepts writes only through the signed statement lane",
+    "want_message_contains": "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table cannot reference it",
     "want_stmt": ""
   },
   {
