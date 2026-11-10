@@ -5570,7 +5570,7 @@ TEST(StorageIntegrityAlterModifyQuery, RejectsEmbeddedLogicalAndPhysicalReads) {
   };
   const std::vector<Case> cases = {
     {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM db1.t",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
@@ -5606,13 +5606,13 @@ TEST(StorageIntegrityAlterExpressions, RejectsEmbeddedLogicalAndPhysicalReads) {
   };
   const std::vector<Case> cases = {
     {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t)",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 MATERIALIZED (SELECT max(a) FROM hg_safe.db1__t)",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
       "hg_safe", "db1__t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 ALIAS (SELECT max(a) FROM db1.t)",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 EPHEMERAL (SELECT max(a) FROM hg_unsafe.db1__t)",
       "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
@@ -5622,7 +5622,7 @@ TEST(StorageIntegrityAlterExpressions, RejectsEmbeddedLogicalAndPhysicalReads) {
       "hg_safe", "db1__t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t), "
       "ADD CONSTRAINT c CHECK x IN (SELECT a FROM hg_safe.db1__t)",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5675,19 +5675,19 @@ TEST(StorageIntegrityCreateExpressions, RejectsEmbeddedColumnAndConstraintReads)
   };
   const std::vector<Case> cases = {
     {"CREATE TABLE other.x (a UInt64 DEFAULT (SELECT max(x) FROM db1.t)) ENGINE=Memory",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"CREATE TABLE other.x (a UInt64 MATERIALIZED (SELECT max(x) FROM hg_safe.db1__t)) ENGINE=Memory",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
       "hg_safe", "db1__t"},
     {"CREATE TABLE other.x (a UInt64 ALIAS (SELECT max(x) FROM db1.t)) ENGINE=Memory",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"CREATE TABLE other.x (a UInt64 EPHEMERAL (SELECT max(x) FROM hg_unsafe.db1__t)) ENGINE=Memory",
       "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
       "hg_unsafe", "db1__t"},
     {"CREATE TABLE other.x (a UInt64, CONSTRAINT c CHECK ((SELECT max(x) FROM db1.t) > 0)) ENGINE=Memory",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5762,7 +5762,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
   const std::vector<MutationCase> cases = {
     {"update_assignment_logical",
       "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"update_predicate_safe",
       "UPDATE other.u SET x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
@@ -5774,7 +5774,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
       "hg_unsafe", "db1__t"},
     {"alter_update_assignment_logical",
       "ALTER TABLE other.u UPDATE x = (SELECT count() FROM db1.t) WHERE id = 1",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
     {"alter_update_predicate_safe",
       "ALTER TABLE other.u UPDATE x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
@@ -5782,7 +5782,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
       "hg_safe", "db1__t"},
     {"alter_delete_predicate_logical",
       "ALTER TABLE other.u DELETE WHERE id IN (SELECT id FROM db1.t)",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5853,7 +5853,7 @@ TEST(StorageIntegrityMutationReads, FirstSourceWinsAcrossTablesAndNamespaces) {
     {"table_before_namespace",
       "UPDATE other.u SET x = (SELECT count() FROM db1.t) + "
       "(SELECT count() FROM merge('hg_safe', 'x')) WHERE id = 1",
-      kSIReference,
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -7668,7 +7668,7 @@ TEST(TableRefSources, OuterCteIsNotVisibleInAViewFamilyBody) {
      "CREATE VIEW phys.`db1.v` AS WITH `db1.t` AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.db1.t` AS `db1.t`)",
      {{"db1", "v"}, {"", "db1.t"}}},
     {"CREATE VIEW db1.v AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", true, rewriter::RewriteCode::UnsupportedStatement,
-     kSIReference,
+     kSIReference.c_str(),
      {{"db1", "v"}, {"", "t"}}},
     {"CREATE VIEW db1.v AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", false, rewriter::RewriteCode::Success,
      "CREATE VIEW phys.`db1.v` AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.t` AS t)",
@@ -7686,7 +7686,7 @@ TEST(TableRefSources, OuterCteIsNotVisibleInAViewFamilyBody) {
      "CREATE MATERIALIZED VIEW phys.`db1.mv` TO phys.`db1.o` AS WITH `db1.t` AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.db1.t` AS `db1.t`)",
      {{"db1", "mv"}, {"db1", "o"}, {"", "db1.t"}}},
     {"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", true, rewriter::RewriteCode::UnsupportedStatement,
-     kSIReference,
+     kSIReference.c_str(),
      {{"db1", "mv"}, {"db1", "o"}, {"", "t"}}},
     {"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", false, rewriter::RewriteCode::Success,
      "CREATE MATERIALIZED VIEW phys.`db1.mv` TO phys.`db1.o` AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.t` AS t)",
