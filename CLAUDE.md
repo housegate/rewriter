@@ -55,7 +55,7 @@ The wrapper handles symlinks and submodule patches that `ninja` otherwise trips 
 ./scripts.sh build            # full clean build (wipes build/, ~15-20 min)
 ./scripts.sh rebuild          # incremental; use this day-to-day. Falls through to build if build/ is missing.
 ./scripts.sh test             # build + ctest
-./scripts.sh clean            # rm -rf build/
+./scripts.sh clean            # rm -rf build/, then reset submodules to their pinned commits
 ./scripts.sh docker build <v> # stages build/clickhousegate_rewriter → docker/bare/root/ then buildx
 ./scripts.sh docker push  <v>
 ```
@@ -74,15 +74,19 @@ Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_T
 
 Don't bump versions by hand. Use the `cut-release` workflow (`Actions → cut-release → Run workflow`). It tags `main` as `vX.Y.Z` in UTC — first cut of a new UTC day bumps Y (minor), subsequent cuts same day bump Z (patch) — then dispatches `release.yml` which builds + pushes the docker image on the build host.
 
-### Submodule brittleness (important)
+### Submodule patches and the build tree (important)
 
-`scripts.sh`'s `build` runs `git submodule foreach --recursive 'git reset --hard && git clean -fdx'` at the end, which also wipes the `clickHouse/src/clickHouse` self-symlink needed for `#include "clickHouse/..."` to resolve, and reverts in-tree patches. Both `build` and `rebuild` call `ensure_symlinks` + `ensure_patches` on entry to re-establish them:
+`scripts.sh` keeps one patch lifecycle: the ClickHouse compatibility patches are build inputs and stay applied for as long as `build/` exists. `build` and `rebuild` call `ensure_symlinks` + `ensure_patches` on entry (idempotent) and never revert them, so after any successful command the submodule sources and the CMake/Ninja graph in `build/` describe the same inputs, and a direct reconfigure or raw `ninja -C build clickhousegate_rewriter clickhousegate_rewriter_cli rewriter_tests` works. Expect `git status` to show `clickHouse` as modified. Only `./scripts.sh clean` resets the submodules (`git submodule foreach --recursive 'git reset --hard && git clean -fdx'`), and it removes `build/` first. What is applied:
 
 - `clickHouse/src/clickHouse -> .` and `./contrib -> clickHouse/contrib`
 - `flatbuffers/include/flatbuffers/stl_emulation.h`: drop `const` from `size_type count_`
 - `numactl-cmake/CMakeLists.txt`: append `distance.c / affinity.c / sysfs.c / rtnetlink.c` so the static lib exports `resolve_affinity` etc.
 
-If you touch the build by hand (not via `scripts.sh`), apply the same symlinks/patches or ninja will fail with "file not found" on `Dictionaries/DictionaryFactory.h` or `undefined symbol: resolve_affinity`.
+If you reset the submodules by hand while keeping `build/`, run `./scripts.sh rebuild` (it re-applies the patches before configuring) rather than raw `ninja`, or ninja fails with "file not found" on `Dictionaries/DictionaryFactory.h` or `undefined symbol: resolve_affinity`.
+
+`build/.rewriter-inputs` records the ClickHouse commit and a fingerprint of `ensure_patches` that the tree was built from. When `build`/`rebuild` finds different inputs (a ClickHouse bump, a patch change), it removes everything in `build/` except `CMakeCache.txt` and rebuilds cold (~15-20 min). Ninja compares mtimes only and several ClickHouse protobuf rules depend on `protoc` order-only, so without this a bump keeps the old protoc's generated `*.pb.h` and fails with "Protobuf C++ gencode is built with an incompatible version". A tree without the stamp is adopted as built from the current inputs.
+
+`build` and `rebuild` fail when `rewriter_tests` does not compile or link; `release.yml` additionally runs `ctest` before it builds the image.
 
 ## Architecture
 

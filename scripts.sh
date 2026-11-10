@@ -11,7 +11,7 @@ Commands:
   build                     Full rebuild (wipes the build/ directory).
   rebuild                   Incremental build (fast, recommended for day-to-day work).
   test                      Build and run unit tests.
-  clean                     Remove the build/ directory.
+  clean                     Remove build/ and restore submodules to their pinned commits.
   docker list               List local Docker images.
   docker build <version>    Build a Docker image tagged <version>.
   docker push  <version>    Push the image for <version> to the remote registry.
@@ -35,10 +35,17 @@ ensure_symlinks() {
     fi
 }
 
-# Re-apply compatibility patches to submodule sources, idempotently. Called on every
-# build/rebuild so that when `git submodule foreach git clean` or a manual reset
-# wipes them, the next build re-adds them — otherwise ninja hits missing symbols
-# like `undefined symbol: resolve_affinity` when relinking numactl.
+# Apply compatibility patches to submodule sources, idempotently.
+#
+# Patch lifecycle: the patched sources are part of the build inputs and stay in
+# place for as long as build/ exists. build and rebuild apply them on entry and
+# never revert them, so the CMake/Ninja graph in build/ always describes the
+# source tree next to it; reconfigure and raw `ninja -C build ...` keep working
+# after any scripts.sh command. Only `clean` restores the submodules to their
+# pinned commits, and it removes build/ first. If something else resets the
+# submodules (CI does before every run), the next build/rebuild re-applies the
+# patches before configure, so ninja never sees the unpatched numactl list
+# (`undefined symbol: resolve_affinity`).
 ensure_patches() {
     # ClickHouse 26.8 rounds the CPU-dependent alternative signal-stack size up
     # to a page itself (src/Common/ThreadStatus.cpp), so the former
@@ -67,6 +74,59 @@ ensure_build_links() {
     if [ ! -L build/contrib/compiler-rt-cmake ]; then
         rm -rf build/contrib/compiler-rt-cmake
         ln -s ../clickHouse/contrib/compiler-rt-cmake build/contrib/compiler-rt-cmake
+    fi
+}
+
+# The ClickHouse inputs a build tree was produced from: the ClickHouse commit
+# and the patch logic above. Printed as the content of build/.rewriter-inputs.
+build_inputs() {
+    local top expected commit patches
+    expected="$(cd clickHouse && pwd -P)"
+    top="$(git -C clickHouse rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ "$top" != "$expected" ]; then
+        echo "Error: clickHouse is not a git checkout; run" \
+             "git submodule update --init --recursive --depth=1" >&2
+        exit 1
+    fi
+    commit="$(git -C clickHouse rev-parse --verify 'HEAD^{commit}')"
+    patches="$(declare -f ensure_patches | git hash-object --stdin)"
+    printf 'clickhouse=%s\npatches=%s\n' "$commit" "$patches"
+}
+
+# Discard a build tree produced from other ClickHouse inputs.
+#
+# Ninja decides staleness by mtime only, and several ClickHouse protobuf rules
+# (contrib/google-cloud-cpp-cmake/cmake/CompileProtos.cmake among them) depend
+# on protoc only order-only. After a ClickHouse bump, generated *.pb.h/*.pb.cc
+# from the old protoc can therefore be newer than the new .proto inputs and
+# survive, failing later with "Protobuf C++ gencode is built with an
+# incompatible version". When the recorded inputs differ, everything in build/
+# except CMakeCache.txt (compiler and ISA choices) is removed, and the next
+# configure/ninja regenerates it from the current tree. A tree without a stamp
+# (one built before stamps existed) is adopted as built from the current inputs.
+reconcile_build_inputs() {
+    local stamp=build/.rewriter-inputs want
+    want="$(build_inputs)"
+    mkdir -p build
+    if [ ! -f "$stamp" ]; then
+        echo ">>> build/ has no input stamp; recording the current ClickHouse inputs"
+    elif [ "$(cat "$stamp")" != "$want" ]; then
+        echo ">>> ClickHouse inputs changed since build/ was produced:"
+        sed 's/^/    was: /' "$stamp"
+        printf '%s\n' "$want" | sed 's/^/    now: /'
+        echo ">>> Removing everything in build/ except CMakeCache.txt"
+        find build -mindepth 1 -maxdepth 1 ! -name CMakeCache.txt -exec rm -rf {} +
+    fi
+    printf '%s\n' "$want" > "$stamp"
+}
+
+# Build the test binary. A compile or link failure fails the command: a stale
+# build/tests/rewriter_tests from an earlier run must never pass for this tree.
+build_tests() {
+    ninja -C build -j"$JOBS" rewriter_tests
+    if [ ! -x build/tests/rewriter_tests ]; then
+        echo "Error: build/tests/rewriter_tests was not produced" >&2
+        exit 1
     fi
 }
 
@@ -125,6 +185,7 @@ build() {
 
     echo ">>> [2/5] Apply submodule compatibility patches"
     ensure_patches
+    reconcile_build_inputs
 
     pushd clickHouse/src > /dev/null
     rm -rf clickHouse
@@ -179,19 +240,8 @@ build() {
     echo ">>> [5/5] Build the main target (-j$JOBS)"
     ninja -C build -j"$JOBS" clickhousegate_rewriter clickhousegate_rewriter_cli
 
-    # If testing is enabled, build tests too.
-    if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
-        echo ">>> [5.1/5] Build test binary"
-        ninja -C build -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
-    fi
-
-    # Undo any submodule changes the build made (reset patches).
-    # ensure_patches on the next build re-applies them idempotently.
-    git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null
-    # The submodule cleanup above also wipes the clickHouse/src/clickHouse
-    # self-symlink. Without it, cmake reconfigures fail to resolve
-    # Dictionaries/DictionaryFactory.h. Restore it here.
-    ensure_symlinks
+    echo ">>> [5.1/5] Build test binary"
+    build_tests
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
@@ -221,6 +271,7 @@ rebuild() {
     # builds don't trip on missing files or missing symbols.
     ensure_symlinks
     ensure_patches
+    reconcile_build_inputs
 
     # Re-run cmake configure so `git describe`-derived REWRITER_VERSION /
     # GIT_COMMIT_HASH are refreshed and any CMakeLists.txt edits get picked
@@ -263,13 +314,8 @@ rebuild() {
     ninja -j"$JOBS" clickhousegate_rewriter clickhousegate_rewriter_cli
     cd ..
 
-    # If testing is enabled, build tests too.
-    if grep -q "BUILD_TESTING:BOOL=ON" build/CMakeCache.txt 2>/dev/null; then
-        echo ">>> [3/3] Recompile tests"
-        cd build
-        ninja -j"$JOBS" rewriter_tests || echo "Warning: rewriter_tests build skipped"
-        cd ..
-    fi
+    echo ">>> [3/3] Recompile tests"
+    build_tests
 
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
@@ -279,10 +325,16 @@ rebuild() {
     echo "=========================================="
 }
 
-# Clean the build directory.
+# Remove build/, then restore every submodule to its pinned commit (this
+# reverts the compatibility patches). build/ goes first so that no build graph
+# outlives the patched sources it was generated from.
 clean() {
     echo ">>> Cleaning build/"
     rm -rf build/
+    echo ">>> Restoring submodule sources to their pinned commits"
+    git submodule foreach --recursive 'git reset --hard && git clean -fdx' >/dev/null
+    # The cleanup removes the untracked clickHouse/src/clickHouse self-symlink.
+    ensure_symlinks
     echo ">>> Done."
 }
 
