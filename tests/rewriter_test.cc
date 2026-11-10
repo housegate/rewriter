@@ -5089,13 +5089,19 @@ TEST(StorageIntegrityShowPrefixes, LegalPrefixesPreserveTargetSemantics) {
       EXPECT_TRUE(resp.original_accessed_tables(0).is_storage_integrity());
     }
     // The SI namespace refusal above names the database first; a resolvable
-    // target then reaches the synthetic enumeration, which models neither
-    // FULL nor TEMPORARY: refused rather than answered as SHOW TABLES (Task
-    // I3, rewriter-go dispatchShowTables).
+    // target then reaches the synthetic enumeration, which answers FULL with
+    // (name, engine) but cannot answer TEMPORARY: that is refused rather than
+    // answered as SHOW TABLES (Task I3, housegate/housegate#319, rewriter-go
+    // dispatchShowTables).
     for (const std::string target : {"db1", "other"}) {
       const std::string sql = "SHOW " + prefix + "TABLES FROM " + target;
       SCOPED_TRACE(sql);
       const auto resp = rewrite(sql);
+      if (prefix == "FULL ") {
+        EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+        EXPECT_EQ(resp.sql_after_rewrite().rfind("SELECT name, engine FROM (", 0), 0u) << resp.sql_after_rewrite();
+        continue;
+      }
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
       EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
       EXPECT_EQ(resp.database_rewrites_size(), 0);
@@ -9799,9 +9805,9 @@ TEST(TableRefShow, CarriedReleaseGates) {
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
       EXPECT_EQ(resp.message(), "system table system.dictionaries is not accessible");
     }
-    // A SHOW TABLES body that passes R7 is then refused by the synthetic
-    // enumeration, which would drop it (Task I3, rewriter-go).
-    for (const char *sql : {"SHOW TABLES WHERE name IN ('a', 'b') LIMIT 5", "SHOW TABLES LIKE 'a%'"}) {
+    // A SHOW TABLES WHERE body that passes R7 is then refused by the
+    // synthetic enumeration, which would drop it (Task I3, rewriter-go).
+    for (const char *sql : {"SHOW TABLES WHERE name IN ('a', 'b') LIMIT 5"}) {
       SCOPED_TRACE(std::string(sql) + (si ? " [V2]" : " [inactive]"));
       const auto resp = RunTableRef(sql, si);
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
@@ -11559,19 +11565,75 @@ TEST(TableRefFidelity, TimeSeriesTargetsAreRefused) {
   }
 }
 
+// SHOW TABLES routes a [NOT] LIKE / ILIKE pattern, a LIMIT and FULL through
+// the system.tables mapping (housegate/housegate#319): the pattern and limit
+// apply to the logical name after the prefix is stripped, ordered by name as
+// ClickHouse's own SHOW TABLES is, and FULL adds the engine column. The SQL is
+// byte-identical to rewriter-go's (TestShowTablesLikeLimitFull).
+TEST(TableRefShow, ShowTablesLikeLimitFull) {
+  const std::string listing =
+    "SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name"
+    " FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))";
+  const std::string full_listing =
+    "SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name, engine"
+    " FROM (SELECT name, engine FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))";
+  const auto wrap = [](const std::string &l, const std::string &cols, const std::string &tail) {
+    return "SELECT " + cols + " FROM (" + l + ")" + tail;
+  };
+  for (const bool si : {false, true}) {
+    const std::vector<std::pair<std::string, std::string>> cases = {
+      {"SHOW TABLES", listing},
+      {"SHOW TABLES FROM db1", listing},
+      {"SHOW TABLES LIKE 'a%'", wrap(listing, "name", " WHERE name LIKE 'a%' ORDER BY name")},
+      {"SHOW TABLES FROM db1 ILIKE 'A%'", wrap(listing, "name", " WHERE name ILIKE 'A%' ORDER BY name")},
+      {"SHOW TABLES IN db1 NOT LIKE 'a%'", wrap(listing, "name", " WHERE name NOT LIKE 'a%' ORDER BY name")},
+      {"SHOW TABLES NOT ILIKE 'a%';", wrap(listing, "name", " WHERE name NOT ILIKE 'a%' ORDER BY name")},
+      {"SHOW TABLES LIKE 'a\\_%'", wrap(listing, "name", " WHERE name LIKE 'a\\\\_%' ORDER BY name")},
+      {"SHOW TABLES LIKE 'O''B%'", wrap(listing, "name", " WHERE name LIKE 'O''B%' ORDER BY name")},
+      {"SHOW TABLES LIKE 'O\\'B%'", wrap(listing, "name", " WHERE name LIKE 'O''B%' ORDER BY name")},
+      {"SHOW TABLES LIMIT 0", wrap(listing, "name", " ORDER BY name LIMIT 0")},
+      {"SHOW TABLES FROM db1 LIKE 'a%' LIMIT 3", wrap(listing, "name", " WHERE name LIKE 'a%' ORDER BY name LIMIT 3")},
+      {"SHOW FULL TABLES", wrap(full_listing, "name, engine", " ORDER BY name")},
+      {"SHOW FULL TABLES FROM db1 LIKE '%b%' LIMIT 1",
+       wrap(full_listing, "name, engine", " WHERE name LIKE '%b%' ORDER BY name LIMIT 1")},
+    };
+    for (const auto &[sql, want] : cases) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(), want);
+      EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_SHOW_TABLES);
+    }
+    // A database refusal keeps precedence over the tail.
+    for (const std::string base : {"SHOW TABLES FROM phys", "SHOW TABLES FROM hg_safe", "SHOW TABLES FROM nope"}) {
+      for (const std::string variant : {base + " LIKE 'a%'", base + " NOT ILIKE 'a%' LIMIT 2",
+                                        "SHOW FULL TABLES" + base.substr(std::string("SHOW TABLES").size())}) {
+        SCOPED_TRACE(variant + (si ? " [V2]" : " [inactive]"));
+        const auto want = RunTableRef(base, si);
+        const auto got = RunTableRef(variant, si);
+        EXPECT_NE(want.code(), rewriter::RewriteCode::Success);
+        EXPECT_EQ(got.code(), want.code());
+        EXPECT_EQ(got.message(), want.message());
+      }
+    }
+  }
+}
+
 // The synthetic SHOW TABLES / SHOW DATABASES listings and the SI DESCRIBE
-// metadata SELECT model only their plain forms: a clause they would drop
-// (LIKE / ILIKE, an empty pattern included, WHERE, LIMIT, FORMAT, INTO
-// OUTFILE, SETTINGS) and SHOW FULL / TEMPORARY TABLES are refused with T7, as
-// rewriter-go refuses them, instead of being silently answered as the plain
-// form. SHOW DATABASES keeps its LIKE / ILIKE filter (an empty one too).
+// metadata SELECT refuse a clause they would drop with T7, as rewriter-go
+// does, instead of silently answering the plain form: SHOW TABLES keeps a
+// LIKE / ILIKE pattern, a UInt64 LIMIT and FULL (housegate/housegate#319,
+// TableRefShow.ShowTablesLikeLimitFull) and refuses WHERE, FORMAT, INTO
+// OUTFILE, SETTINGS, an empty pattern and TEMPORARY; SHOW DATABASES keeps its
+// LIKE / ILIKE filter (an empty one too).
 TEST(TableRefShow, SyntheticOutputsRefuseDroppedClauses) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
-           "SHOW TABLES FROM db1 LIKE 'x%'", "SHOW TABLES LIKE ''", "SHOW TABLES FROM db1 NOT ILIKE 'x%'",
-           "SHOW TABLES FROM db1 WHERE 1", "SHOW TABLES FROM db1 LIMIT 1", "SHOW TABLES FROM db1 FORMAT JSON",
+           "SHOW TABLES LIKE ''", "SHOW TABLES FROM db1 ILIKE '' LIMIT 1",
+           "SHOW TABLES FROM db1 WHERE 1", "SHOW TABLES FROM db1 LIMIT -1", "SHOW TABLES FROM db1 FORMAT JSON",
+           "SHOW TABLES FROM db1 LIMIT 1 FORMAT JSON", "SHOW TABLES FROM db1 LIKE 'x%' FORMAT JSON",
            "SHOW TABLES FROM db1 INTO OUTFILE '/tmp/x'", "SHOW TABLES FROM db1 SETTINGS max_threads = 1",
-           "SHOW FULL TABLES", "SHOW TEMPORARY TABLES", "SHOW FULL TEMPORARY TABLES FROM db1", "SHOW TEMPORARY TABLES IN db1",
+           "SHOW TEMPORARY TABLES", "SHOW FULL TEMPORARY TABLES FROM db1", "SHOW TEMPORARY TABLES IN db1",
            "SHOW DATABASES LIMIT 1", "SHOW DATABASES FORMAT JSON", "SHOW DATABASES INTO OUTFILE '/tmp/x'",
            "SHOW DATABASES SETTINGS max_threads = 1", "SHOW DATABASES LIKE 'd%' LIMIT 1",
            "SHOW DATABASES LIKE 'd%' FORMAT JSON",
