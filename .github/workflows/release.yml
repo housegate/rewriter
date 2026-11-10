@@ -1402,10 +1402,14 @@ jobs:
             echo 'error: build/tests/rewriter_tests was not produced' >&2
             exit 1
           }
-          # Publish only a binary whose own test suite passed in this tree:
-          # unit tests plus the process startup smoke test. The measured
-          # snapshot-profile probe exits 77 (skipped) without CI's profiles.
-          ctest --test-dir build --output-on-failure
+          # Publish only a binary whose tests passed in this tree. The
+          # SnapshotQuery/SnapshotClosed corpus needs the externally measured
+          # profiles that only ci.yml's paired gate generates (it ran on this
+          # main commit); everything else in rewriter_tests runs here, plus
+          # the real-process startup smoke test.
+          build/tests/rewriter_tests --gtest_brief=1 \
+            --gtest_filter='-SnapshotQuery.*:SnapshotClosed.*'
+          ctest --test-dir build --output-on-failure -R '^rewriter_startup_smoke$'
           if [ ! -L clickHouse/src/clickHouse ] || \
              [ "$(readlink -f clickHouse/src/clickHouse)" != "$(readlink -f clickHouse/src)" ] || \
              [ ! -L contrib ] || \

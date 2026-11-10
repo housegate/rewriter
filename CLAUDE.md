@@ -86,7 +86,7 @@ If you reset the submodules by hand while keeping `build/`, run `./scripts.sh re
 
 `build/.rewriter-inputs` records the ClickHouse commit and a fingerprint of `ensure_patches` that the tree was built from. When `build`/`rebuild` finds different inputs (a ClickHouse bump, a patch change), it removes everything in `build/` except `CMakeCache.txt` and rebuilds cold (~15-20 min). Ninja compares mtimes only and several ClickHouse protobuf rules depend on `protoc` order-only, so without this a bump keeps the old protoc's generated `*.pb.h` and fails with "Protobuf C++ gencode is built with an incompatible version". A tree without the stamp is adopted as built from the current inputs.
 
-`build` and `rebuild` fail when `rewriter_tests` does not compile or link; `release.yml` additionally runs `ctest` before it builds the image.
+`build` and `rebuild` fail when `rewriter_tests` does not compile or link; `release.yml` additionally runs `rewriter_tests` (minus the `SnapshotQuery`/`SnapshotClosed` corpus, which needs CI's measured profiles; a plain `ctest` fails on those without them) and the startup smoke test before it builds the image.
 
 ## Architecture
 
