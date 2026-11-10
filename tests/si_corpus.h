@@ -45,9 +45,9 @@ inline uint64_t Fingerprint(const std::string &raw) {
 // This repo locally pins its own exact corpus bytes, catching accidental edits
 // and stale local pins. Intentional updates require paired PRs with rewriter-go,
 // an explicit byte-for-byte cmp, and a SHA-256 recorded in each PR description.
-constexpr uint64_t kCorpusFingerprint = 5572742773955313367ULL;
-constexpr size_t kCorpusBytes = 1201460;
-constexpr size_t kCorpusCases = 1128;
+constexpr uint64_t kCorpusFingerprint = 17615422599758748148ULL;
+constexpr size_t kCorpusBytes = 1209742;
+constexpr size_t kCorpusCases = 1135;
 
 struct Accessed {
   std::string original_database;
