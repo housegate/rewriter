@@ -28,6 +28,40 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+// Client-visible storage-integrity refusals for logical table db1.t, pinned
+// literally (not through the handler helpers) so a wording change is a
+// deliberate test change. rewriter-go pins the same bytes.
+const std::string kSIAppendOnly =
+  "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER,"
+  " TRUNCATE and other statements on it are refused";
+const std::string kSIAppendOnlyV2 =
+  kSIAppendOnly + "; to change its schema, use a plain DROP TABLE and CREATE it again";
+const std::string kSIReference =
+  "storage-integrity table db1.t can be read only by SELECT, or by INSERT ... SELECT or CREATE TABLE ... AS SELECT"
+  " into an ordinary table; views, table engines, ALTER, UPDATE, DELETE and writes into a storage-integrity table"
+  " cannot reference it";
+
+}  // namespace
+
+// Neither SI refusal may suggest that signing would admit the statement: an
+// SI table is append-only (housegate/housegate#323). Only contract V2, which
+// accepts a plain DROP TABLE, adds the schema-change hint.
+TEST(StorageIntegrityMessages, AppendOnlyAndReferenceRefusals) {
+  rewriter::RewriteTableDynamicArgs none;
+  rewriter::RewriteTableDynamicArgs v1;
+  v1.mutable_storage_integrity()->set_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
+  rewriter::RewriteTableDynamicArgs v2;
+  v2.mutable_storage_integrity()->set_contract_version(rewriter::STORAGE_INTEGRITY_CONTRACT_V2);
+  EXPECT_EQ(rewriter_handlers::storageIntegrityAppendOnlyMessage("db1.t", none), kSIAppendOnly);
+  EXPECT_EQ(rewriter_handlers::storageIntegrityAppendOnlyMessage("db1.t", v1), kSIAppendOnly);
+  EXPECT_EQ(rewriter_handlers::storageIntegrityAppendOnlyMessage("db1.t", v2), kSIAppendOnlyV2);
+  EXPECT_EQ(rewriter_handlers::storageIntegrityReferenceRejectMessage("db1.t"), kSIReference);
+  for (const auto &message : {kSIAppendOnlyV2, kSIReference})
+    EXPECT_EQ(message.find("sign"), std::string::npos) << message;
+}
+
 // ------------------------ Debug dump helpers ------------------------
 static std::string DumpMap(const std::map<std::string, DB::CommonTableExpr> &m) {
   std::string s;
@@ -4622,7 +4656,7 @@ TEST(StorageIntegrityContractV2, DropTableSucceeds) {
 
 TEST(StorageIntegrityContractV2, DropExemptionRequiresPlainGrammar) {
   const std::string signed_lane =
-    "storage-integrity table db1.t accepts writes only through the signed statement lane";
+    kSIAppendOnlyV2;
   struct Case {
     const char *sql;
     bool session_db1;
@@ -5359,7 +5393,7 @@ TEST(StorageIntegrityCTEScope, NonRecursiveAliasesBecomeVisibleIncrementally) {
   EXPECT_EQ(mutation_resp.code(), rewriter::RewriteCode::UnsupportedStatement)
     << mutation_resp.message();
   EXPECT_EQ(mutation_resp.message(),
-            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+            kSIReference);
   ASSERT_EQ(mutation_resp.original_accessed_tables_size(), 1);
   const auto &mutation_access = mutation_resp.original_accessed_tables(0);
   EXPECT_TRUE(mutation_access.original_database().empty());
@@ -5405,7 +5439,7 @@ TEST(StorageIntegrityCTEScope, RecursiveAliasesArePredeclared) {
 
   const auto resp = RunDirectRewrite(std::move(req));
   EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
-  EXPECT_EQ(resp.message(), "storage-integrity table db1.t accepts writes only through the signed statement lane");
+  EXPECT_EQ(resp.message(), kSIReference);
   EXPECT_EQ(resp.sql_after_rewrite(), sql);
 }
 
@@ -5536,7 +5570,7 @@ TEST(StorageIntegrityAlterModifyQuery, RejectsEmbeddedLogicalAndPhysicalReads) {
   };
   const std::vector<Case> cases = {
     {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM db1.t",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.mv MODIFY QUERY SELECT * FROM hg_safe.db1__t",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
@@ -5572,13 +5606,13 @@ TEST(StorageIntegrityAlterExpressions, RejectsEmbeddedLogicalAndPhysicalReads) {
   };
   const std::vector<Case> cases = {
     {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t)",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 MATERIALIZED (SELECT max(a) FROM hg_safe.db1__t)",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
       "hg_safe", "db1__t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 ALIAS (SELECT max(a) FROM db1.t)",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 EPHEMERAL (SELECT max(a) FROM hg_unsafe.db1__t)",
       "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
@@ -5588,7 +5622,7 @@ TEST(StorageIntegrityAlterExpressions, RejectsEmbeddedLogicalAndPhysicalReads) {
       "hg_safe", "db1__t"},
     {"ALTER TABLE other.u ADD COLUMN x UInt64 DEFAULT (SELECT max(a) FROM db1.t), "
       "ADD CONSTRAINT c CHECK x IN (SELECT a FROM hg_safe.db1__t)",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5641,19 +5675,19 @@ TEST(StorageIntegrityCreateExpressions, RejectsEmbeddedColumnAndConstraintReads)
   };
   const std::vector<Case> cases = {
     {"CREATE TABLE other.x (a UInt64 DEFAULT (SELECT max(x) FROM db1.t)) ENGINE=Memory",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"CREATE TABLE other.x (a UInt64 MATERIALIZED (SELECT max(x) FROM hg_safe.db1__t)) ENGINE=Memory",
       "storage-integrity physical table hg_safe.db1__t is not directly addressable",
       "hg_safe", "db1__t"},
     {"CREATE TABLE other.x (a UInt64 ALIAS (SELECT max(x) FROM db1.t)) ENGINE=Memory",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"CREATE TABLE other.x (a UInt64 EPHEMERAL (SELECT max(x) FROM hg_unsafe.db1__t)) ENGINE=Memory",
       "storage-integrity physical table hg_unsafe.db1__t is not directly addressable",
       "hg_unsafe", "db1__t"},
     {"CREATE TABLE other.x (a UInt64, CONSTRAINT c CHECK ((SELECT max(x) FROM db1.t) > 0)) ENGINE=Memory",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5728,7 +5762,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
   const std::vector<MutationCase> cases = {
     {"update_assignment_logical",
       "UPDATE other.u SET x = (SELECT count() FROM db1.t) WHERE id = 1",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"update_predicate_safe",
       "UPDATE other.u SET x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
@@ -5740,7 +5774,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
       "hg_unsafe", "db1__t"},
     {"alter_update_assignment_logical",
       "ALTER TABLE other.u UPDATE x = (SELECT count() FROM db1.t) WHERE id = 1",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
     {"alter_update_predicate_safe",
       "ALTER TABLE other.u UPDATE x = 1 WHERE id IN (SELECT id FROM hg_safe.db1__t)",
@@ -5748,7 +5782,7 @@ TEST(StorageIntegrityMutationReads, RejectsEmbeddedSIReadsInGrammarOrder) {
       "hg_safe", "db1__t"},
     {"alter_delete_predicate_logical",
       "ALTER TABLE other.u DELETE WHERE id IN (SELECT id FROM db1.t)",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -5792,7 +5826,7 @@ TEST(StorageIntegrityMutationReads, UpdateAssignmentPrecedesPredicate) {
   EXPECT_EQ(resp.statement_type(), rewriter::STATEMENT_TYPE_UNSPECIFIED);
   EXPECT_EQ(resp.sql_after_rewrite(), sql);
   EXPECT_EQ(resp.message(),
-            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+            kSIReference);
   EXPECT_EQ(resp.storage_integrity_contract_version(),
             rewriter::STORAGE_INTEGRITY_CONTRACT_V1);
   ASSERT_EQ(resp.original_accessed_tables_size(), 1);
@@ -5819,7 +5853,7 @@ TEST(StorageIntegrityMutationReads, FirstSourceWinsAcrossTablesAndNamespaces) {
     {"table_before_namespace",
       "UPDATE other.u SET x = (SELECT count() FROM db1.t) + "
       "(SELECT count() FROM merge('hg_safe', 'x')) WHERE id = 1",
-      "storage-integrity table db1.t accepts writes only through the signed statement lane",
+      kSIReference.c_str(),
       "db1", "t"},
   };
 
@@ -7019,7 +7053,7 @@ TEST(TableRefSources, WriteBodiesReadAnActiveInOperandLikeASelect) {
   // tenant's own table.
   const auto view_t = RunTableRef("CREATE VIEW db1.v AS SELECT number FROM numbers(10) WHERE number IN t", true);
   EXPECT_EQ(view_t.code(), rewriter::RewriteCode::UnsupportedStatement);
-  EXPECT_EQ(view_t.message(), "storage-integrity table db1.t accepts writes only through the signed statement lane");
+  EXPECT_EQ(view_t.message(), kSIReference);
   const auto view_q = RunTableRef("CREATE VIEW db1.v AS SELECT number FROM numbers(10) WHERE number IN `db1.t`", true);
   EXPECT_EQ(view_q.code(), rewriter::RewriteCode::Success) << view_q.message();
   EXPECT_EQ(view_q.sql_after_rewrite(),
@@ -7634,7 +7668,7 @@ TEST(TableRefSources, OuterCteIsNotVisibleInAViewFamilyBody) {
      "CREATE VIEW phys.`db1.v` AS WITH `db1.t` AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.db1.t` AS `db1.t`)",
      {{"db1", "v"}, {"", "db1.t"}}},
     {"CREATE VIEW db1.v AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", true, rewriter::RewriteCode::UnsupportedStatement,
-     "storage-integrity table db1.t accepts writes only through the signed statement lane",
+     kSIReference.c_str(),
      {{"db1", "v"}, {"", "t"}}},
     {"CREATE VIEW db1.v AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", false, rewriter::RewriteCode::Success,
      "CREATE VIEW phys.`db1.v` AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.t` AS t)",
@@ -7652,7 +7686,7 @@ TEST(TableRefSources, OuterCteIsNotVisibleInAViewFamilyBody) {
      "CREATE MATERIALIZED VIEW phys.`db1.mv` TO phys.`db1.o` AS WITH `db1.t` AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.db1.t` AS `db1.t`)",
      {{"db1", "mv"}, {"db1", "o"}, {"", "db1.t"}}},
     {"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", true, rewriter::RewriteCode::UnsupportedStatement,
-     "storage-integrity table db1.t accepts writes only through the signed statement lane",
+     kSIReference.c_str(),
      {{"db1", "mv"}, {"db1", "o"}, {"", "t"}}},
     {"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM t)", false, rewriter::RewriteCode::Success,
      "CREATE MATERIALIZED VIEW phys.`db1.mv` TO phys.`db1.o` AS WITH t AS (SELECT 7 AS a) SELECT * FROM view(SELECT * FROM phys.`db1.t` AS t)",
@@ -7753,7 +7787,7 @@ TEST(TableRefSources, WriteBodyTableFunctionBodies) {
         SCOPED_TRACE(sql);
         const auto resp = RunTableRef(sql, true);
         EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.sql_after_rewrite();
-        EXPECT_EQ(resp.message(), "storage-integrity table db1.t accepts writes only through the signed statement lane");
+        EXPECT_EQ(resp.message(), kSIReference);
         EXPECT_EQ(accessedPairs(resp),
                   (AccessedPairs{{"db1", target}, {std::string(operand) == "t" ? "" : "db1", "t"}}));
         EXPECT_EQ(resp.table_rewrites().count(operand), 0u);
@@ -7842,7 +7876,7 @@ TEST(TableRefSources, OuterCteIsNotVisibleInExecutableOrANestedView) {
     pattern.replace(pattern.find('%'), 1, name);
     return pattern;
   };
-  const std::string signed_lane = "storage-integrity table db1.t accepts writes only through the signed statement lane";
+  const std::string signed_lane = kSIReference;
   const std::string exe_refused = "table function executable is not accepted";
   std::vector<Case> cases;
   for (const bool si : {false, true}) {
@@ -7954,7 +7988,7 @@ TEST(TableRefParity, MaterializedViewToActiveTableIsRefused) {
     SCOPED_TRACE(sql);
     const auto resp = RunTableRef(sql, /*si=*/true);
     EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
-    EXPECT_EQ(resp.message(), rewriter_handlers::storageIntegrityWriteRejectMessage("db1.t"));
+    EXPECT_EQ(resp.message(), kSIAppendOnlyV2);
     EXPECT_EQ(resp.sql_after_rewrite(), sql);
   }
   const auto ok = RunTableRef("CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM db1.p", /*si=*/true);
@@ -7984,7 +8018,7 @@ TEST(TableRefParity, MaterializedViewTargetAnswersAreTheSameForEveryToForm) {
     const char *message;  // exact; "" = Success
     AccessedPairs accessed;
   };
-  const auto write = rewriter_handlers::storageIntegrityWriteRejectMessage("db1.t");
+  const std::string &write = kSIAppendOnlyV2;
   const std::vector<Row> rows = {
     {"db1.t", true, rewriter::RewriteCode::UnsupportedStatement, write.c_str(), {{"db1", "t"}}},
     {"hg_safe.db1__t", true, rewriter::RewriteCode::UnsupportedStatement,
@@ -8745,7 +8779,7 @@ TEST(TableRefAnnotation, OnlyProvenNamesUpgradeTheMessage) {
   EXPECT_EQ(annotate("DESCRIBE (SELECT * FROM hg_safe.db1__t)"),
             "storage-integrity physical table hg_safe.db1__t is not directly addressable");
   EXPECT_EQ(annotate("CHECK TABLE db1.t"),
-            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+            kSIAppendOnlyV2);
   EXPECT_EQ(annotate("DETACH DATABASE hg_unsafe"),
             "storage-integrity physical database hg_unsafe is not directly addressable");
 }
@@ -8801,7 +8835,7 @@ TEST(TableRefAnnotation, StatementTargetsNameHgObjects) {
   }
   const std::string catch_all(rewriter_handlers::kStorageIntegrityUnmodelledMessage);
   EXPECT_EQ(annotate("DROP TABLE db1.o, db1.t", catch_all),
-            "storage-integrity table db1.t accepts writes only through the signed statement lane");
+            kSIAppendOnlyV2);
   EXPECT_EQ(annotate("BACKUP DATABASE db1 TO Disk('d', 'x')", catch_all), catch_all);
 }
 
@@ -8875,7 +8909,7 @@ TEST(TableRefPreflight, StatementFunctionDatabaseIsExamined) {
 TEST(TableRefAnnotation, MessagePrecedenceUnderAnActiveSurface) {
   const std::string phys = "protected database phys is not addressable";
   const std::string hg_safe_t = "storage-integrity physical table hg_safe.db1__t is not directly addressable";
-  const std::string active_t = "storage-integrity table db1.t accepts writes only through the signed statement lane";
+  const std::string active_t = kSIAppendOnlyV2;
   const std::string catch_all(rewriter_handlers::kStorageIntegrityUnmodelledMessage);
   struct Row {
     const char *sql;
@@ -9180,7 +9214,7 @@ TEST(TableRefUngoverned, MutationsCreateExpressionsAndRefresh) {
       // Under V2 the unbound recursive `t` is the Active db1.t: the SI write
       // refusal names it first (rewriter-go v0.15.0 answers the same).
       EXPECT_EQ(resp.message(), si && std::string(sql).find("RECURSIVE t") != std::string::npos
-                                  ? "storage-integrity table db1.t accepts writes only through the signed statement lane"
+                                  ? kSIReference
                                   : rewriter_handlers::kUnsupportedStatementMessage);
       EXPECT_EQ(resp.sql_after_rewrite(), sql);
     }
@@ -10008,7 +10042,7 @@ TEST(TableRefUnresolved, PrecedenceAndEmptyMap) {
       EXPECT_EQ(resp.message(), c.message);
     }
   }
-  const std::string si_write = "storage-integrity table db1.t accepts writes only through the signed statement lane";
+  const std::string si_write = kSIReference;
   for (const std::string ctx : {"", "db9"}) {
     for (const auto &[base, with_unresolved] : std::vector<std::pair<std::string, std::string>>{
            {"CREATE VIEW db1.v AS SELECT * FROM db1.t", "CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN t2 USING (a)"},
@@ -10382,7 +10416,7 @@ TEST(TableRefFidelity, TtlGroupBySetAndRecompressAreGoverned) {
         if (alter && c.message == "table function remote is not accepted") {
           EXPECT_EQ(resp.message(), t7);
         } else if (alter && si && c.tail.find("db1.t)") != std::string::npos) {
-          EXPECT_EQ(resp.message(), "storage-integrity table db1.t accepts writes only through the signed statement lane");
+          EXPECT_EQ(resp.message(), kSIReference);
         } else {
           EXPECT_EQ(resp.message(), c.message);
         }
@@ -11011,7 +11045,7 @@ TEST(TableRefSystemTables, Precedence) {
   ExpectRefusal("SELECT * FROM hg_safe.db1__t JOIN system.processes USING (a)", false, invalid,
                 "protected database hg_safe is not addressable");
   ExpectRefusal("CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN system.processes USING (a)", true, unsupported,
-                "storage-integrity table db1.t accepts writes only through the signed statement lane");
+                kSIReference);
   ExpectSystemTableRefused("SELECT * FROM db1.t JOIN system.processes USING (a)", "processes", true);
   ExpectSystemTableRefused("CREATE VIEW db1.v AS SELECT * FROM db1.t JOIN system.processes USING (a)", "processes",
                            false);

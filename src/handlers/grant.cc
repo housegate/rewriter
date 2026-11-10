@@ -121,7 +121,7 @@ GrantDispatchResult handleGrantQuery(DB::ASTPtr ast,
             storageIntegrityUnauthorizedMessage(logical));
         } else {
           rejectUnsupported(response,
-            storageIntegrityWriteRejectMessage(hit->logical_key));
+            storageIntegrityAppendOnlyMessage(hit->logical_key, args));
         }
         return GrantDispatchResult::Rejected;
       }
