@@ -46176,5 +46176,504 @@
     "want_code": "UnsupportedStatement",
     "want_message_contains": "statement is not supported",
     "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_like",
+    "sql": "SHOW TABLES LIKE 'a%'",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) WHERE name LIKE 'a%' ORDER BY name",
+    "want_sql_contains": [
+      "WHERE name LIKE 'a%'",
+      "ORDER BY name"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_from_ilike_limit",
+    "sql": "SHOW TABLES FROM db1 ILIKE 'A%' LIMIT 3",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) WHERE name ILIKE 'A%' ORDER BY name LIMIT 3",
+    "want_sql_contains": [
+      "WHERE name ILIKE 'A%'",
+      "ORDER BY name LIMIT 3"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_in_not_like_escaped_underscore",
+    "sql": "SHOW TABLES IN db1 NOT LIKE 'a\\_%'",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) WHERE name NOT LIKE 'a\\\\_%' ORDER BY name",
+    "want_sql_contains": [
+      "NOT LIKE 'a\\\\_%'"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_not_ilike_quote",
+    "sql": "SHOW TABLES NOT ILIKE 'O''B%'",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) WHERE name NOT ILIKE 'O''B%' ORDER BY name",
+    "want_sql_contains": [
+      "WHERE name NOT ILIKE"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_limit",
+    "sql": "SHOW TABLES LIMIT 10",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) ORDER BY name LIMIT 10",
+    "want_sql_contains": [
+      "ORDER BY name LIMIT 10"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_full_tables",
+    "sql": "SHOW FULL TABLES",
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name, engine FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name, engine FROM (SELECT name, engine FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) ORDER BY name",
+    "want_sql_contains": [
+      "SELECT name, engine FROM system.tables"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_full_tables_like_limit_v2",
+    "sql": "SHOW FULL TABLES FROM db1 LIKE '%b%' LIMIT 1",
+    "want_code": "Success",
+    "want_sql": "SELECT name, engine FROM (SELECT multiIf(startsWith(name, 'db1.'), substring(name, length('db1.') + 1), name) AS name, engine FROM (SELECT name, engine FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))) WHERE name LIKE '%b%' ORDER BY name LIMIT 1",
+    "want_sql_contains": [
+      "SELECT name, engine FROM system.tables",
+      "ORDER BY name LIMIT 1"
+    ],
+    "want_stmt": "SHOW_TABLES"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_temporary_tables_rejected",
+    "reject": true,
+    "sql": "SHOW TEMPORARY TABLES",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_where_rejected",
+    "reject": true,
+    "sql": "SHOW TABLES FROM db1 WHERE name = 'a'",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_like_empty_rejected",
+    "reject": true,
+    "sql": "SHOW TABLES LIKE ''",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_like_format_rejected",
+    "reject": true,
+    "sql": "SHOW TABLES LIKE 'a%' FORMAT JSON",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_show_tables_limit_settings_rejected_v2",
+    "reject": true,
+    "sql": "SHOW TABLES LIMIT 1 SETTINGS max_threads = 1",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_protected_phys_show_full_tables_like_rejected",
+    "reject": true,
+    "sql": "SHOW FULL TABLES FROM phys LIKE 'a%'",
+    "want_accessed": [
+      {
+        "original_database": "phys",
+        "logical_database": "phys"
+      }
+    ],
+    "want_code": "InvalidRewriteRequest",
+    "want_message_contains": "protected database phys is not addressable",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
   }
 ]

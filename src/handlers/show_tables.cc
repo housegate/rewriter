@@ -1,6 +1,7 @@
 // src/handlers/show_tables.cc
 #include "handlers/show_tables.h"
 
+#include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTShowColumnsQuery.h>
 #include <Parsers/ASTShowIndexesQuery.h>
 #include <Parsers/ASTShowTablesQuery.h>
@@ -223,17 +224,26 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   // dropped when it could read a table.
   if (rejectShowBody(*show_query, request->sql(), dynamic, response)) return true;
 
-  // The synthetic enumeration models only SHOW TABLES [{FROM | IN} <db>]: it
-  // would drop a LIKE / ILIKE (an empty pattern included), WHERE, LIMIT,
-  // FORMAT, INTO OUTFILE or SETTINGS clause and answer SHOW FULL / TEMPORARY
-  // TABLES as SHOW TABLES, so those are refused rather than silently changed
-  // (rewriter-go dispatchShowTables, the same order: after the database is
-  // resolved). R5 outranks it in both SI states (with the surface inactive the
-  // preflight already ran it).
+  // The synthetic enumeration models SHOW [FULL] TABLES [{FROM | IN} <db>]
+  // [[NOT] {LIKE | ILIKE} '<pattern>'] [LIMIT <n>] (housegate/housegate#319).
+  // It would drop a WHERE, FORMAT, INTO OUTFILE or SETTINGS clause, and it
+  // cannot answer SHOW TEMPORARY TABLES (session tables, no database filter),
+  // so those are refused rather than silently changed, as are an empty
+  // pattern and a LIMIT that is not a UInt64 literal (rewriter-go
+  // dispatchShowTables, the same order: after the database is resolved). R5
+  // outranks it in both SI states (with the surface inactive the preflight
+  // already ran it).
   if (rejectQuerySettings(ast, response, &request->sql())) return true;
-  if (show_query->full || show_query->temporary || !show_query->like.empty()
-      || textHasWord(request->sql(), "like") || textHasWord(request->sql(), "ilike")
-      || show_query->where_expression || show_query->limit_length || show_query->hasOutputOptions()) {
+  const bool has_like = !show_query->like.empty()
+    || textHasWord(request->sql(), "like") || textHasWord(request->sql(), "ilike");
+  const auto *limit_literal = show_query->limit_length
+    ? show_query->limit_length->as<DB::ASTLiteral>()
+    : nullptr;
+  if (show_query->temporary || (has_like && show_query->like.empty())
+      || show_query->where_expression
+      || (show_query->limit_length
+          && (!limit_literal || limit_literal->value.getType() != DB::Field::Types::UInt64))
+      || show_query->hasOutputOptions()) {
     rejectUnsupported(response, std::string(kUnsupportedStatementMessage));
     return true;
   }
@@ -272,14 +282,32 @@ bool handleShowTablesQuery(DB::ASTPtr ast,
   // Outer multiIf strips the prefix from each row; inner subquery filters
   // system.tables by (database = physical AND startsWith(name, prefix)).
   // Subquery avoids alias-shadowing the outer `name` column.
-  std::string result_sql =
+  // FULL answers (name, engine), as ClickHouse's own SHOW FULL TABLES does.
+  const std::string columns = show_query->full ? "name, engine" : "name";
+  const std::string listing =
     "SELECT multiIf("
       "startsWith(name, '" + esc_prefix + "'), "
         "substring(name, length('" + esc_prefix + "') + 1), "
-      "name) AS name "
-    "FROM (SELECT name FROM " + system_tables_source + " "
+      "name) AS name" + std::string(show_query->full ? ", engine" : "") + " "
+    "FROM (SELECT " + columns + " FROM " + system_tables_source + " "
           "WHERE database = '" + esc_physical + "' "
             "AND startsWith(name, '" + esc_prefix + "'))";
+  std::string result_sql = listing;
+  if (show_query->full || has_like || limit_literal) {
+    // The pattern and the limit apply to the logical name, after the prefix
+    // is stripped, ordered by name as ClickHouse's own SHOW TABLES is; an
+    // outer query keeps the filter off the stripped alias. The pattern is
+    // the value ClickHouse decoded (`\_` keeps its backslash), re-escaped.
+    result_sql = "SELECT " + columns + " FROM (" + listing + ")";
+    if (has_like) {
+      std::string op = show_query->case_insensitive_like ? "ILIKE" : "LIKE";
+      if (show_query->not_like) op = "NOT " + op;
+      result_sql += " WHERE name " + op + " '" + escapeSqlLiteral(show_query->like) + "'";
+    }
+    result_sql += " ORDER BY name";
+    if (limit_literal)
+      result_sql += " LIMIT " + std::to_string(limit_literal->value.safeGet<UInt64>());
+  }
 
   setSuccessResponse(response, result_sql, rewriter::STATEMENT_TYPE_SHOW_TABLES);
   // Record the DB rewrite for observability — the per-table prefix is
