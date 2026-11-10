@@ -1350,7 +1350,7 @@ jobs:
             exit 1
           fi
 
-          # ClickHouse 26.3 requires Clang >= 21. The release worktree keeps a
+          # ClickHouse 26.8 requires Clang >= 21. The release worktree keeps a
           # persistent CMake cache, so CC/CXX alone cannot move a cache that was
           # configured with the old Clang 20 toolchain. Invalidate only CMake's
           # compiler/configuration state when migration is needed; keep the
@@ -1395,8 +1395,21 @@ jobs:
           test -x /usr/bin/clang-22
           test -x /usr/bin/clang++-22
           migrate_release_cache
+          # rebuild fails when rewriter_tests does not compile or link.
           CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
           require_release_cache_policy
+          test -x build/tests/rewriter_tests || {
+            echo 'error: build/tests/rewriter_tests was not produced' >&2
+            exit 1
+          }
+          # Publish only a binary whose tests passed in this tree. The
+          # SnapshotQuery/SnapshotClosed corpus needs the externally measured
+          # profiles that only ci.yml's paired gate generates (it ran on this
+          # main commit); everything else in rewriter_tests runs here, plus
+          # the real-process startup smoke test.
+          build/tests/rewriter_tests --gtest_brief=1 \
+            --gtest_filter='-SnapshotQuery.*:SnapshotClosed.*'
+          ctest --test-dir build --output-on-failure -R '^rewriter_startup_smoke$'
           if [ ! -L clickHouse/src/clickHouse ] || \
              [ "$(readlink -f clickHouse/src/clickHouse)" != "$(readlink -f clickHouse/src)" ] || \
              [ ! -L contrib ] || \

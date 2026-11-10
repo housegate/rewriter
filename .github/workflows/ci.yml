@@ -1391,11 +1391,9 @@ jobs:
           }
 
           require_cache_policy
+          # rebuild fails when rewriter_tests does not compile or link, so a
+          # stale cached test executable cannot make this workflow green.
           CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
-          # scripts.sh currently logs and swallows a rewriter_tests Ninja
-          # failure. Re-run the target without that fallback so stale cached
-          # test executables cannot make this workflow green.
-          ninja -C build rewriter_tests
           require_cache_policy
           test -x build/tests/rewriter_tests || {
             echo 'error: build/tests/rewriter_tests was not produced' >&2

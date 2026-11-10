@@ -83,14 +83,17 @@ submodule quirks.
 ./scripts.sh build            # full clean build (first time, ~15-20 min)
 ./scripts.sh rebuild          # incremental (day-to-day, seconds to a few min)
 ./scripts.sh test             # build + ctest
-./scripts.sh clean            # wipe build/
+./scripts.sh clean            # wipe build/, reset submodules to their pins
 ```
 
 After a successful build:
 
 - `build/clickhousegate_rewriter`
 - `build/clickhousegate_rewriter_cli`
-- `build/tests/rewriter_tests` (if `BUILD_TESTING=ON`, the default)
+- `build/tests/rewriter_tests` (always built; a test compile failure fails the command)
+
+The ClickHouse compatibility patches that `scripts.sh` applies stay in the
+submodule for as long as `build/` exists; `./scripts.sh clean` reverts them.
 
 ## Run the server
 
