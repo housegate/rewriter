@@ -196,6 +196,16 @@ std::string stringLookupUnresolvedMessage(const std::string &function, const std
 // verbatim like T6.
 std::string unresolvedUnqualifiedTableMessage(const std::string &table);
 
+// housegate/housegate#336 (rewriter-go nameresolve.UnmappedDatabaseMessage):
+// `database "<db>" does not resolve through the caller's databases (it is not
+// mapped for this account, or the account has no access)`, the refusal of a
+// dynamic-mode read-position table whose database qualifier is not exactly
+// `system` and resolves through neither database_map nor
+// known_physical_databases. ClickHouse would read the verbatim name as a
+// physical database under the shared ClickHouse user. The name is inserted
+// verbatim like T6.
+std::string unmappedDatabaseMessage(const std::string &database);
+
 // The name a ClickHouse Lexer BareWord / QuotedIdentifier token denotes,
 // decoded exactly as ClickHouse's ParserIdentifier decodes it (backslash
 // escapes such as \N and \xHH, doubled quotes, Unicode “…” quotes);

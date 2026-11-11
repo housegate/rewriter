@@ -29,6 +29,7 @@
 #include "handlers/cte_scope.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/system_tables.h"
 #include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
@@ -417,10 +418,14 @@ void doTableNameRewrite(
   }
 }
 
-// `first_unresolved`, when set, receives the first unqualified table name
-// (document order) that does not resolve through the logical context: spec
-// 2026-09-26 §5 "Unqualified names that do not resolve". The walk itself stays
-// lenient; the callers refuse (firstUnresolvedUnqualifiedTable).
+// `first_unresolved`, when set, receives the refusal message of the first
+// read-position table (document order) the walk cannot resolve: an
+// unqualified name that does not resolve through the logical context (spec
+// 2026-09-26 §5 "Unqualified names that do not resolve"), or a qualified name
+// whose database is not exactly `system` and is unmapped
+// (housegate/housegate#336). `system` tables are the system-table
+// allowlist's to decide. The walk itself mutates nothing for them; the
+// callers refuse (firstUnresolvedReadMessage).
 void dynamicRewriteWalk(
   DB::ASTPtr ast,
   const rewriter::RewriteTableDynamicArgs &args,
@@ -433,12 +438,17 @@ void dynamicRewriteWalk(
   // registered tree adopted as children, registerFieldOnlyChildren).
   const bool check_only = first_unresolved != nullptr;
   const auto noteUnresolved = [&](const std::string &db, const std::string &table) {
-    if (first_unresolved && !first_unresolved->has_value() && db.empty()) *first_unresolved = table;
+    if (!first_unresolved || first_unresolved->has_value()) return;
+    if (db.empty()) {
+      *first_unresolved = unresolvedUnqualifiedTableMessage(table);
+    } else if (db != kSystemDatabase) {
+      *first_unresolved = unmappedDatabaseMessage(db);
+    }
   };
 
   // Spec 2026-09-26 T4: rewrite an IN operand exactly like a FROM reference.
   // An Active SI table becomes the derived safe/unsafe read; a mapped table
-  // its physical name; an unmapped logical name stays (lenient, like FROM).
+  // its physical name; an unmapped logical name is refused first, like FROM.
   if (auto *fn = ast->as<DB::ASTFunction>();
       fn && isInFamilyFunction(fn->name) && fn->arguments && fn->arguments->children.size() == 2) {
     auto &operand = fn->arguments->children[1];
@@ -566,9 +576,8 @@ void dynamicRewriteWalk(
                 : outcome.physical_db + "." + outcome.new_table;
           }
         }
-        // InvalidRequest: a qualified unmapped name is a lenient skip (the
-        // caller's permission check owns it); an unqualified one is noted for
-        // the callers' refusal.
+        // InvalidRequest: noted for the callers' refusal, unqualified or
+        // qualified (a `system` table excepted, see noteUnresolved).
         else {
           noteUnresolved(origin_db, origin_table);
         }
@@ -601,15 +610,18 @@ void dynamicRewriteWalk(
 }
 
 // Spec 2026-09-26 §5 "Unqualified names that do not resolve" (rewriter-go
-// #49): the first read-position table name with no database qualifier — the
-// one-part dotted quoted `db1.t` included — that the dynamic walk cannot
-// resolve through upstream_logical_database_in_context (empty, unmapped, or
-// mapped to a missing remote upstream). ClickHouse would resolve it in the
-// session's current database, the physical one. Decided by a check-only run
+// #49): the refusal message of the first read-position table name with no
+// database qualifier — the one-part dotted quoted `db1.t` included — that the
+// dynamic walk cannot resolve through upstream_logical_database_in_context
+// (empty, unmapped, or mapped to a missing remote upstream); ClickHouse would
+// resolve it in the session's current database, the physical one. Or, if
+// that comes first, of a qualified name whose database is not `system` and is
+// unmapped (housegate/housegate#336); ClickHouse would read it as a physical
+// database. Decided by a check-only run
 // of the rewrite walk itself (it mutates nothing), so the two cannot disagree
 // about which names are tables; the aliases of caller-supplied CTE options are bound (they
 // are inlined later) and their bodies are walked too.
-std::optional<std::string> firstUnresolvedUnqualifiedTable(
+std::optional<std::string> firstUnresolvedReadMessage(
   const DB::ASTPtr &ast,
   const rewriter::RewriteTableDynamicArgs &args,
   const std::vector<ParsedCTEASTMap> &option_ctes) {
@@ -641,13 +653,11 @@ void dynamicRewriteWalk(
 // `static_args`: walk every ASTTableExpression and apply the same
 // dynamic construction the non-SELECT handlers use, via applyDynamicRewrite.
 //
-// Lenient on InvalidRequest — unlike INSERT/CREATE/etc. which target a
-// single table, SELECT may legitimately reference system tables, CTE
-// aliases, or DBs the caller didn't declare in `database_map` /
-// `known_physical_databases`. A qualified unresolvable name is skipped (the
-// caller enforces DB-access policy); an unqualified one never reaches this
-// walk, because the SELECT paths refuse it first
-// (rejectUnresolvedUnqualifiedTable).
+// Skips on InvalidRequest: SELECT may legitimately reference system tables
+// and CTE aliases. Every other unresolvable name never reaches this walk:
+// the SELECT paths refuse an unqualified one and a qualified one of an
+// unmapped database first (rejectUnresolvedUnqualifiedTable,
+// housegate/housegate#336).
 void doDynamicSelectTableRewrite(
   DB::ASTPtr ast,
   const rewriter::RewriteTableDynamicArgs &args,
@@ -935,8 +945,9 @@ void forceGlobalForRemoteAsymmetry(DB::ASTPtr ast) {
 }
 
 // Refuses a dynamic-mode SELECT body naming an unresolved unqualified table
-// (firstUnresolvedUnqualifiedTable) with `code`. The refusal is the
-// statement's final answer, so it carries an empty table_rewrites map.
+// or an unmapped database (firstUnresolvedReadMessage) with `code`. The
+// refusal is the statement's final answer, so it carries an empty
+// table_rewrites map.
 bool rejectUnresolvedUnqualifiedTable(
   const DB::ASTPtr &ast,
   const TableRewriteSelection &selection,
@@ -944,11 +955,11 @@ bool rejectUnresolvedUnqualifiedTable(
   rewriter::RewriteSQLResponse *response,
   rewriter::RewriteCode code) {
   if (!ast || selection.mode != TableRewriteMode::Dynamic) return false;
-  const auto name = firstUnresolvedUnqualifiedTable(ast, *selection.dynamic_args, option_ctes);
-  if (!name) return false;
+  const auto message = firstUnresolvedReadMessage(ast, *selection.dynamic_args, option_ctes);
+  if (!message) return false;
   response->clear_table_rewrites();
   response->set_code(code);
-  response->set_message(unresolvedUnqualifiedTableMessage(*name));
+  response->set_message(*message);
   return true;
 }
 
