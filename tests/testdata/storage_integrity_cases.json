@@ -48132,6 +48132,622 @@
         ]
       }
     },
+    "name": "si_tr_insert_values_trailing_line_comment_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1) -- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_trailing_block_comment_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1) /* c */",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_trailing_hash_comment_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1) # c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_next_line_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1)\n-- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_in_row_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1 /* c */)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_between_rows_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1), /* c */ (2)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_before_semicolon_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1) /* c */ ;",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_after_semicolon_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o VALUES (1); -- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_columns_settings_comment_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o (a) SETTINGS max_threads = 1 VALUES (1) -- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_si_table_comment_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t VALUES (1) -- c",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_before_rows_rewritten",
+    "sql": "INSERT INTO db1.o VALUES /* c */ (1)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "INSERT INTO phys.\"db1.o\" VALUES (1)",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_line_before_rows_v2_rewritten",
+    "sql": "INSERT INTO db1.o VALUES -- c\n(1)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql": "INSERT INTO phys.\"db1.o\" VALUES (1)",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_comment_markers_in_strings_rewritten",
+    "sql": "INSERT INTO db1.o VALUES ('-- a', '/* b */')",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "INSERT INTO phys.\"db1.o\" VALUES ('-- a', '/* b */')",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_values_semicolon_rewritten",
+    "sql": "INSERT INTO db1.o VALUES (1);",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "INSERT INTO phys.`db1.o` VALUES (1);",
+    "want_sql_go": "INSERT INTO phys.\"db1.o\" VALUES (1)",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_insert_format_values_inline_table_named_values_rewritten",
+    "sql": "INSERT INTO db1.values FORMAT Values (1)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "values",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "INSERT INTO phys.\"db1.values\" VALUES (1)",
+    "want_stmt": "INSERT",
+    "want_table_rewrites": {
+      "db1.values": "phys.db1.values"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
     "name": "si_tr_show_tables_like",
     "sql": "SHOW TABLES LIKE 'a%'",
     "want_code": "Success",
