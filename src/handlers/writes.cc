@@ -31,6 +31,7 @@
 #include "handlers/name_rewrite.h"
 #include "handlers/select.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/sql_tokens.h"
 #include "handlers/table_reference.h"
 
 namespace rewriter_handlers {
@@ -1145,8 +1146,11 @@ WriteDispatchResult handleWriteQuery(DB::ASTPtr ast,
     // wire-format data" mode and hang the client).
     std::string sql = formatWrite(ast, *response, sel);
     if (insert_query->data && insert_query->end > insert_query->data) {
-      if (insert_query->format == "Values") {
-        const std::string suffix = " FORMAT Values";
+      // ClickHouse resolves a FORMAT name case-insensitively, so inline
+      // `FORMAT values (…)` rows run as Values too; every spelling is
+      // generated as `VALUES (…)`, as rewriter-go generates it.
+      if (lowerName(insert_query->format) == "values") {
+        const std::string suffix = " FORMAT " + insert_query->format;
         if (sql.size() >= suffix.size()
             && sql.compare(sql.size() - suffix.size(), suffix.size(), suffix) == 0) {
           sql.replace(sql.size() - suffix.size(), suffix.size(), " VALUES");
