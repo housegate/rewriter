@@ -206,7 +206,8 @@ RewriteSQLResponse rewriteCorpus(const std::string &sql, bool si) {
 // (spec 2026-09-26 §5) decides, so the class (c) tables the Sentio driver
 // reads (`tables`, `columns`, `parts`, …) stay a documented passthrough until
 // its step 2 (housegate/housegate#218), and every information_schema table is
-// refused. Every refusal is pinned with its
+// refused. `SYSTEM` is not `system` (ClickHouse names are case-sensitive): it
+// is an unmapped database, refused as such (housegate/housegate#336). Every refusal is pinned with its
 // message; with the SI surface active each is still refused.
 TEST(MetadataAccess, UpstreamCorpusOutcomes) {
   struct Case {
@@ -228,8 +229,8 @@ TEST(MetadataAccess, UpstreamCorpusOutcomes) {
     {"SELECT * FROM (SELECT * FROM system.users)", rewriter::RewriteCode::UnsupportedStatement, "system table system.users is not accessible"},
     {"SELECT * FROM (SELECT currentDatabase())", rewriter::RewriteCode::UnsupportedStatement, "function currentDatabase is not accessible"},
     {"SELECT * FROM (SELECT currentUser())", rewriter::RewriteCode::UnsupportedStatement, "function currentUser is not accessible"},
-    {"SELECT * FROM SYSTEM.SETTINGS", rewriter::RewriteCode::Success, ""},
-    {"SELECT * FROM SYSTEM.USERS", rewriter::RewriteCode::Success, ""},
+    {"SELECT * FROM SYSTEM.SETTINGS", rewriter::RewriteCode::InvalidRewriteRequest, "database \"SYSTEM\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)"},
+    {"SELECT * FROM SYSTEM.USERS", rewriter::RewriteCode::InvalidRewriteRequest, "database \"SYSTEM\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)"},
     {"SELECT * FROM Transfer UNION ALL SELECT * FROM system.query_log", rewriter::RewriteCode::UnsupportedStatement, "system table system.query_log is not accessible"},
     {"SELECT * FROM `system`.`columns`", rewriter::RewriteCode::Success, ""},
     {"SELECT * FROM `system`.`settings`", rewriter::RewriteCode::Success, ""},
@@ -290,7 +291,7 @@ TEST(MetadataAccess, UpstreamCorpusOutcomes) {
     {"SELECT timezone()", rewriter::RewriteCode::Success, ""},
     {"SELECT metadata.name FROM Transfer JOIN system.columns AS metadata ON 1", rewriter::RewriteCode::Success, ""},
     {"SELECT metadata.name FROM Transfer JOIN system.tables AS metadata ON 1", rewriter::RewriteCode::Success, ""},
-    {"SELECT name FROM SYSTEM.TABLES", rewriter::RewriteCode::Success, ""},
+    {"SELECT name FROM SYSTEM.TABLES", rewriter::RewriteCode::InvalidRewriteRequest, "database \"SYSTEM\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)"},
     {"SELECT name FROM system.tables LIMIT 10", rewriter::RewriteCode::Success, ""},
     {"SELECT user FROM project_users", rewriter::RewriteCode::Success, ""},
     {"SHOW COLUMNS FROM tables FROM system", rewriter::RewriteCode::Success, ""},

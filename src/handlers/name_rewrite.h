@@ -33,8 +33,9 @@
 //        extras=[]           events (USE tenant1) -> phys.`tenant1.events`
 //        extras=["shard0"]   tenant1.events       -> phys.`tenant1_shard0.events`
 //
-//      SELECT applies this lenient (skip on InvalidRequest); non-SELECT
-//      applies it strict (reject).
+//      SELECT skips on InvalidRequest only for `system` tables and CTE
+//      aliases (every other unresolvable read is refused first,
+//      housegate/housegate#336); non-SELECT applies it strict (reject).
 //   3. Else -> None (passthrough).
 //
 // Database-level handlers (USE, SHOW TABLES, SHOW DATABASES, CREATE

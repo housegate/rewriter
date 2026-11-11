@@ -1591,6 +1591,11 @@ std::string unresolvedUnqualifiedTableMessage(const std::string &table) {
   return "unqualified table \"" + table + "\" does not resolve through the session's logical database";
 }
 
+std::string unmappedDatabaseMessage(const std::string &database) {
+  return "database \"" + database
+    + "\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)";
+}
+
 namespace {
 
 bool isSelectFamily(const DB::IAST &node) {

@@ -101,17 +101,17 @@ def generate(config, work, rg, rc):
 def counts(work):
     w = Path(work)
     suite = ET.parse(w/"cpp-run/gtest.xml").getroot()
-    assert int(suite.attrib["tests"]) == 2388
+    assert int(suite.attrib["tests"]) == 2441
     assert all(int(suite.attrib.get(k, "0")) == 0 for k in ("failures", "disabled", "errors"))
     cases = suite.findall(".//testcase")
-    assert len(cases) == 2388 and not suite.findall(".//skipped")
+    assert len(cases) == 2441 and not suite.findall(".//skipped")
     assert sum(c.attrib["classname"] == "SnapshotQuery" for c in cases) == 636
     text = (w/"cpp-run/ctest.log").read_text()
     assert "100% tests passed, 0 tests failed out of 3" in text
     assert not re.search(r"(?:Skipped|Not Run|DISABLED)", text)
     startup = (w/"cpp-run/ctest/Testing/Temporary/LastTest.log").read_text()
     assert "SKIP:" not in startup
-    print(json.dumps({"cpp_tests":2388,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
+    print(json.dumps({"cpp_tests":2441,"snapshot_cases":636,"ctest":3,"failures":0,"skips":0},indent=2))
 
 
 # The snapshot-query wire surface of rewriter-proto: the two RPCs the lane

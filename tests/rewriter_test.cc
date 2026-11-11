@@ -958,18 +958,16 @@ TEST(AccessedTable, Dynamic_KnownPhysicalPassthrough) {
   EXPECT_FALSE(e->is_remote());
 }
 
-TEST(AccessedTable, Dynamic_Unresolvable_PhysicalEmpty_LogicalKept) {
-  // SELECT is lenient — unresolvable identifiers stay in the response with
-  // logical_database reflecting what we'd have used (here: SQL qualifier).
+TEST(AccessedTable, Dynamic_Unresolvable_Refused) {
+  // A qualified read of an unmapped database is refused, not forwarded
+  // (housegate/housegate#336): ClickHouse would read `ghost` as a physical
+  // database under the shared ClickHouse user.
   auto resp = RunSelectWithDynamicArgs(
     "SELECT * FROM ghost.t",
     /*database_map*/ {{"tenant1", "physical_1"}});
-  ASSERT_EQ(resp.code(), rewriter::RewriteCode::Success);
-  const auto *e = FindAccessed(resp, "ghost", "t");
-  ASSERT_NE(e, nullptr);
-  EXPECT_EQ(e->logical_database(), "ghost");
-  EXPECT_EQ(e->physical_database(), "");
-  EXPECT_FALSE(e->is_remote());
+  ASSERT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+  EXPECT_EQ(resp.message(), "database \"ghost\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)");
+  EXPECT_TRUE(resp.table_rewrites().empty());
 }
 
 TEST(AccessedTable, Dynamic_RemoteMappedLogical_FlagsRemote) {
@@ -6869,7 +6867,6 @@ TEST(TableRefSources, QuotedTwinDoesNotHideADistinctReference) {
            {"SELECT a IN `db1.t` FROM db1.t", {{"", "db1.t"}, {"db1", "t"}}, true},
            {"SELECT * FROM db1.o WHERE a IN `db1.t` AND b IN db1.t",
             {{"db1", "o"}, {"", "db1.t"}, {"db1", "t"}}, true},
-           {"SELECT a IN `default.x` FROM default.x", {{"", "default.x"}, {"default", "x"}}, false},
            {"SELECT a IN db1.t FROM db1.t", {{"db1", "t"}}, true},
          }) {
       SCOPED_TRACE(std::string(c.sql) + (si ? " [V2]" : " [inactive]"));
@@ -6884,6 +6881,14 @@ TEST(TableRefSources, QuotedTwinDoesNotHideADistinctReference) {
       EXPECT_EQ(got, c.accessed);
       EXPECT_EQ(si_flag, si && c.si_flag_on_db1_t);
     }
+  }
+  // A qualified name of an unmapped database is refused whatever its twin
+  // resolves to (housegate/housegate#336).
+  for (const bool si : {false, true}) {
+    SCOPED_TRACE(si ? "unmapped twin [V2]" : "unmapped twin [inactive]");
+    const auto resp = RunTableRef("SELECT a IN `default.x` FROM default.x", si);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest) << resp.message();
+    EXPECT_EQ(resp.message(), "database \"default\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)");
   }
   // A refused twin reports both spellings too, the SI one flagged.
   {
@@ -9968,16 +9973,15 @@ TEST(TableRefUnresolved, UnqualifiedNameIsRefused) {
 }
 
 // rewriter-go TestTableRef_UnresolvedUnqualifiedRuleLeavesOthersAlone: CTE
-// names, table aliases, qualified unmapped names and FROM-less statements are
-// untouched; a mapped context still rewrites the name; none and static modes
-// forward it.
+// names, table aliases and FROM-less statements are untouched; a mapped
+// context still rewrites the name; none and static modes forward it. A
+// qualified unmapped name is refused (TableRefUnmapped.Refused).
 TEST(TableRefUnresolved, RuleLeavesOthersAlone) {
   for (const bool si : {false, true}) {
     for (const std::string ctx : {"", "db9"}) {
       for (const auto &[sql, want] : std::vector<std::pair<std::string, std::string>>{
              {"WITH c AS (SELECT 1 AS a) SELECT * FROM c", "WITH c AS (SELECT 1 AS a) SELECT * FROM c"},
              {"SELECT b.a FROM db1.o AS b", "SELECT b.a FROM phys.`db1.o` AS b"},
-             {"SELECT * FROM db2.x", "SELECT * FROM db2.x"},
              {"SELECT 1", "SELECT 1"},
            }) {
         SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]") + " ctx=" + ctx);
@@ -9985,9 +9989,8 @@ TEST(TableRefUnresolved, RuleLeavesOthersAlone) {
         EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
         EXPECT_EQ(resp.sql_after_rewrite(), want);
       }
-      // A CTE-named IN operand and a qualified unmapped one stay admitted.
-      for (const char *sql : {"WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c",
-                              "SELECT * FROM db1.o WHERE a IN db2.x"}) {
+      // A CTE-named IN operand stays admitted.
+      for (const char *sql : {"WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c"}) {
         SCOPED_TRACE(std::string(sql) + (si ? " [V2]" : " [inactive]") + " ctx=" + ctx);
         const auto resp = RunTableRefContext(sql, si, ctx, "phys");
         EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
@@ -10776,8 +10779,6 @@ TEST(TableRefSystemTables, DeferredClassCAndInformationSchemaRefused) {
 TEST(TableRefSystemTables, AllowedTablesKeepTodaysBehaviour) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
-           // Not information_schema: ClickHouse names are case-sensitive.
-           "SELECT * FROM Information_Schema.tables",
            "SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
            "SELECT * FROM system.mutations WHERE database = 'phys' AND is_done = 0",
            "SELECT * FROM system.parts WHERE database = 'phys' AND active", "SELECT 1", "SELECT * FROM numbers(3)",
@@ -10786,7 +10787,11 @@ TEST(TableRefSystemTables, AllowedTablesKeepTodaysBehaviour) {
            "INSERT INTO db1.o SELECT name FROM system.tables", "DESCRIBE “system”.“tables”",
            "DESCRIBE TABLE system.one", "SHOW COLUMNS FROM system.tables", "SHOW COLUMNS FROM tables FROM system"})
       ExpectAllowed(sql, si);
-    // A string literal and a SYSTEM database are not the system database.
+    // Not information_schema: ClickHouse names are case-sensitive, so this is
+    // an unmapped database, refused as such (housegate/housegate#336).
+    ExpectRefusal("SELECT * FROM Information_Schema.tables", si, rewriter::RewriteCode::InvalidRewriteRequest,
+                  "database \"Information_Schema\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)");
+    // A string literal is not the system database.
     ExpectAllowed("SELECT 'system.processes'", si);
     ExpectAllowed("SELECT * FROM db1.o WHERE a = 'system.processes'", si);
   }
@@ -12453,4 +12458,73 @@ TEST(TableRefFidelity, NotCallPrecedenceDivergenceIsRefused) {
       EXPECT_EQ(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success) << RunTableRef(sql, si).message();
     }
   }
+}
+
+// rewriter-go TestTableRef_UnmappedDatabaseRefused (housegate/housegate#336):
+// in dynamic mode a qualified read-position table whose database is not
+// exactly `system` and resolves through neither database_map nor
+// known_physical_databases is refused in every read position and both SI
+// states, with an empty table_rewrites map and the input echoed. An embedded
+// INSERT … SELECT / CTAS body answers UnsupportedStatement, a view / MV body
+// InvalidRewriteRequest.
+TEST(TableRefUnmapped, Refused) {
+  const auto message = [](const std::string &db) {
+    return "database \"" + db +
+           "\" does not resolve through the caller's databases (it is not mapped for this account, or the account has no access)";
+  };
+  const auto invalid = rewriter::RewriteCode::InvalidRewriteRequest;
+  const auto unsupported = rewriter::RewriteCode::UnsupportedStatement;
+  struct Case { const char *sql; const char *db; rewriter::RewriteCode code; };
+  for (const bool si : {false, true}) {
+    for (const std::string ctx : {"", "db1"}) {
+      for (const auto &c : std::vector<Case>{
+             {"SELECT * FROM default.t", "default", invalid},
+             {"SELECT * FROM `default`.`t`", "default", invalid},
+             {"SELECT * FROM \"default\".\"t\"", "default", invalid},
+             {"SELECT * FROM default.t FINAL", "default", invalid},
+             {"SELECT * FROM default.t SAMPLE 0.1", "default", invalid},
+             {"SELECT * FROM db1.o JOIN default.t USING (a)", "default", invalid},
+             {"SELECT * FROM db1.o ANY LEFT JOIN default.t USING a", "default", invalid},
+             {"SELECT * FROM db1.o PASTE JOIN default.t", "default", invalid},
+             {"SELECT * FROM db1.o, default.t", "default", invalid},
+             {"SELECT * FROM db1.o WHERE a IN (SELECT a FROM default.t)", "default", invalid},
+             {"SELECT * FROM db1.o WHERE a GLOBAL IN (SELECT a FROM default.t)", "default", invalid},
+             {"SELECT * FROM db1.o WHERE a IN default.t", "default", invalid},
+             {"SELECT * FROM db1.o WHERE a IN (default.t)", "default", invalid},
+             {"SELECT * FROM db1.o WHERE EXISTS (SELECT 1 FROM default.t)", "default", invalid},
+             {"SELECT (SELECT max(a) FROM default.t)", "default", invalid},
+             {"WITH x AS (SELECT * FROM default.t) SELECT * FROM x", "default", invalid},
+             {"SELECT * FROM db1.o UNION ALL SELECT * FROM default.t", "default", invalid},
+             {"SELECT * FROM view(SELECT * FROM default.t)", "default", invalid},
+             {"SELECT * FROM SYSTEM.processes", "SYSTEM", invalid},
+             {"SELECT * FROM System.tables", "System", invalid},
+             {"SELECT * FROM other_db.t", "other_db", invalid},
+             {"SELECT * FROM _temporary_and_external_tables.t", "_temporary_and_external_tables", invalid},
+             {"INSERT INTO db1.o SELECT * FROM default.t", "default", unsupported},
+             {"CREATE TABLE db1.n ENGINE = Memory AS SELECT * FROM default.t", "default", unsupported},
+             {"CREATE VIEW db1.v AS SELECT * FROM default.t", "default", invalid},
+             {"CREATE MATERIALIZED VIEW db1.mv TO db1.o AS SELECT * FROM default.t", "default", invalid},
+           }) {
+        SCOPED_TRACE(std::string(c.sql) + (si ? " [V2]" : " [inactive]") + " ctx=" + ctx);
+        const auto resp = RunTableRefContext(c.sql, si, ctx);
+        EXPECT_EQ(resp.code(), c.code) << resp.message();
+        EXPECT_EQ(resp.message(), message(c.db));
+        EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+        EXPECT_TRUE(resp.table_rewrites().empty());
+      }
+      // `system` itself is the system-table allowlist's to decide.
+      for (const char *sql : {"SELECT * FROM system.tables", "SELECT * FROM db1.o WHERE a IN (SELECT a FROM system.one)"}) {
+        SCOPED_TRACE(std::string(sql) + (si ? " [V2]" : " [inactive]") + " ctx=" + ctx);
+        EXPECT_EQ(RunTableRefContext(sql, si, ctx).code(), rewriter::RewriteCode::Success);
+      }
+    }
+  }
+  // None and static modes forward a qualified unmapped name unchanged.
+  rewriter::RewriteSQLRequest none;
+  none.set_sql("SELECT * FROM default.t");
+  EXPECT_EQ(RunDirectRewrite(none).code(), rewriter::RewriteCode::Success);
+  rewriter::RewriteSQLRequest stat;
+  stat.set_sql("SELECT * FROM default.t");
+  AddEmptyStaticOption(stat);
+  EXPECT_EQ(RunDirectRewrite(stat).code(), rewriter::RewriteCode::Success);
 }
