@@ -163,7 +163,7 @@ docker run --rm --name "$cpp" --label housegate.task="$prefix" --network none --
  ctest --test-dir /result/ctest --output-on-failure > /result/ctest.log 2>&1
  binary=$RC_ROOT/build/tests/rewriter_tests
  GTEST_OUTPUT=xml:/result/si.xml "$binary" --gtest_filter="SpecG/StorageIntegrityGolden.*:StorageIntegrityCorpus.*:SINormalize.*" > /result/si.log 2>&1
- for spec in "SpecG/StorageIntegrityGolden.* 1263" "StorageIntegrityCorpus.* 2" "SINormalize.* 11"; do
+ for spec in "SpecG/StorageIntegrityGolden.* 1272" "StorageIntegrityCorpus.* 2" "SINormalize.* 11"; do
   read -r family expected <<< "$spec"
   count=$(GTEST_OUTPUT= "$binary" --gtest_filter="$family" --gtest_list_tests | awk "/^  / { count++ } END { print count + 0 }")
   echo "$family cases: $count"
