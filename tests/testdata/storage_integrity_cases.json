@@ -43204,7 +43204,8 @@
         ]
       }
     },
-    "name": "si_tr_sys_information_schema_allowed_passthrough",
+    "name": "si_tr_sys_information_schema_rejected",
+    "reject": true,
     "sql": "SELECT * FROM information_schema.tables",
     "want_accessed": [
       {
@@ -43213,10 +43214,10 @@
         "logical_database": "information_schema"
       }
     ],
-    "want_code": "Success",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT * FROM information_schema.tables",
-    "want_stmt": "SELECT"
+    "want_stmt": ""
   },
   {
     "contract_version": "V1",
@@ -43461,7 +43462,8 @@
         ]
       }
     },
-    "name": "si_tr_sys_information_schema_allowed_v2_passthrough",
+    "name": "si_tr_sys_information_schema_v2_rejected",
+    "reject": true,
     "sql": "SELECT * FROM information_schema.tables",
     "want_accessed": [
       {
@@ -43470,9 +43472,9 @@
         "logical_database": "information_schema"
       }
     ],
-    "want_code": "Success",
-    "want_sql": "SELECT * FROM information_schema.tables",
-    "want_stmt": "SELECT"
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
   },
   {
     "contract_version": "V2",
@@ -44160,6 +44162,1340 @@
     "sql": "SELECT * FROM db1.t JOIN system.processes USING (a) SETTINGS additional_result_filter = '1'",
     "want_code": "UnsupportedStatement",
     "want_message_contains": "table setting additional_result_filter is not accepted",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.completions",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "completions",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.completions",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "completions",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_client_suggestions_rejected",
+    "reject": true,
+    "sql": "SELECT DISTINCT arrayJoin(extractAll(word, '[\\\\w_]{2,}')) AS res FROM (SELECT word FROM system.completions WHERE context IN ('function', 'table engine', 'format', 'table function', 'data type', 'merge tree setting', 'setting', 'aggregate function combinator pair', 'keyword', 'cluster', 'macro', 'policy') UNION ALL SELECT word FROM ( SELECT word, context, ROW_NUMBER() OVER (PARTITION BY context ORDER BY word) AS rn FROM  (SELECT DISTINCT word, context FROM system.completions WHERE context IN ('database', 'table', 'column', 'dictionary'))) WHERE rn <= 10000) WHERE notEmpty(res)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_client_suggestions_v2_rejected",
+    "reject": true,
+    "sql": "SELECT DISTINCT arrayJoin(extractAll(word, '[\\\\w_]{2,}')) AS res FROM (SELECT word FROM system.completions WHERE context IN ('function', 'table engine', 'format', 'table function', 'data type', 'merge tree setting', 'setting', 'aggregate function combinator pair', 'keyword', 'cluster', 'macro', 'policy') UNION ALL SELECT word FROM ( SELECT word, context, ROW_NUMBER() OVER (PARTITION BY context ORDER BY word) AS rn FROM  (SELECT DISTINCT word, context FROM system.completions WHERE context IN ('database', 'table', 'column', 'dictionary'))) WHERE rn <= 10000) WHERE notEmpty(res)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_show_columns_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM completions FROM system",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_completions_show_columns_v2_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM completions FROM system",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.completions is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_columns_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.parts_columns",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "parts_columns",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.parts_columns is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_columns_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.parts_columns",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "parts_columns",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.parts_columns is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_projection_parts_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.projection_parts",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.projection_parts is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_projection_parts_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.projection_parts",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.projection_parts is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_projection_parts_columns_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.projection_parts_columns",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.projection_parts_columns is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_projection_parts_columns_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.projection_parts_columns",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "system table system.projection_parts_columns is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_upper_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM INFORMATION_SCHEMA.TABLES",
+    "want_accessed": [
+      {
+        "original_database": "INFORMATION_SCHEMA",
+        "original_table": "TABLES",
+        "logical_database": "INFORMATION_SCHEMA"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database INFORMATION_SCHEMA is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_upper_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM INFORMATION_SCHEMA.TABLES",
+    "want_accessed": [
+      {
+        "original_database": "INFORMATION_SCHEMA",
+        "original_table": "TABLES",
+        "logical_database": "INFORMATION_SCHEMA"
+      }
+    ],
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database INFORMATION_SCHEMA is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_quoted_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM `information_schema`.`columns` WHERE table_schema = 'phys'",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_quoted_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM `information_schema`.`columns` WHERE table_schema = 'phys'",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_join_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM db1.o JOIN information_schema.tables USING (a)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_join_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM db1.o JOIN information_schema.tables USING (a)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_in_subquery_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM db1.o WHERE a IN (SELECT table_name FROM INFORMATION_SCHEMA.TABLES)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database INFORMATION_SCHEMA is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_in_subquery_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM db1.o WHERE a IN (SELECT table_name FROM INFORMATION_SCHEMA.TABLES)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database INFORMATION_SCHEMA is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_cte_body_rejected",
+    "reject": true,
+    "sql": "WITH x AS (SELECT * FROM information_schema.columns) SELECT * FROM x",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_cte_body_v2_rejected",
+    "reject": true,
+    "sql": "WITH x AS (SELECT * FROM information_schema.columns) SELECT * FROM x",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_view_function_body_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM view(SELECT * FROM information_schema.schemata)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_view_function_body_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM view(SELECT * FROM information_schema.schemata)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_insert_select_source_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o SELECT table_name FROM information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_insert_select_source_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.o SELECT table_name FROM information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_describe_rejected",
+    "reject": true,
+    "sql": "DESCRIBE TABLE information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_describe_v2_rejected",
+    "reject": true,
+    "sql": "DESCRIBE TABLE information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_show_columns_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_show_columns_v2_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM information_schema.tables",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_show_columns_from_db_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM tables FROM information_schema",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_show_columns_from_db_v2_rejected",
+    "reject": true,
+    "sql": "SHOW COLUMNS FROM tables FROM information_schema",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_unknown_view_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM information_schema.future_view_nobody_knows",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
+    "want_no_contract_ack": true,
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_information_schema_unknown_view_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM information_schema.future_view_nobody_knows",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218",
     "want_stmt": ""
   },
   {

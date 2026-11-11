@@ -204,8 +204,9 @@ RewriteSQLResponse rewriteCorpus(const std::string &sql, bool si) {
 // housegate's dynamic arguments with the SI surface inactive. Upstream refuses
 // all of `system` and information_schema; here the system-table allowlist
 // (spec 2026-09-26 §5) decides, so the class (c) tables the Sentio driver
-// reads (`tables`, `columns`, `parts`, …) and information_schema stay a
-// documented passthrough until its step 2. Every refusal is pinned with its
+// reads (`tables`, `columns`, `parts`, …) stay a documented passthrough until
+// its step 2 (housegate/housegate#218), and every information_schema table is
+// refused. Every refusal is pinned with its
 // message; with the SI surface active each is still refused.
 TEST(MetadataAccess, UpstreamCorpusOutcomes) {
   struct Case {
@@ -236,16 +237,16 @@ TEST(MetadataAccess, UpstreamCorpusOutcomes) {
     {"SELECT * FROM cluster('default', 'system', 'tables')", rewriter::RewriteCode::UnsupportedStatement, "table function cluster is not accepted"},
     {"SELECT * FROM cluster('default', system.query_log)", rewriter::RewriteCode::UnsupportedStatement, "system table system.query_log is not accessible"},
     {"SELECT * FROM clusterAllReplicas('default', 'system', 'users')", rewriter::RewriteCode::UnsupportedStatement, "system table system.users is not accessible"},
-    {"SELECT * FROM information_schema.columns", rewriter::RewriteCode::Success, ""},
-    {"SELECT * FROM information_schema.schemata", rewriter::RewriteCode::Success, ""},
-    {"SELECT * FROM information_schema.tables", rewriter::RewriteCode::Success, ""},
-    {"SELECT * FROM INFORMATION_SCHEMA.TABLES", rewriter::RewriteCode::Success, ""},
-    {"SELECT * FROM loop(`information_schema`.`tables`)", rewriter::RewriteCode::UnsupportedStatement, "table function loop is not accepted"},
+    {"SELECT * FROM information_schema.columns", rewriter::RewriteCode::UnsupportedStatement, "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
+    {"SELECT * FROM information_schema.schemata", rewriter::RewriteCode::UnsupportedStatement, "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
+    {"SELECT * FROM information_schema.tables", rewriter::RewriteCode::UnsupportedStatement, "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
+    {"SELECT * FROM INFORMATION_SCHEMA.TABLES", rewriter::RewriteCode::UnsupportedStatement, "database INFORMATION_SCHEMA is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
+    {"SELECT * FROM loop(`information_schema`.`tables`)", rewriter::RewriteCode::UnsupportedStatement, "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
     {"SELECT * FROM loop(concat('system', '.query_log'))", rewriter::RewriteCode::UnsupportedStatement, "table function loop is not accepted"},
     {"SELECT * FROM loop(system.query_log)", rewriter::RewriteCode::UnsupportedStatement, "system table system.query_log is not accessible"},
     {"SELECT * FROM merge('system', '^tables$')", rewriter::RewriteCode::UnsupportedStatement, "system table system.^tables$ is not accessible"},
     {"SELECT * FROM merge(REGEXP('system'), '^query_log$')", rewriter::RewriteCode::UnsupportedStatement, "table function merge is not accepted"},
-    {"SELECT * FROM merge(information_schema, '^tables$')", rewriter::RewriteCode::UnsupportedStatement, "table function merge is not accepted"},
+    {"SELECT * FROM merge(information_schema, '^tables$')", rewriter::RewriteCode::UnsupportedStatement, "database information_schema is not accessible; tenant-filtered metadata reads are tracked in housegate/housegate#218"},
     {"SELECT * FROM mergeTreeIndex('system', 'columns')", rewriter::RewriteCode::UnsupportedStatement, "table function mergeTreeIndex is not accepted"},
     {"SELECT * FROM mergeTreeAnalyzeIndexes(system, query_log, 1)", rewriter::RewriteCode::UnsupportedStatement, "system table system.query_log is not accessible"},
     {"SELECT * FROM mergeTreeTextIndex(system, query_log, index_name)", rewriter::RewriteCode::UnsupportedStatement, "system table system.query_log is not accessible"},

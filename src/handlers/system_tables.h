@@ -30,8 +30,23 @@ constexpr std::string_view kSystemDatabase = "system";
 
 // rewriter-go nameresolve.SystemTableAllowed: an exact allowlist entry.
 bool systemTableAllowed(const std::string &table);
-// rewriter-go nameresolve.SystemTableRefusedMessage.
+// rewriter-go nameresolve.SystemTableRefusedMessage. The class (c) tables
+// awaiting a filtered read name housegate/housegate#218.
 std::string systemTableRefusedMessage(const std::string &table);
+
+// rewriter-go nameresolve.MetadataDatabaseRefused: information_schema in
+// either spelling ClickHouse accepts. Every table of it is refused.
+bool metadataDatabaseRefused(const std::string &database);
+// rewriter-go nameresolve.MetadataDatabaseRefusedMessage.
+std::string metadataDatabaseRefusedMessage(const std::string &database);
+
+// rewriter-go handlers.systemRefusal: the first refused metadata reference
+// of a statement, a system table outside the allowlist (`database` is
+// `system`) or any table of information_schema (`database` as spelled).
+struct SystemTableRefusal {
+  std::string database;
+  std::string table;
+};
 
 // One caller-input reference to a table-like object (rewriter-go
 // engine.ObjectRef). `database` is empty for an unqualified name, which
@@ -84,7 +99,7 @@ std::optional<std::vector<ObjectRef>> collectObjectRefs(const DB::ASTPtr &ast, c
 // `failed` reports a text that could not be tokenized.
 struct SystemTableScan {
   bool refused = false;
-  std::string table;
+  SystemTableRefusal refusal;
   bool storage_integrity_object = false;
   bool failed = false;
 };
@@ -96,14 +111,14 @@ SystemTableScan scanSystemTables(const DB::ASTPtr &ast, const std::string &sql,
 // system-table message, the system table recorded as accessed (once), no
 // rewrite maps, the statement echoed. The caller's other accessed tables
 // are kept.
-void rejectSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table,
+void rejectSystemTable(rewriter::RewriteSQLResponse *response, const SystemTableRefusal &refusal,
                        const std::string &sql, const TableRewriteSelection &selection);
 
-// rewriter-go RejectSystemTablesOnSuccess: `table` is the refusal the
+// rewriter-go RejectSystemTablesOnSuccess: `refusal` is the one the
 // preflight deferred to the SI pipeline (the statement names an SI object
 // while the surface is active); applied only when that pipeline answered
 // Success.
-void rejectDeferredSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table,
+void rejectDeferredSystemTable(rewriter::RewriteSQLResponse *response, const SystemTableRefusal &refusal,
                                const std::string &sql, const TableRewriteSelection &selection);
 
 // A SHOW form's refusal (rewriter-go rejectShowSystemTable): nothing is
