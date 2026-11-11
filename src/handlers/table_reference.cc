@@ -2560,7 +2560,7 @@ bool lambdaHoldsRefusableRead(const DB::IAST &node) {
 bool preflightTableReferences(const DB::ASTPtr &ast,
   const rewriter::RewriteSQLRequest *request,
   rewriter::RewriteSQLResponse *response,
-  std::optional<std::string> *deferred_system_table) {
+  std::optional<SystemTableRefusal> *deferred_system_table) {
   const auto sel = findActiveTableRewrite(request->options());
   if (sel.mode != TableRewriteMode::Dynamic || !ast) return false;
   const auto &args = *sel.dynamic_args;
@@ -2681,10 +2681,10 @@ bool preflightTableReferences(const DB::ASTPtr &ast,
     return true;
   } else if (scan.refused) {
     if (!active || !scan.storage_integrity_object) {
-      rejectSystemTable(response, scan.table, request->sql(), sel);
+      rejectSystemTable(response, scan.refusal, request->sql(), sel);
       return true;
     }
-    if (deferred_system_table) *deferred_system_table = scan.table;
+    if (deferred_system_table) *deferred_system_table = scan.refusal;
   }
 
   // T5 on a DESCRIBE target that is a table function, in both SI states: the

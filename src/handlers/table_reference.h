@@ -19,6 +19,9 @@
 
 namespace rewriter_handlers {
 
+// system_tables.h
+struct SystemTableRefusal;
+
 // The cross-engine message families (rewriter-go AGENTS.md "Message
 // families"). The texts are a contract with rewriter-go, byte for byte.
 constexpr std::string_view kIdentifierParameterMessage =
@@ -304,6 +307,6 @@ bool alterIsStructured(const DB::ASTAlterQuery &alter);
 bool preflightTableReferences(const DB::ASTPtr &ast,
   const rewriter::RewriteSQLRequest *request,
   rewriter::RewriteSQLResponse *response,
-  std::optional<std::string> *deferred_system_table = nullptr);
+  std::optional<SystemTableRefusal> *deferred_system_table = nullptr);
 
 } // namespace rewriter_handlers

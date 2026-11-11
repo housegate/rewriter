@@ -10647,8 +10647,18 @@ TEST(TableRefSettings, NameBindingSettingsInTableSettingPositionsFollowGo) {
 
 namespace {
 
+const char *kFilteredReadSuffix = "; tenant-filtered metadata reads are tracked in housegate/housegate#218";
+
 std::string SystemTableMessage(const std::string &table) {
-  return "system table system." + table + " is not accessible";
+  std::string message = "system table system." + table + " is not accessible";
+  if (table == "completions" || table == "parts_columns" || table == "projection_parts" ||
+      table == "projection_parts_columns")
+    message += kFilteredReadSuffix;
+  return message;
+}
+
+std::string MetadataDatabaseMessage(const std::string &database) {
+  return "database " + database + " is not accessible" + kFilteredReadSuffix;
 }
 
 void ExpectSystemTableRefused(const std::string &sql, const std::string &table, bool si,
@@ -10695,10 +10705,9 @@ TEST(TableRefSystemTables, AllowlistIsExact) {
     "unicode", "warnings", "zeros", "zeros_mt",
     // clusters (b*, read by the Sentio driver)
     "clusters",
-    // class (c), read by the Sentio driver and clients by physical name
-    "tables", "columns", "data_skipping_indices", "projections", "parts", "parts_columns",
-    "projection_parts", "projection_parts_columns", "databases", "completions", "mutations"};
-  ASSERT_EQ(allowed.size(), 45u);
+    // class (c), read by the Sentio driver by physical name
+    "tables", "columns", "data_skipping_indices", "projections", "parts", "databases", "mutations"};
+  ASSERT_EQ(allowed.size(), 41u);
   for (const bool si : {false, true}) {
     for (const auto &table : allowed) {
       const std::string sql = "SELECT * FROM system." + table;
@@ -10709,16 +10718,66 @@ TEST(TableRefSystemTables, AllowlistIsExact) {
     for (const std::string table : {"processes", "merges", "dictionaries", "query_log", "text_log", "errors",
            "part_log", "users", "grants", "asynchronous_metrics", "events", "detached_parts", "rocksdb",
            "iceberg_history", "database_replicas", "dropped_tables", "dropped_tables_parts", "detached_tables",
-           "zookeeper", "session_log", "future_table_nobody_knows", "Tables", "TABLES", "PROCESSES"})
+           "zookeeper", "session_log", "future_table_nobody_knows", "Tables", "TABLES", "PROCESSES",
+           // class (c) no known client reads through housegate; refused until step 2
+           "completions", "parts_columns", "projection_parts", "projection_parts_columns"})
       ExpectSystemTableRefused("SELECT * FROM system." + table, table, si);
+  }
+}
+
+// rewriter-go TestSystemTables_DeferredClassCAndInformationSchemaRefused:
+// the class (c) tables no known client reads through housegate and every
+// table of information_schema are refused, in every position and both SI
+// states, with a message naming housegate/housegate#218.
+TEST(TableRefSystemTables, DeferredClassCAndInformationSchemaRefused) {
+  const std::string suggestions =
+    "SELECT DISTINCT arrayJoin(extractAll(word, '[\\\\w_]{2,}')) AS res FROM (SELECT word FROM system.completions "
+    "WHERE context IN ('function', 'table engine', 'format', 'table function', 'data type', 'merge tree setting', 'setting', "
+    "'aggregate function combinator pair', 'keyword', 'cluster', 'macro', 'policy') UNION ALL SELECT word FROM ( "
+    "SELECT word, context, ROW_NUMBER() OVER (PARTITION BY context ORDER BY word) AS rn FROM  (SELECT DISTINCT word, context "
+    "FROM system.completions WHERE context IN ('database', 'table', 'column', 'dictionary'))) WHERE rn <= 10000) WHERE notEmpty(res)";
+  for (const bool si : {false, true}) {
+    for (const std::string table : {"completions", "parts_columns", "projection_parts", "projection_parts_columns"})
+      ExpectSystemTableRefused("SELECT * FROM system." + table, table, si);
+    ExpectSystemTableRefused(suggestions, "completions", si);
+    ExpectSystemTableRefused("SHOW COLUMNS FROM completions FROM system", "completions", si);
+    const std::vector<std::pair<std::string, std::string>> metadata = {
+      {"SELECT * FROM information_schema.tables", "information_schema"},
+      {"SELECT * FROM INFORMATION_SCHEMA.TABLES", "INFORMATION_SCHEMA"},
+      {"SELECT * FROM `information_schema`.`tables`", "information_schema"},
+      {"SELECT * FROM information_schema.columns WHERE table_schema = 'phys'", "information_schema"},
+      {"SELECT * FROM information_schema.schemata", "information_schema"},
+      {"SELECT * FROM information_schema.future_view_nobody_knows", "information_schema"},
+      {"SELECT * FROM db1.o JOIN information_schema.tables USING (a)", "information_schema"},
+      {"SELECT * FROM db1.o WHERE a IN (SELECT table_name FROM INFORMATION_SCHEMA.TABLES)", "INFORMATION_SCHEMA"},
+      {"WITH x AS (SELECT * FROM information_schema.columns) SELECT * FROM x", "information_schema"},
+      {"SELECT * FROM view(SELECT * FROM information_schema.schemata)", "information_schema"},
+      {"INSERT INTO db1.o SELECT table_name FROM information_schema.tables", "information_schema"},
+      {"DESCRIBE information_schema.tables", "information_schema"},
+      {"EXISTS information_schema.tables", "information_schema"},
+      {"SHOW CREATE TABLE information_schema.tables", "information_schema"},
+      {"SHOW COLUMNS FROM information_schema.tables", "information_schema"},
+      {"SHOW COLUMNS FROM tables FROM information_schema", "information_schema"},
+      {"SHOW INDEX FROM tables FROM information_schema", "information_schema"},
+      {"SELECT * FROM merge('information_schema', '^tables$')", "information_schema"},
+      {"SELECT hasColumnInTable('information_schema', 'tables', 'table_name')", "information_schema"},
+    };
+    for (const auto &[sql, database] : metadata) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+      EXPECT_EQ(resp.message(), MetadataDatabaseMessage(database));
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_TRUE(resp.table_rewrites().empty());
+    }
   }
 }
 
 TEST(TableRefSystemTables, AllowedTablesKeepTodaysBehaviour) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
-           "SELECT * FROM information_schema.tables", "SELECT * FROM INFORMATION_SCHEMA.TABLES",
-           "SELECT * FROM information_schema.columns WHERE table_schema = 'phys'",
+           // Not information_schema: ClickHouse names are case-sensitive.
+           "SELECT * FROM Information_Schema.tables",
            "SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
            "SELECT * FROM system.mutations WHERE database = 'phys' AND is_done = 0",
            "SELECT * FROM system.parts WHERE database = 'phys' AND active", "SELECT 1", "SELECT * FROM numbers(3)",

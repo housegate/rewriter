@@ -402,7 +402,7 @@ void RewriterServiceImpl::doRewrite(
 
     // Spec 2026-09-26 §5: the table-reference policy runs before any handler
     // can rewrite a name it refuses.
-    std::optional<std::string> deferred_system_table;
+    std::optional<rewriter_handlers::SystemTableRefusal> deferred_system_table;
     if (rewriter_handlers::preflightTableReferences(ast, request, response, &deferred_system_table)) return;
 
     // A read where no handler rewrites it would reach ClickHouse unrewritten

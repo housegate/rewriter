@@ -55,14 +55,26 @@ const std::set<std::string> &systemTableAllowlist() {
     "unicode", "warnings", "zeros", "zeros_mt",
     // class (b*): global topology, read by the Sentio driver on every connect
     "clusters",
-    // class (c): per-database metadata the Sentio driver and clients read by
-    // physical name. They still show every tenant's names (and parts*
-    // partition values, mutations command text): a known residual that
-    // step 2 closes by serving them as a filtered logical rewrite.
-    "tables", "columns", "data_skipping_indices", "projections", "parts", "parts_columns",
-    "projection_parts", "projection_parts_columns", "databases", "completions", "mutations"};
+    // class (c): per-database metadata the Sentio driver reads by physical
+    // name. They still show every tenant's names (and parts partition
+    // values, mutations command text): a known residual that step 2
+    // (housegate/housegate#218) closes by serving them as a filtered logical
+    // rewrite.
+    "tables", "columns", "data_skipping_indices", "projections", "parts", "databases", "mutations"};
   return allowlist;
 }
+
+// rewriter-go systemTableAwaitingFilteredRead: the class (c) tables no known
+// client reads through housegate, refused until step 2 serves them as
+// filtered logical reads; their refusal names that path.
+const std::set<std::string> &systemTableAwaitingFilteredRead() {
+  static const std::set<std::string> tables = {
+    "completions", "parts_columns", "projection_parts", "projection_parts_columns"};
+  return tables;
+}
+
+// rewriter-go nameresolve.FilteredReadIssue.
+constexpr std::string_view kFilteredReadIssue = "housegate/housegate#218";
 
 using Refs = std::vector<ObjectRef>;
 
@@ -340,12 +352,12 @@ void clearRewriteMaps(rewriter::RewriteSQLResponse *response) {
   response->clear_failed_cte_aliases();
 }
 
-void recordSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table,
+void recordSystemTable(rewriter::RewriteSQLResponse *response, const SystemTableRefusal &refusal,
                        const TableRewriteSelection &selection) {
-  if (table.empty()) return;
+  if (refusal.table.empty()) return;
   for (const auto &entry : response->original_accessed_tables())
-    if (entry.original_database() == kSystemDatabase && entry.original_table() == table) return;
-  recordAccessedTable(response, std::string(kSystemDatabase), table, selection);
+    if (entry.original_database() == refusal.database && entry.original_table() == refusal.table) return;
+  recordAccessedTable(response, refusal.database, refusal.table, selection);
 }
 
 // The word after SHOW and its prefixes (rewriter-go DBLevelInfo.ShowWhat /
@@ -418,7 +430,19 @@ bool systemTableAllowed(const std::string &table) {
 }
 
 std::string systemTableRefusedMessage(const std::string &table) {
-  return "system table " + std::string(kSystemDatabase) + "." + table + " is not accessible";
+  std::string message = "system table " + std::string(kSystemDatabase) + "." + table + " is not accessible";
+  if (systemTableAwaitingFilteredRead().count(table))
+    message += "; tenant-filtered metadata reads are tracked in " + std::string(kFilteredReadIssue);
+  return message;
+}
+
+bool metadataDatabaseRefused(const std::string &database) {
+  return database == "information_schema" || database == "INFORMATION_SCHEMA";
+}
+
+std::string metadataDatabaseRefusedMessage(const std::string &database) {
+  return "database " + database + " is not accessible; tenant-filtered metadata reads are tracked in " +
+         std::string(kFilteredReadIssue);
 }
 
 std::optional<std::vector<ObjectRef>> collectObjectRefs(const DB::ASTPtr &ast, const std::string &sql,
@@ -458,12 +482,20 @@ SystemTableScan scanSystemTables(const DB::ASTPtr &ast, const std::string &sql,
     if (isSystemDatabase(ref.database, context)) {
       if (!scan.refused && !(ref.exact && systemTableAllowed(ref.table))) {
         scan.refused = true;
-        scan.table = ref.table;
+        scan.refusal = {std::string(kSystemDatabase), ref.table};
+      }
+      continue;
+    }
+    const std::string database = ref.database.empty() ? context : ref.database;
+    if (metadataDatabaseRefused(database)) {
+      // information_schema: every table, pattern or name is refused.
+      if (!scan.refused) {
+        scan.refused = true;
+        scan.refusal = {database, ref.table};
       }
       continue;
     }
     if (!active || scan.storage_integrity_object) continue;
-    const std::string database = ref.database.empty() ? context : ref.database;
     if (isStorageIntegrityPhysicalDatabase(database, args)
         || (!ref.exact && isStorageIntegrityLogicalDatabase(database, args))
         || lookupStorageIntegrity(ref.database, ref.table, args))
@@ -472,20 +504,21 @@ SystemTableScan scanSystemTables(const DB::ASTPtr &ast, const std::string &sql,
   return scan;
 }
 
-void rejectSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table, const std::string &sql,
-                       const TableRewriteSelection &selection) {
+void rejectSystemTable(rewriter::RewriteSQLResponse *response, const SystemTableRefusal &refusal,
+                       const std::string &sql, const TableRewriteSelection &selection) {
   response->clear_statement_type();
   clearRewriteMaps(response);
-  recordSystemTable(response, table, selection);
+  recordSystemTable(response, refusal, selection);
   response->set_sql_after_rewrite(sql);
   response->set_code(rewriter::RewriteCode::UnsupportedStatement);
-  response->set_message(systemTableRefusedMessage(table));
+  response->set_message(refusal.database == kSystemDatabase ? systemTableRefusedMessage(refusal.table)
+                                                            : metadataDatabaseRefusedMessage(refusal.database));
 }
 
-void rejectDeferredSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table,
+void rejectDeferredSystemTable(rewriter::RewriteSQLResponse *response, const SystemTableRefusal &refusal,
                                const std::string &sql, const TableRewriteSelection &selection) {
   if (response->code() != rewriter::RewriteCode::Success) return;
-  rejectSystemTable(response, table, sql, selection);
+  rejectSystemTable(response, refusal, sql, selection);
 }
 
 void rejectShowSystemTable(rewriter::RewriteSQLResponse *response, const std::string &table) {
