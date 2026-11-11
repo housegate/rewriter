@@ -2363,6 +2363,18 @@ TEST(TableRewrite, Insert_Values_PayloadRoundTrips_AfterRewrite) {
     << r.sql_after_rewrite;
 }
 
+// housegate/rewriter-go#75: inline `FORMAT Values <rows>` runs like
+// `VALUES <rows>` in ClickHouse whatever the case of the format name, and
+// both engines generate the VALUES form.
+TEST(TableRewrite, Insert_FormatValues_InlineRows_AnyCase_BecomeValues) {
+  for (const char *name : {"Values", "values", "VALUES", "vAlUeS"}) {
+    const std::string sql = std::string("INSERT INTO tenant1.t FORMAT ") + name + " (1, 'x')";
+    auto r = RunDynamic(sql, {.database_map = {{"tenant1", "testnet"}}});
+    EXPECT_EQ(r.code, rewriter::RewriteCode::Success) << sql;
+    EXPECT_EQ(r.sql_after_rewrite, "INSERT INTO testnet.`tenant1.t` VALUES (1, 'x')") << sql;
+  }
+}
+
 TEST(WriteOp, Insert_Select_ReturnsTargetAndSource) {
   auto r = RunWriteOp("INSERT INTO db.t SELECT * FROM src");
   EXPECT_EQ(r.code, rewriter::RewriteCode::Success);
