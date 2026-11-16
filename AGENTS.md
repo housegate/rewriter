@@ -317,7 +317,7 @@ runs `./scripts.sh rebuild`, a fail-closed `ninja -C build rewriter_tests`,
 path and discards the incremental cache.
 
 Both jobs link `clickHouse` to `~/ci/clickhouse/<gitlink>`, one checkout per
-ClickHouse commit created from the fork on first use (`--depth=1`, contribs
+ClickHouse commit created from upstream ClickHouse on first use (`--depth=1`, contribs
 too), so a submodule bump never moves another commit's tree or the dev
 workdir's.
 
