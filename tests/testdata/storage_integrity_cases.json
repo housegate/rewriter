@@ -53287,12 +53287,23 @@
         ]
       }
     },
-    "name": "si_tr_ch268_r1_host_name_reference_over_si_table_v2_rejected",
-    "reject": true,
+    "name": "si_tr_ch268_r1_host_name_reference_over_si_table_v2",
     "sql": "SELECT arrayMap(hostName, [s]) FROM db1.t",
-    "want_code": "UnsupportedStatement",
-    "want_message_contains": "function hostName is not accessible",
-    "want_stmt": ""
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "Success",
+    "want_sql": "SELECT arrayMap(hostName, [s]) FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
+    "want_stmt": "SELECT",
+    "want_table_rewrites": {
+      "db1.t": "hg_safe.db1__t"
+    }
   },
   {
     "contract_version": "V2",
@@ -53327,12 +53338,23 @@
         ]
       }
     },
-    "name": "si_tr_ch268_r1_dict_get_reference_over_si_table_v2_rejected",
-    "reject": true,
+    "name": "si_tr_ch268_r1_dict_get_reference_over_si_table_v2",
     "sql": "SELECT arrayMap(dictGet, ['d'], ['a'], [a]) FROM db1.t",
-    "want_code": "UnsupportedStatement",
-    "want_message_contains": "function dictGet is not accessible",
-    "want_stmt": ""
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "t",
+        "logical_database": "db1",
+        "physical_database": "phys",
+        "is_storage_integrity": true
+      }
+    ],
+    "want_code": "Success",
+    "want_sql": "SELECT arrayMap(dictGet, ['d'], ['a'], [a]) FROM (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t) AS \"db1.t\"",
+    "want_stmt": "SELECT",
+    "want_table_rewrites": {
+      "db1.t": "hg_safe.db1__t"
+    }
   },
   {
     "contract_version": "V2",

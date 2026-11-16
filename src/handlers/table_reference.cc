@@ -1519,28 +1519,35 @@ bool isDeploymentIdentityFunctionName(const std::string &name) {
   return identity.contains(lowerName(name));
 }
 
-// A name refused when it appears bare (not followed by a call's parentheses).
-// currentDatabase / currentUser and the ClickHouse 26.6 / 26.8 functions that
-// allow omitting their parentheses (session_user, currentRequestURL,
-// currentHandler) are called by their bare name. Since 26.5 a bare function
-// name as a higher-order function's first argument (`arrayMap(f, arr)`) is
-// that function applied to the lambda arguments when it takes arguments:
-// currentSchemas / current_schemas and pgGetUserById / pg_get_userbyid
-// reveal the physical database and the shared user that way, and the AI
-// functions call out (isExternalCallFunctionName). The other identity
-// functions were measured on 26.8.37.168 as not callable bare: hostName,
-// FQDN, fullHostName, serverUUID, authenticatedUser and authUser take no
-// argument and do not allow omitting parentheses (`SELECT hostName` and
-// `arrayMap(hostName, ['x'])` are UNKNOWN_IDENTIFIER), and getMacro and the
-// string lookups need a constant argument a lambda cannot supply
-// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN, `arrayMap(dictGet, …)`
-// ILLEGAL_TYPE_OF_ARGUMENT); they are refused bare anyway, for one rule. The
-// column-name aliases user, database and schema stay accepted bare (a known
-// residual). A column of a refused name is refused too, deliberately.
+// A name refused when it appears bare (not followed by a call's parentheses):
+// only the names a ClickHouse 26.8.37.168 server calls by a bare name, plus
+// every AI function. currentDatabase / currentUser and the 26.6 / 26.8
+// functions that allow omitting their parentheses (session_user,
+// currentRequestURL, currentHandler) are called by their bare name. Since 26.5
+// a bare function name as a higher-order function's first argument
+// (`arrayMap(f, arr)`) is that function applied to the lambda arguments when
+// it takes arguments: currentSchemas / current_schemas and pgGetUserById /
+// pg_get_userbyid reveal the physical database and the shared user that way,
+// and the AI functions call out (isExternalCallFunctionName).
+//
+// Measured NOT callable bare on 26.8.37.168, so left out (a column of that
+// name stays an ordinary column; their call form `name(...)` is still
+// refused): hostName, FQDN, fullHostName, serverUUID, authenticatedUser,
+// authUser (`SELECT hostName` and `arrayMap(hostName, ['x'])` are
+// UNKNOWN_IDENTIFIER: no argument, parentheses not optional); getMacro
+// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN: the argument must be a
+// constant String); joinGet, dictGet*, hasColumnInTable,
+// naiveBayesClassifier* (`arrayMap(dictGet, ['d'], ['a'], [1])` is
+// ILLEGAL_TYPE_OF_ARGUMENT, `arrayMap(dictGetString, …)` and
+// `arrayMap(naiveBayesClassifier, …)` ILLEGAL_COLUMN: the target must be a
+// constant). Re-measure on a ClickHouse bump. The column-name aliases user,
+// database and schema stay accepted bare (a known residual). A column of a
+// refused name is refused too, deliberately.
 bool isBareRefusedName(const std::string &name) {
-  const std::string lower = lowerName(name);
-  if (lower == "user" || lower == "database" || lower == "schema") return false;
-  return isDeploymentIdentityFunctionName(name) || isExternalCallFunctionName(name) || isStringLookupName(name);
+  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user",
+    "session_user", "currentrequesturl", "currenthandler", "currentschemas", "current_schemas", "pggetuserbyid",
+    "pg_get_userbyid"};
+  return bare.contains(lowerName(name)) || isExternalCallFunctionName(name);
 }
 
 } // namespace
@@ -1573,8 +1580,8 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
 
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast) {
   if (!ast) return std::nullopt;
-  // A statement's own target names (`CREATE TABLE hostName …`) are object
-  // names, not expressions.
+  // A statement's own target names (`CREATE TABLE session_user …`,
+  // `INSERT INTO current_user …`) are object names, not expressions.
   std::set<const DB::IAST *> targets;
   if (const auto *q = dynamic_cast<const DB::ASTQueryWithTableAndOutput *>(ast.get())) {
     targets.insert(q->table.get());

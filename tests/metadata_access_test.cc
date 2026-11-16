@@ -235,9 +235,7 @@ TEST(MetadataAccess, AIFunctionsAreRefusedInDynamicMode) {
 // stores the shared user). The opaque positions rewriter-go reads as text
 // (INSERT … SETTINGS … SELECT, ALTER … UPDATE, a column DEFAULT in ALTER)
 // were already refused here and are pinned for parity, with the pre-existing
-// bare currentUser / currentDatabase. The other identity names and the
-// string-lookup names are refused bare for one rule (measured not callable
-// bare). An Identifier query parameter in an expression is substituted before
+// bare currentUser / currentDatabase. An Identifier query parameter in an expression is substituted before
 // analysis (`SELECT {f:Identifier}` with f = session_user returns the shared
 // user) and the request carries no values: `statement is not supported`.
 TEST(MetadataAccess, ClickHouse268FixRoundOneRoutesAreRefused) {
@@ -260,18 +258,6 @@ TEST(MetadataAccess, ClickHouse268FixRoundOneRoutesAreRefused) {
     {"ALTER TABLE tenant1.o MODIFY COLUMN s String DEFAULT currentDatabase", "currentDatabase"},
     {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 VALUES (currentUser)", "currentUser"},
     {"INSERT INTO tenant1.o (s) VALUES (current_user)", "current_user"},
-    {"SELECT arrayMap(hostName, ['x'])", "hostName"},
-    {"SELECT arrayMap(FQDN, ['x'])", "FQDN"},
-    {"SELECT arrayMap(fullHostName, ['x'])", "fullHostName"},
-    {"SELECT arrayMap(serverUUID, ['x'])", "serverUUID"},
-    {"SELECT arrayMap(authenticatedUser, ['x'])", "authenticatedUser"},
-    {"SELECT authUser", "authUser"},
-    {"SELECT hostName", "hostName"},
-    {"SELECT arrayMap(getMacro, ['x'])", "getMacro"},
-    {"SELECT arrayMap(dictGet, ['d'], ['a'], [1])", "dictGet"},
-    {"SELECT arrayMap(joinGet, ['t'], ['a'], [1])", "joinGet"},
-    {"SELECT arrayMap(hasColumnInTable, ['db'], ['t'], ['a'])", "hasColumnInTable"},
-    {"SELECT arrayMap(naiveBayesClassifier, ['d'], ['t'])", "naiveBayesClassifier"},
   };
   const std::vector<std::string> parameters = {
     "SELECT arrayMap({f:Identifier}, ['x'])",
@@ -298,6 +284,44 @@ TEST(MetadataAccess, ClickHouse268FixRoundOneRoutesAreRefused) {
     for (const std::string sql : {"SELECT * APPLY(toString) FROM tenant1.o", "SELECT {v:String}",
                                   "SELECT t.hostName FROM tenant1.t AS t", "SELECT user, database FROM tenant1.t",
                                   "INSERT INTO tenant1.o (s) VALUES ('hostName')"}) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << " si=" << si << ": " << resp.message();
+    }
+  }
+}
+
+// Step 5 fix round 1b: the identity and lookup functions measured NOT
+// callable by a bare name on 26.8.37.168 (hostName, FQDN, fullHostName,
+// serverUUID, authenticatedUser, authUser: UNKNOWN_IDENTIFIER; getMacro and
+// the dictGet / joinGet / hasColumnInTable / naiveBayesClassifier lookups:
+// a constant argument is required) are ordinary column names when bare, so a
+// `hostname` column is accepted and rewritten in every position; their call
+// form stays refused. A statement's own target named like a refused bare name
+// is an object name, not an expression.
+TEST(MetadataAccess, BareNamesOfNonCallableFunctionsAreOrdinaryColumns) {
+  for (const bool si : {false, true}) {
+    for (const std::string sql : {
+           "SELECT hostname FROM tenant1.o WHERE hostname = 'h' ORDER BY hostname",
+           "SELECT fqdn, serverUUID, getMacro, dictGet, naiveBayesClassifier FROM tenant1.o",
+           "SELECT arrayMap(hostName, ['x']) FROM tenant1.o",
+           "SELECT arrayMap(dictGet, ['d'], ['a'], [1]) FROM tenant1.o",
+           "ALTER TABLE tenant1.o UPDATE hostname = 'x' WHERE hostname = 'y'",
+           "ALTER TABLE tenant1.o MODIFY COLUMN hostname String DEFAULT 'h'",
+           "INSERT INTO tenant1.o (hostname) VALUES ('x')",
+           "INSERT INTO tenant1.o (hostname) SETTINGS max_threads = 1 VALUES ('x')",
+           "INSERT INTO tenant1.o (hostname) SELECT hostname FROM tenant1.p",
+         }) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << " si=" << si << ": " << resp.message();
+      EXPECT_NE(resp.sql_after_rewrite().find("physical_db.`tenant1.o`"), std::string::npos)
+        << sql << " -> " << resp.sql_after_rewrite();
+    }
+    for (const std::string sql : {"SELECT hostName()", "SELECT getMacro('shard')", "SELECT FQDN() FROM tenant1.o"}) {
+      EXPECT_EQ(rewrite(sql, si).code(), rewriter::RewriteCode::UnsupportedStatement) << sql;
+    }
+    // A statement's own target is not an expression.
+    for (const std::string sql : {"CREATE TABLE IF NOT EXISTS session_user (a UInt64) ENGINE = MergeTree ORDER BY a",
+                                  "INSERT INTO current_user (a) VALUES (1)"}) {
       const auto resp = rewrite(sql, si);
       EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << " si=" << si << ": " << resp.message();
     }
