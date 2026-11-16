@@ -10524,7 +10524,6 @@
     }
   },
   {
-    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -10552,24 +10551,13 @@
         ]
       }
     },
-    "name": "si_tr_param_column_allowed",
+    "name": "si_tr_param_column_rejected",
+    "reject": true,
     "sql": "SELECT {c:Identifier} FROM db1.o",
-    "want_accessed": [
-      {
-        "original_database": "db1",
-        "original_table": "o",
-        "logical_database": "db1",
-        "physical_database": "phys"
-      }
-    ],
-    "want_code": "Success",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
     "want_no_contract_ack": true,
-    "want_sql_cpp": "SELECT {c:Identifier} FROM phys.\"db1.o\" AS \"db1.o\"",
-    "want_sql_go": "SELECT {c: Identifier} FROM phys.\"db1.o\" \"db1.o\"",
-    "want_stmt": "SELECT",
-    "want_table_rewrites": {
-      "db1.o": "phys.db1.o"
-    }
+    "want_stmt": ""
   },
   {
     "contract_version": "V1",
@@ -52864,6 +52852,566 @@
     "sql": "SELECT a FROM db1.t SETTINGS max_threads = {n:UInt64}",
     "want_code": "UnsupportedStatement",
     "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_apply_ai_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT * APPLY(aiGenerate) FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function aiGenerate is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_apply_current_schemas_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT COLUMNS('a') APPLY currentSchemas FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function currentSchemas is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_apply_pg_get_user_by_id_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT COLUMNS('a') APPLY(pgGetUserById) FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function pgGetUserById is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_values_session_user_si_insert_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) VALUES (SESSION_USER)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function SESSION_USER is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_values_settings_session_user_si_insert_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) SETTINGS max_threads = 1 VALUES (SESSION_USER)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function SESSION_USER is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_values_settings_current_user_si_insert_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) SETTINGS max_threads = 1 VALUES (currentUser)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function currentUser is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_insert_settings_select_current_schemas_si_target_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) SETTINGS max_threads = 1 SELECT toString(arrayMap(currentSchemas, [true]))",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function currentSchemas is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_insert_settings_select_ai_si_target_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) SETTINGS max_threads = 1 SELECT arrayMap(aiGenerate, ['x'])",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function aiGenerate is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_identifier_parameter_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT a FROM db1.t WHERE s = {f:Identifier}",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_identifier_parameter_reference_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT arrayMap({f:Identifier}, [s]) FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_host_name_reference_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT arrayMap(hostName, [s]) FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function hostName is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_dict_get_reference_over_si_table_v2_rejected",
+    "reject": true,
+    "sql": "SELECT arrayMap(dictGet, ['d'], ['a'], [a]) FROM db1.t",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function dictGet is not accessible",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_alter_update_session_user_si_table_v2_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE db1.t UPDATE s = SESSION_USER WHERE 1",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r1_modify_column_default_session_user_si_table_v2_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE db1.t MODIFY COLUMN s String DEFAULT SESSION_USER",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
   }
 ]
