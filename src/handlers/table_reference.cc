@@ -1505,6 +1505,8 @@ bool isExternalCallFunctionName(const std::string &name) {
 
 namespace {
 
+bool tokensHoldIdentifierParameter(const std::vector<DB::Token> &tokens);
+
 // ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
 // current_database for currentDatabase; currentSchemas and current_schemas;
 // user and current_user for currentUser; fullHostName for FQDN.
@@ -1595,6 +1597,15 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
   while (!stack.empty()) {
     const DB::IAST *node = stack.back();
     stack.pop_back();
+    // The column, index, constraint and projection an ALTER action names
+    // (`DROP COLUMN session_user`, `RENAME COLUMN session_user TO s2`,
+    // `ADD COLUMN c AFTER session_user`) are object names too, as a column
+    // declaration's name already is (rewriter-go reads them the same way).
+    if (const auto *command = node->as<DB::ASTAlterCommand>()) {
+      for (const DB::IAST *name : {command->column, command->rename_to, command->index, command->constraint,
+                                   command->projection})
+        if (name) targets.insert(name);
+    }
     if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
         id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && id->name_parts.size() == 1
         && !targets.contains(node) && isBareRefusedName(id->name()))
@@ -1613,8 +1624,9 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
   // An INSERT's inline Values text, which the parser keeps as raw bytes: the
   // Values reader evaluates its expressions (measured: `INSERT INTO t (s)
   // VALUES (SESSION_USER)` and the same with a SETTINGS clause store the
-  // shared user). Read as tokens, a bare word or quoted identifier not next
-  // to a `.`.
+  // shared user). Read as tokens, a bare word or quoted identifier not after
+  // a `.` (a qualified name's last part); one followed by `.` is refused, like
+  // the AST walk refuses `SESSION_USER.1` (it reads the function's result).
   if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
     const char *begin = nullptr;
     const char *end = nullptr;
@@ -1623,7 +1635,6 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
       significantTokens(std::string_view(begin, static_cast<size_t>(end - begin)), tokens);
       for (size_t i = 0; i < tokens.size(); ++i) {
         if (i > 0 && tokens[i - 1].type == DB::TokenType::Dot) continue;
-        if (i + 1 < tokens.size() && tokens[i + 1].type == DB::TokenType::Dot) continue;
         std::string name;
         if (tokens[i].type == DB::TokenType::BareWord) {
           name.assign(tokens[i].begin, tokens[i].end);
@@ -1642,7 +1653,23 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
 }
 
 bool hasIdentifierQueryParameter(const DB::ASTPtr &ast) {
-  return ast && anyIdentifierSubstitution(*ast);
+  if (!ast) return false;
+  if (anyIdentifierSubstitution(*ast)) return true;
+  // An INSERT's inline Values text is raw bytes the AST does not hold; the
+  // Values reader substitutes an Identifier parameter there too (measured on
+  // 26.8.37.168: `INSERT INTO t (a, s) VALUES (2, {f:Identifier})` and the
+  // `FORMAT Values` spelling, with f = session_user, stored `default`).
+  // A text the lexer cannot read fails closed.
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    const char *begin = nullptr;
+    const char *end = nullptr;
+    if (insertValuesText(*insert, &begin, &end)) {
+      std::vector<DB::Token> tokens;
+      if (!significantTokens(std::string_view(begin, static_cast<size_t>(end - begin)), tokens)) return true;
+      return tokensHoldIdentifierParameter(tokens);
+    }
+  }
+  return false;
 }
 
 std::string deploymentIdentityCallMessage(const std::string &name) {

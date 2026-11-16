@@ -53435,5 +53435,205 @@
     "want_code": "UnsupportedStatement",
     "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
     "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r2_values_identifier_parameter_si_insert_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) VALUES ({f:Identifier})",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r2_format_values_identifier_parameter_si_insert_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) FORMAT Values ({f:Identifier})",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r2_alter_update_trim_from_session_user_si_table_v2_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE db1.t UPDATE s = trim(BOTH ' ' FROM SESSION_USER) WHERE 1",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "storage-integrity table db1.t is append-only: only INSERT and SELECT are accepted, and UPDATE, DELETE, ALTER, TRUNCATE and other statements on it are refused; to change its schema, use a plain DROP TABLE and CREATE it again",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r2_insert_settings_select_trim_session_user_si_target_v2_rejected",
+    "reject": true,
+    "sql": "INSERT INTO db1.t (s) SETTINGS max_threads = 1 SELECT trim(BOTH ' ' FROM SESSION_USER)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_stmt": ""
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_ch268_r2_modify_column_default_trim_session_user_v2_rejected",
+    "reject": true,
+    "sql": "ALTER TABLE db1.o MODIFY COLUMN s String DEFAULT trim(BOTH ' ' FROM SESSION_USER)",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "function SESSION_USER is not accessible",
+    "want_stmt": ""
   }
 ]

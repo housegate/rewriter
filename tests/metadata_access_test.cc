@@ -328,6 +328,58 @@ TEST(MetadataAccess, BareNamesOfNonCallableFunctionsAreOrdinaryColumns) {
   }
 }
 
+// Step 5 fix round 2 (internal design doc 2026-11-14 official ClickHouse
+// switch), measured on 26.8.37.168: a refused name after a keyword inside a
+// keyword-operand function (`trim(BOTH ' ' FROM SESSION_USER)`, `substring(x
+// FROM n)`, `IS DISTINCT FROM`) is an expression (rewriter-go skipped it as an
+// object name in opaque text), and the Values reader substitutes an
+// Identifier parameter (`INSERT INTO t (a, s) VALUES (2, {f:Identifier})`
+// with f = session_user stored `default`). An ALTER action's own column name
+// is an object name, as a column declaration's is.
+TEST(MetadataAccess, ClickHouse268FixRoundTwoRoutes) {
+  const std::vector<std::pair<std::string, std::string>> refused = {
+    {"ALTER TABLE tenant1.o UPDATE s = trim(BOTH ' ' FROM SESSION_USER) WHERE 1", "SESSION_USER"},
+    {"ALTER TABLE tenant1.o UPDATE s = trim(LEADING 'x' FROM currentUser) WHERE 1", "currentUser"},
+    {"ALTER TABLE tenant1.o UPDATE s = trim(BOTH ' ' FROM `session_user`) WHERE 1", "session_user"},
+    {"ALTER TABLE tenant1.o UPDATE s = substring(SESSION_USER FROM 1 FOR 3) WHERE 1", "SESSION_USER"},
+    {"ALTER TABLE tenant1.o MODIFY COLUMN s String DEFAULT trim(BOTH ' ' FROM SESSION_USER)", "SESSION_USER"},
+    {"ALTER TABLE tenant1.o UPDATE s = 'z' WHERE s IS DISTINCT FROM SESSION_USER", "SESSION_USER"},
+    {"ALTER TABLE tenant1.o UPDATE s = 'z' WHERE s IS NOT DISTINCT FROM current_user", "current_user"},
+    {"ALTER TABLE tenant1.o UPDATE s = toString(EXTRACT(DAY FROM now())) || currentUser WHERE 1", "currentUser"},
+    {"INSERT INTO tenant1.o (s) VALUES (toString(tuple(SESSION_USER).1))", "SESSION_USER"},
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, name] : refused) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "function " + name + " is not accessible") << sql << " si=" << si;
+    }
+    for (const std::string sql : {"INSERT INTO tenant1.o (s) VALUES ({f:Identifier})",
+                                  "INSERT INTO tenant1.o (s) FORMAT Values ({f:Identifier})",
+                                  "INSERT INTO tenant1.o (s) VALUES ('a'), ({ f : Identifier })"}) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "statement is not supported") << sql << " si=" << si;
+    }
+    // Refused whatever the message (an IN operand naming a table in a
+    // mutation is R2; `position(a IN b)` is read as an IN there too).
+    for (const std::string sql : {"ALTER TABLE tenant1.o UPDATE s = 'z' WHERE s IN session_user",
+                                  "ALTER TABLE tenant1.o UPDATE a = position('a' IN SESSION_USER) WHERE 1",
+                                  "INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 SELECT trim(BOTH ' ' FROM SESSION_USER)"}) {
+      EXPECT_NE(rewrite(sql, si).code(), rewriter::RewriteCode::Success) << sql << " si=" << si;
+    }
+    for (const std::string sql : {"ALTER TABLE tenant1.o ADD COLUMN session_user String",
+                                  "ALTER TABLE tenant1.o DROP COLUMN session_user",
+                                  "ALTER TABLE tenant1.o RENAME COLUMN session_user TO s2",
+                                  "ALTER TABLE tenant1.o ADD COLUMN c String AFTER session_user",
+                                  "ALTER TABLE tenant1.o MODIFY COLUMN s String DEFAULT substring(s FROM 1)",
+                                  "INSERT INTO tenant1.o (s) VALUES ('{f:Identifier}')", "INSERT INTO tenant1.o (s) VALUES ({v:String})"}) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << " si=" << si << ": " << resp.message();
+    }
+  }
+}
+
 // ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
 // system tables a `_database` virtual column holding the physical database.
 TEST(MetadataAccess, DatabaseVirtualColumnIsRefusedInDynamicMode) {
