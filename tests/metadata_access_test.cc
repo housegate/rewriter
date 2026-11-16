@@ -109,6 +109,122 @@ TEST(MetadataAccess, DeploymentIdentityCallsAreRefusedInDynamicMode) {
   }
 }
 
+// Identity names a ClickHouse 26.8.37.168 server reads without a call's
+// parentheses (internal design doc 2026-11-14 official ClickHouse switch,
+// Step 5). Since 26.5 a bare function name as a higher-order function's first
+// argument is that function applied to the lambda arguments when no column or
+// alias has the name and the function takes arguments: measured,
+// `SELECT arrayMap(currentSchemas, [true])` returns `[['<physical database>']]`
+// and `arrayMap(pgGetUserById, [toUInt32(0)])` the shared ClickHouse user. A
+// function that allows omitting its parentheses is called by its bare name:
+// `SELECT SESSION_USER` (the 26.6 alias of currentUser) returns the shared
+// user, and the 26.8 currentRequestURL / currentHandler resolve the same way.
+// Every spelling is refused like the call; a column of that name is refused
+// too, a deliberate over-refusal.
+TEST(MetadataAccess, ClickHouse268BareIdentityNamesAreRefused) {
+  const std::map<std::string, std::string> refused = {
+    {"SELECT arrayMap(currentSchemas, [true])", "currentSchemas"},
+    {"SELECT arrayMap(current_schemas, [true])", "current_schemas"},
+    {"SELECT arrayMap(CURRENTSCHEMAS, [true])", "CURRENTSCHEMAS"},
+    {"SELECT arrayMap(`currentSchemas`, [true])", "currentSchemas"},
+    {"SELECT arrayFilter(x -> has(x, 'a'), arrayMap(currentSchemas, [true]))", "currentSchemas"},
+    {"SELECT arrayMap(pgGetUserById, [toUInt32(0)])", "pgGetUserById"},
+    {"SELECT arrayMap(pg_get_userbyid, [1])", "pg_get_userbyid"},
+    {"SELECT a FROM tenant1.o WHERE has(arrayMap(currentSchemas, [true]), [s])", "currentSchemas"},
+    {"SELECT SESSION_USER", "SESSION_USER"},
+    {"SELECT session_user", "session_user"},
+    {"SELECT a FROM tenant1.o WHERE s = SESSION_USER", "SESSION_USER"},
+    {"SELECT currentRequestURL", "currentRequestURL"},
+    {"SELECT currentHandler", "currentHandler"},
+    {"SELECT current_schemas FROM tenant1.o", "current_schemas"},
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, name] : refused) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "function " + name + " is not accessible") << sql << " si=" << si;
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.table_rewrites_size(), 0) << sql;
+    }
+  }
+  // A bare function name that reveals nothing, a qualified column and a
+  // function whose bare name the server cannot call stay accepted.
+  for (const std::string sql : {"SELECT arrayMap(negate, [1, 2])", "SELECT arrayMap(toString, [a]) FROM tenant1.o",
+                                "SELECT o.currentSchemas FROM tenant1.o AS o", "SELECT pgTableIsVisible(1)",
+                                "SELECT arrayMap(pg_table_is_visible, [1])", "SELECT 'SESSION_USER'"}) {
+    const auto resp = rewrite(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << ": " << resp.message();
+  }
+}
+
+// ClickHouse 26.8's AI functions (aiGenerate, aiClassify, aiExtract,
+// aiTranslate, aiEmbed, aiFilter, aiRedact, aiSimilarity, and their AI*
+// aliases) send their text to an LLM provider (internal design doc
+// 2026-11-14 official ClickHouse switch, Step 5). They are generally
+// available (`allow_experimental_ai_functions` is obsolete) and take their
+// provider, endpoint and API key from the named collection the call's
+// `credentials` parameter or the `ai_function_*_default_credentials` setting
+// names; a SQL-created collection is admitted by default
+// (`ai_function_allow_sql_named_collections`). Whether a collection exists
+// that the one ClickHouse user every tenant shares may use is deployment
+// configuration the rewriter cannot see, and the server answers an unknown
+// name with `There is no named collection`, so every spelling is refused in
+// dynamic mode, as a call and as a higher-order function's bare argument.
+TEST(MetadataAccess, AIFunctionsAreRefusedInDynamicMode) {
+  const std::map<std::string, std::string> refused = {
+    {"SELECT aiGenerate('hi')", "aiGenerate"},
+    {"SELECT AIGenerate('hi')", "AIGenerate"},
+    {"SELECT aiClassify('x', ['a', 'b'])", "aiClassify"},
+    {"SELECT AIClassify('x', ['a', 'b'])", "AIClassify"},
+    {"SELECT aiExtract('x', 'name')", "aiExtract"},
+    {"SELECT AIExtract('x', 'name')", "AIExtract"},
+    {"SELECT aiTranslate('x', 'fr')", "aiTranslate"},
+    {"SELECT AITranslate('x', 'fr')", "AITranslate"},
+    {"SELECT aiEmbed('x')", "aiEmbed"},
+    {"SELECT AIEmbed('x')", "AIEmbed"},
+    {"SELECT aiFilter('x', 'is it')", "aiFilter"},
+    {"SELECT AIFilter('x', 'is it')", "AIFilter"},
+    {"SELECT aiRedact('x', ['email'])", "aiRedact"},
+    {"SELECT AIRedact('x', ['email'])", "AIRedact"},
+    {"SELECT aiSimilarity('x', 'y')", "aiSimilarity"},
+    {"SELECT AISimilarity('x', 'y')", "AISimilarity"},
+    {"SELECT `aiGenerate`('hi')", "aiGenerate"},
+    {"SELECT aigenerate('hi')", "aigenerate"},
+    {"SELECT aiGenerate('hi', map('credentials', 'c'))", "aiGenerate"},
+    {"SELECT a FROM tenant1.o WHERE aiFilter(s, 'cond')", "aiFilter"},
+    {"INSERT INTO tenant1.o (s) VALUES (aiGenerate('x'))", "aiGenerate"},
+    {"INSERT INTO tenant1.p SELECT aiGenerate(s) FROM tenant1.o", "aiGenerate"},
+    {"CREATE TABLE tenant1.n (a String DEFAULT aiGenerate('x')) ENGINE = Memory", "aiGenerate"},
+    {"CREATE VIEW tenant1.v AS SELECT aiGenerate(s) FROM tenant1.o", "aiGenerate"},
+    {"SELECT arrayMap(x -> aiGenerate(x), ['a'])", "aiGenerate"},
+    {"SELECT arrayMap(aiGenerate, ['x'])", "aiGenerate"},
+    {"SELECT arrayMap(AIEmbed, ['x'])", "AIEmbed"},
+    {"SELECT arrayFilter(aiFilter, ['a'], ['c'])", "aiFilter"},
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, name] : refused) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "function " + name + " is not accessible") << sql << " si=" << si;
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.table_rewrites_size(), 0) << sql;
+    }
+  }
+  // A string, a qualified column and a name that only starts like one are not calls.
+  for (const std::string sql : {"SELECT 'aiGenerate(1)'", "SELECT o.aiEmbed FROM tenant1.o AS o",
+                                "SELECT aiGenerated(1) FROM tenant1.o"}) {
+    const auto resp = rewrite(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << ": " << resp.message();
+  }
+  // Static mode keeps its legacy surface, as for the identity calls.
+  RewriteSQLRequest req;
+  req.set_sql("SELECT aiGenerate('hi')");
+  auto *opt = req.add_options();
+  opt->set_op(rewriter::RewriteOp::TableNameRewrite);
+  opt->mutable_table_name_args()->mutable_static_args();
+  EXPECT_EQ(run(req).code(), rewriter::RewriteCode::Success);
+}
+
 // ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
 // system tables a `_database` virtual column holding the physical database.
 TEST(MetadataAccess, DatabaseVirtualColumnIsRefusedInDynamicMode) {

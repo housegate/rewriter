@@ -341,8 +341,10 @@ std::optional<std::string> stringLiteral(const DB::ASTPtr &node) {
 bool isStringLookupName(const std::string &name) {
   const std::string lower = lowerName(name);
   if (lower == "joinget" || lower == "joingetornull") return true;
+  // ClickHouse 26.7's naiveBayesClassifier family reads the NAIVE_BAYES
+  // dictionary its first argument names, like dictGet.
   for (const char *prefix : {"dictget", "dicthas", "dictgethierarchy", "dictisin",
-         "dictgetchildren", "dictgetdescendants", "hascolumnintable"})
+         "dictgetchildren", "dictgetdescendants", "hascolumnintable", "naivebayesclassifier"})
     if (lower.rfind(prefix, 0) == 0) return true;
   return false;
 }
@@ -1495,6 +1497,12 @@ std::string stringLookupUnresolvedMessage(const std::string &function, const std
   return function + " target \"" + arg + "\" does not resolve through the caller's databases";
 }
 
+bool isExternalCallFunctionName(const std::string &name) {
+  static const std::set<std::string> external = {"aigenerate", "aiclassify", "aiextract", "aitranslate", "aiembed",
+    "aifilter", "airedact", "aisimilarity"};
+  return external.contains(lowerName(name));
+}
+
 std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
   // ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
   // current_database for currentDatabase; currentSchemas and current_schemas;
@@ -1527,13 +1535,23 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
     } else {
       continue;
     }
-    if (identity.contains(lowerName(name))) return name;
+    if (identity.contains(lowerName(name)) || isExternalCallFunctionName(name)) return name;
   }
   return std::nullopt;
 }
 
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast) {
-  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user"};
+  // currentDatabase / currentUser and the ClickHouse 26.6 / 26.8 functions
+  // that allow omitting their parentheses (session_user, currentRequestURL,
+  // currentHandler) are called by their bare name. Since 26.5 a bare function
+  // name as a higher-order function's first argument (`arrayMap(f, arr)`) is
+  // that function applied to the lambda arguments when it takes arguments:
+  // currentSchemas / current_schemas and pgGetUserById / pg_get_userbyid
+  // reveal the physical database and the shared user that way, and the AI
+  // functions call out (isExternalCallFunctionName).
+  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user",
+    "session_user", "currentrequesturl", "currenthandler", "currentschemas", "current_schemas", "pggetuserbyid",
+    "pg_get_userbyid"};
   if (!ast) return std::nullopt;
   std::vector<const DB::IAST *> stack{ast.get()};
   while (!stack.empty()) {
@@ -1541,7 +1559,7 @@ std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast
     stack.pop_back();
     if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
         id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && id->name_parts.size() == 1
-        && bare.contains(lowerName(id->name())))
+        && (bare.contains(lowerName(id->name())) || isExternalCallFunctionName(id->name())))
       return id->name();
     for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
       if (*it) stack.push_back(it->get());

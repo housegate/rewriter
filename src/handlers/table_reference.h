@@ -87,13 +87,27 @@ bool columnDeclarationHasSettings(const DB::ASTPtr &ast);
 // In dynamic mode the caller refuses an accepted statement holding one, last,
 // in both SI states, with deploymentIdentityCallMessage.
 std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql);
+// ClickHouse 26.8's AI functions (aiGenerate, aiClassify, aiExtract,
+// aiTranslate, aiEmbed, aiFilter, aiRedact, aiSimilarity; the AI* aliases
+// match case-insensitively): they send their text to the LLM provider of a
+// named collection, an outbound call no tenant policy governs. Refused like a
+// deployment-identity call, with the same message, as a call
+// (firstDeploymentIdentityCall) and as a bare name
+// (firstBareDeploymentIdentityName). rewriter-go engine.ExternalCallFunction.
+bool isExternalCallFunctionName(const std::string &name);
 // The first unqualified bare identifier, in pre-order over `ast` (a parsed,
 // registered tree, before any handler rewrites it), named case-insensitively
 // currentDatabase, current_database, currentUser or current_user: ClickHouse's
 // analyzer resolves these as the function when no column or alias of that
 // name is in scope (they allow omitting parentheses). The aliases user,
 // DATABASE and SCHEMA resolve the same way but are ordinary column names and
-// are left alone, a known residual. rewriter-go
+// are left alone, a known residual. The ClickHouse 26.6 / 26.8 functions that
+// allow omitting parentheses (session_user, currentRequestURL,
+// currentHandler) are matched too, and so are the names a 26.5+ higher-order
+// function applies when written bare as its first argument
+// (`arrayMap(currentSchemas, [true])`): currentSchemas, current_schemas,
+// pgGetUserById, pg_get_userbyid and the AI functions. A column of one of
+// these names is refused too, deliberately. rewriter-go
 // engine.FirstDeploymentIdentityName (its AST walk).
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast);
 std::string deploymentIdentityCallMessage(const std::string &name);
@@ -290,8 +304,9 @@ bool rejectShowBody(const DB::IAST &show, const std::string &sql,
                     const rewriter::RewriteTableDynamicArgs *dynamic,
                     rewriter::RewriteSQLResponse *response);
 
-// joinGet / joinGetOrNull and the dictGet / dictHas / … / hasColumnInTable
-// families (rewriter-go IsStringLookup), matched case-insensitively.
+// joinGet / joinGetOrNull and the dictGet / dictHas / … / hasColumnInTable /
+// naiveBayesClassifier families (rewriter-go IsStringLookup), matched
+// case-insensitively.
 bool isStringLookupFunction(const std::string &name);
 
 // rewriter-go OpaqueInsertQueryText: for an INSERT whose column list is
