@@ -225,6 +225,85 @@ TEST(MetadataAccess, AIFunctionsAreRefusedInDynamicMode) {
   EXPECT_EQ(run(req).code(), rewriter::RewriteCode::Success);
 }
 
+// Step 5 fix round 1 (internal design doc 2026-11-14 official ClickHouse
+// switch): the other routes to a bare refused name, each measured on
+// 26.8.37.168. An `APPLY(f)` column transformer calls f on every column
+// (`SELECT * APPLY(pgGetUserById) FROM (SELECT toUInt32(0) AS a)` returns the
+// shared user) and keeps f as a string, not an identifier. An INSERT's
+// inline Values text is raw bytes the Values reader evaluates
+// (`INSERT INTO t (s) VALUES (SESSION_USER)`, with or without SETTINGS,
+// stores the shared user). The opaque positions rewriter-go reads as text
+// (INSERT … SETTINGS … SELECT, ALTER … UPDATE, a column DEFAULT in ALTER)
+// were already refused here and are pinned for parity, with the pre-existing
+// bare currentUser / currentDatabase. The other identity names and the
+// string-lookup names are refused bare for one rule (measured not callable
+// bare). An Identifier query parameter in an expression is substituted before
+// analysis (`SELECT {f:Identifier}` with f = session_user returns the shared
+// user) and the request carries no values: `statement is not supported`.
+TEST(MetadataAccess, ClickHouse268FixRoundOneRoutesAreRefused) {
+  const std::vector<std::pair<std::string, std::string>> refused = {
+    {"SELECT * APPLY(aiGenerate) FROM tenant1.o", "aiGenerate"},
+    {"SELECT COLUMNS('s') APPLY aiEmbed FROM tenant1.o", "aiEmbed"},
+    {"SELECT COLUMNS('a') APPLY(pgGetUserById) FROM tenant1.o", "pgGetUserById"},
+    {"SELECT COLUMNS('a') APPLY currentSchemas FROM tenant1.o", "currentSchemas"},
+    {"SELECT * APPLY(currentDatabase) FROM tenant1.o", "currentDatabase"},
+    {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 SELECT arrayMap(currentSchemas, [true])", "currentSchemas"},
+    {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 SELECT arrayMap(aiGenerate, ['x'])", "aiGenerate"},
+    {"ALTER TABLE tenant1.o UPDATE s = toString(arrayMap(aiGenerate, ['x'])) WHERE 1", "aiGenerate"},
+    {"ALTER TABLE tenant1.o UPDATE s = SESSION_USER WHERE 1", "SESSION_USER"},
+    {"ALTER TABLE tenant1.o MODIFY COLUMN s String DEFAULT SESSION_USER", "SESSION_USER"},
+    {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 VALUES (SESSION_USER)", "SESSION_USER"},
+    {"INSERT INTO tenant1.o (s) VALUES (SESSION_USER)", "SESSION_USER"},
+    {"INSERT INTO tenant1.o (s) VALUES ('a'), (`session_user`)", "session_user"},
+    {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 SELECT currentDatabase", "currentDatabase"},
+    {"ALTER TABLE tenant1.o UPDATE s = currentUser WHERE 1", "currentUser"},
+    {"ALTER TABLE tenant1.o MODIFY COLUMN s String DEFAULT currentDatabase", "currentDatabase"},
+    {"INSERT INTO tenant1.o (s) SETTINGS max_threads = 1 VALUES (currentUser)", "currentUser"},
+    {"INSERT INTO tenant1.o (s) VALUES (current_user)", "current_user"},
+    {"SELECT arrayMap(hostName, ['x'])", "hostName"},
+    {"SELECT arrayMap(FQDN, ['x'])", "FQDN"},
+    {"SELECT arrayMap(fullHostName, ['x'])", "fullHostName"},
+    {"SELECT arrayMap(serverUUID, ['x'])", "serverUUID"},
+    {"SELECT arrayMap(authenticatedUser, ['x'])", "authenticatedUser"},
+    {"SELECT authUser", "authUser"},
+    {"SELECT hostName", "hostName"},
+    {"SELECT arrayMap(getMacro, ['x'])", "getMacro"},
+    {"SELECT arrayMap(dictGet, ['d'], ['a'], [1])", "dictGet"},
+    {"SELECT arrayMap(joinGet, ['t'], ['a'], [1])", "joinGet"},
+    {"SELECT arrayMap(hasColumnInTable, ['db'], ['t'], ['a'])", "hasColumnInTable"},
+    {"SELECT arrayMap(naiveBayesClassifier, ['d'], ['t'])", "naiveBayesClassifier"},
+  };
+  const std::vector<std::string> parameters = {
+    "SELECT arrayMap({f:Identifier}, ['x'])",
+    "SELECT {f:Identifier}",
+    "SELECT {f:Identifier} FROM tenant1.o",
+    "SELECT a FROM tenant1.o WHERE s = {f:Identifier}",
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, name] : refused) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "function " + name + " is not accessible") << sql << " si=" << si;
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+      EXPECT_EQ(resp.table_rewrites_size(), 0) << sql;
+    }
+    for (const auto &sql : parameters) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << sql << " si=" << si;
+      EXPECT_EQ(resp.message(), "statement is not supported") << sql << " si=" << si;
+      EXPECT_EQ(resp.sql_after_rewrite(), sql);
+    }
+    // Accepted: an ordinary APPLY, a String parameter, a qualified name, and
+    // the user / database aliases (the documented residual).
+    for (const std::string sql : {"SELECT * APPLY(toString) FROM tenant1.o", "SELECT {v:String}",
+                                  "SELECT t.hostName FROM tenant1.t AS t", "SELECT user, database FROM tenant1.t",
+                                  "INSERT INTO tenant1.o (s) VALUES ('hostName')"}) {
+      const auto resp = rewrite(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << sql << " si=" << si << ": " << resp.message();
+    }
+  }
+}
+
 // ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
 // system tables a `_database` virtual column holding the physical database.
 TEST(MetadataAccess, DatabaseVirtualColumnIsRefusedInDynamicMode) {

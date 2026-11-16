@@ -1503,18 +1503,49 @@ bool isExternalCallFunctionName(const std::string &name) {
   return external.contains(lowerName(name));
 }
 
-std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
-  // ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
-  // current_database for currentDatabase; currentSchemas and current_schemas;
-  // user and current_user for currentUser; fullHostName for FQDN.
+namespace {
+
+// ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
+// current_database for currentDatabase; currentSchemas and current_schemas;
+// user and current_user for currentUser; fullHostName for FQDN.
+// authenticatedUser (alias authUser) returns the physical user too. ClickHouse
+// 26.8: pgGetUserById returns the session's initial user; currentRequestURL /
+// currentHandler name the gateway's HTTP request.
+bool isDeploymentIdentityFunctionName(const std::string &name) {
   static const std::set<std::string> identity = {"currentdatabase", "database", "schema", "current_database",
     "currentschemas", "current_schemas", "currentuser", "user", "current_user", "session_user", "hostname",
-    "fqdn", "fullhostname", "serveruuid", "getmacro",
-    // authenticatedUser (alias authUser) returns the physical user too.
-    "authenticateduser", "authuser",
-    // ClickHouse 26.8: pgGetUserById returns the session's initial user;
-    // currentRequestURL / currentHandler name the gateway's HTTP request.
+    "fqdn", "fullhostname", "serveruuid", "getmacro", "authenticateduser", "authuser",
     "pggetuserbyid", "pg_get_userbyid", "currentrequesturl", "currenthandler"};
+  return identity.contains(lowerName(name));
+}
+
+// A name refused when it appears bare (not followed by a call's parentheses).
+// currentDatabase / currentUser and the ClickHouse 26.6 / 26.8 functions that
+// allow omitting their parentheses (session_user, currentRequestURL,
+// currentHandler) are called by their bare name. Since 26.5 a bare function
+// name as a higher-order function's first argument (`arrayMap(f, arr)`) is
+// that function applied to the lambda arguments when it takes arguments:
+// currentSchemas / current_schemas and pgGetUserById / pg_get_userbyid
+// reveal the physical database and the shared user that way, and the AI
+// functions call out (isExternalCallFunctionName). The other identity
+// functions were measured on 26.8.37.168 as not callable bare: hostName,
+// FQDN, fullHostName, serverUUID, authenticatedUser and authUser take no
+// argument and do not allow omitting parentheses (`SELECT hostName` and
+// `arrayMap(hostName, ['x'])` are UNKNOWN_IDENTIFIER), and getMacro and the
+// string lookups need a constant argument a lambda cannot supply
+// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN, `arrayMap(dictGet, …)`
+// ILLEGAL_TYPE_OF_ARGUMENT); they are refused bare anyway, for one rule. The
+// column-name aliases user, database and schema stay accepted bare (a known
+// residual). A column of a refused name is refused too, deliberately.
+bool isBareRefusedName(const std::string &name) {
+  const std::string lower = lowerName(name);
+  if (lower == "user" || lower == "database" || lower == "schema") return false;
+  return isDeploymentIdentityFunctionName(name) || isExternalCallFunctionName(name) || isStringLookupName(name);
+}
+
+} // namespace
+
+std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
   std::vector<DB::Token> tokens;
   significantTokens(sql, tokens);  // a lexer error leaves the tokens before it
   for (size_t i = 0; i + 1 < tokens.size(); ++i) {
@@ -1535,36 +1566,76 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
     } else {
       continue;
     }
-    if (identity.contains(lowerName(name)) || isExternalCallFunctionName(name)) return name;
+    if (isDeploymentIdentityFunctionName(name) || isExternalCallFunctionName(name)) return name;
   }
   return std::nullopt;
 }
 
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast) {
-  // currentDatabase / currentUser and the ClickHouse 26.6 / 26.8 functions
-  // that allow omitting their parentheses (session_user, currentRequestURL,
-  // currentHandler) are called by their bare name. Since 26.5 a bare function
-  // name as a higher-order function's first argument (`arrayMap(f, arr)`) is
-  // that function applied to the lambda arguments when it takes arguments:
-  // currentSchemas / current_schemas and pgGetUserById / pg_get_userbyid
-  // reveal the physical database and the shared user that way, and the AI
-  // functions call out (isExternalCallFunctionName).
-  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user",
-    "session_user", "currentrequesturl", "currenthandler", "currentschemas", "current_schemas", "pggetuserbyid",
-    "pg_get_userbyid"};
   if (!ast) return std::nullopt;
+  // A statement's own target names (`CREATE TABLE hostName …`) are object
+  // names, not expressions.
+  std::set<const DB::IAST *> targets;
+  if (const auto *q = dynamic_cast<const DB::ASTQueryWithTableAndOutput *>(ast.get())) {
+    targets.insert(q->table.get());
+    targets.insert(q->database.get());
+  }
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    targets.insert(insert->table.get());
+    targets.insert(insert->database.get());
+  }
   std::vector<const DB::IAST *> stack{ast.get()};
   while (!stack.empty()) {
     const DB::IAST *node = stack.back();
     stack.pop_back();
     if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
         id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && id->name_parts.size() == 1
-        && (bare.contains(lowerName(id->name())) || isExternalCallFunctionName(id->name())))
+        && !targets.contains(node) && isBareRefusedName(id->name()))
       return id->name();
+    // `* APPLY(f)` / `COLUMNS(…) APPLY f` calls f on every column; its name
+    // is a plain string, not an identifier (measured on 26.8.37.168:
+    // `SELECT * APPLY(pgGetUserById) FROM (SELECT toUInt32(0) AS a)` returns
+    // the shared user). A lookup name there is T6's (findApplyLookup).
+    if (const auto *apply = node->as<DB::ASTColumnsApplyTransformer>();
+        apply && !apply->lambda && (isDeploymentIdentityFunctionName(apply->func_name)
+                                    || isExternalCallFunctionName(apply->func_name)))
+      return apply->func_name;
     for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
       if (*it) stack.push_back(it->get());
   }
+  // An INSERT's inline Values text, which the parser keeps as raw bytes: the
+  // Values reader evaluates its expressions (measured: `INSERT INTO t (s)
+  // VALUES (SESSION_USER)` and the same with a SETTINGS clause store the
+  // shared user). Read as tokens, a bare word or quoted identifier not next
+  // to a `.`.
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    const char *begin = nullptr;
+    const char *end = nullptr;
+    if (insertValuesText(*insert, &begin, &end)) {
+      std::vector<DB::Token> tokens;
+      significantTokens(std::string_view(begin, static_cast<size_t>(end - begin)), tokens);
+      for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0 && tokens[i - 1].type == DB::TokenType::Dot) continue;
+        if (i + 1 < tokens.size() && tokens[i + 1].type == DB::TokenType::Dot) continue;
+        std::string name;
+        if (tokens[i].type == DB::TokenType::BareWord) {
+          name.assign(tokens[i].begin, tokens[i].end);
+        } else if (tokens[i].type == DB::TokenType::QuotedIdentifier) {
+          const auto decoded = decodeIdentifierToken(tokens[i]);
+          if (!decoded) continue;
+          name = *decoded;
+        } else {
+          continue;
+        }
+        if (isBareRefusedName(name)) return name;
+      }
+    }
+  }
   return std::nullopt;
+}
+
+bool hasIdentifierQueryParameter(const DB::ASTPtr &ast) {
+  return ast && anyIdentifierSubstitution(*ast);
 }
 
 std::string deploymentIdentityCallMessage(const std::string &name) {

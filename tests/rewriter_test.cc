@@ -6352,10 +6352,20 @@ TEST(TableRefParam, PreflightSeesEveryTableOfAMultiTableDrop) {
   EXPECT_FALSE(rewriter_handlers::preflightTableReferences(ast, &req, &resp));
 }
 
-TEST(TableRefParam, ValueAndColumnParametersStayAllowed) {
-  for (const char *sql : {"SELECT * FROM db1.o WHERE a = {v:UInt64}", "SELECT {c:Identifier} FROM db1.o"}) {
+// A value parameter stays allowed. An Identifier parameter in an expression
+// used to be allowed as a column; ClickHouse 26.8 substitutes it before
+// analysis, so it can name a function the request does not show (`SELECT
+// {f:Identifier}` with f = session_user returns the shared user), and since
+// Step 5 fix round 1 (internal design doc 2026-11-14 official ClickHouse
+// switch) it is refused, `statement is not supported`, after the other checks.
+TEST(TableRefParam, ValueParametersStayAllowedIdentifierExpressionsAreRefused) {
+  EXPECT_EQ(RunTableRef("SELECT * FROM db1.o WHERE a = {v:UInt64}").code(), rewriter::RewriteCode::Success);
+  for (const char *sql : {"SELECT {c:Identifier} FROM db1.o", "UPDATE db1.o SET b = {c:Identifier} WHERE 1"}) {
     SCOPED_TRACE(sql);
-    EXPECT_EQ(RunTableRef(sql).code(), rewriter::RewriteCode::Success);
+    const auto resp = RunTableRef(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
   }
 }
 
@@ -9298,7 +9308,6 @@ TEST(TableRefUngoverned, MutationsCreateExpressionsFollowRewriterGo) {
     for (const char *sql : {
            "DELETE FROM db1.o WHERE a IN (SELECT a FROM values('a UInt8', 1))",
            "UPDATE db1.o SET b = (SELECT count() FROM VALUES('a UInt8', 1)) WHERE 1",
-           "UPDATE db1.o SET b = {c:Identifier} WHERE 1",
            "DELETE FROM db1.o WHERE a IN numbers(3)",
            "DELETE FROM db1.o WHERE a IN -`db2.x`",
            "DELETE FROM db1.o WHERE a IN (1 AS z)",

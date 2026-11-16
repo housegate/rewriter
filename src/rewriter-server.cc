@@ -436,6 +436,8 @@ void RewriterServiceImpl::doRewrite(
       ? rewriter_handlers::firstBareDeploymentIdentityName(ast) : std::nullopt;
     const auto identity_column = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
       ? rewriter_handlers::firstDeploymentIdentityColumn(ast) : std::nullopt;
+    const bool identifier_parameter = si_selection.mode == rewriter_handlers::TableRewriteMode::Dynamic
+      && rewriter_handlers::hasIdentifierQueryParameter(ast);
 
     [&]() {
       if (rewriter_handlers::handleUseQuery(ast, request, response)) return;
@@ -519,6 +521,11 @@ void RewriterServiceImpl::doRewrite(
       else if (identity_column)
         refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                                 rewriter_handlers::deploymentIdentityColumnMessage(*identity_column));
+      // An Identifier query parameter outside a database or table position
+      // (T2 refused those) is a name the request does not show.
+      else if (identifier_parameter)
+        refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                                std::string(rewriter_handlers::kUnsupportedStatementMessage));
     }
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real

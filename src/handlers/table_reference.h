@@ -107,9 +107,24 @@ bool isExternalCallFunctionName(const std::string &name);
 // function applies when written bare as its first argument
 // (`arrayMap(currentSchemas, [true])`): currentSchemas, current_schemas,
 // pgGetUserById, pg_get_userbyid and the AI functions. A column of one of
-// these names is refused too, deliberately. rewriter-go
-// engine.FirstDeploymentIdentityName (its AST walk).
+// these names is refused too, deliberately, and so, for one rule, are the
+// other identity names and the string-lookup names (measured not callable
+// bare; see isBareRefusedName); the aliases user, database and schema are not.
+// An `APPLY(f)` column transformer naming an identity or AI function is
+// returned too (its name is a string, not an identifier), and so is a bare
+// refused name in an INSERT's inline Values text. rewriter-go
+// engine.FirstDeploymentIdentityName (its AST walk and opaque-text scan).
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast);
+// Whether `ast` holds an Identifier query parameter (`{f:Identifier}`) in any
+// position. ClickHouse substitutes it before analysis, so in an expression it
+// is a bare name the request's SQL does not show (measured on 26.8.37.168:
+// `SELECT {f:Identifier}` with f = session_user returns the shared user, and
+// `arrayMap({f:Identifier}, [true])` with f = currentSchemas the physical
+// database), and the request carries no parameter values. In dynamic mode the
+// caller refuses an accepted statement holding one with `statement is not
+// supported`, after the identity checks (T2 refuses a database or table
+// position earlier). rewriter-go engine.IdentifierParameterInText.
+bool hasIdentifierQueryParameter(const DB::ASTPtr &ast);
 std::string deploymentIdentityCallMessage(const std::string &name);
 // ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
 // system tables a `_database` virtual column holding the physical database
