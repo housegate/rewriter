@@ -11819,10 +11819,18 @@ TEST(TableRefFidelity, ExplainAndTypeArgReadsAreRefused) {
 
 // ClickHouse 26.8 shapes inside admitted statement classes that no handler
 // models are refused with T7 in both SI states before any name is examined
-// (unmodelledClickHouse268Shape): a STREAM table expression at any depth,
-// the fork's privileged `MODIFY SENTIO BINARY TYPE ORIGIN` registration, and
-// `DESCRIBE TEMPORARY TABLE`. The same statements without the 26.8 clause
-// keep their ordinary answers.
+// (unmodelledClickHouse268Shape): a STREAM table expression at any depth, a
+// LOCAL or NATURAL join, a MergeTree UNIQUE KEY and `DESCRIBE TEMPORARY
+// TABLE`. The same statements without the 26.8 clause keep their ordinary
+// answers.
+//
+// A bare `local` after a table expression is not a LOCAL join: upstream
+// ClickHouse 26.8.37.168 reads it as the table's alias (`EXPLAIN SYNTAX`
+// prints `numbers(3) AS local ALL INNER JOIN ...`), and the backends run the
+// same parser, so the rewriter answers it as the ordinary aliased join.
+//
+// `ALTER ... MODIFY SENTIO BINARY TYPE ORIGIN` is not ClickHouse syntax; it
+// stays a fail-closed regression: a syntax error that names no table.
 TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
@@ -11837,12 +11845,8 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
            "SELECT a FROM db1.t STREAM",
            "INSERT INTO db1.q SELECT a FROM db1.o STREAM",
            "CREATE VIEW db1.v AS SELECT a FROM db1.o STREAM",
-           "ALTER TABLE db1.o MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
-           "ALTER TABLE db1.t MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
-           "ALTER TABLE db1.o MODIFY COMMENT 'c', MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
            "DESCRIBE TEMPORARY TABLE o",
            "DESC TEMPORARY TABLE o",
-           "SELECT * FROM numbers(3) local JOIN db1.o ON number = a",
            "SELECT * FROM db1.o AS x LOCAL JOIN db1.p AS y ON x.a = y.a",
            "SELECT * FROM db1.o AS x NATURAL JOIN db1.p AS y",
            "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o AS x LOCAL JOIN db1.p AS y USING (a))",
@@ -11856,6 +11860,30 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
       EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
       EXPECT_EQ(resp.sql_after_rewrite(), sql);
       EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+    for (const std::string sql : {
+           "ALTER TABLE db1.o MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.t MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.o MODIFY COMMENT 'c', MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::SyntaxError);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+    // A bare `local` alias, and the same join with an explicit alias.
+    for (const std::string sql : {
+           "SELECT * FROM numbers(3) local JOIN db1.o ON number = a",
+           "SELECT * FROM numbers(3) AS local JOIN db1.o ON number = a",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(),
+                "SELECT * FROM numbers(3) AS local INNER JOIN phys.`db1.o` AS `db1.o` ON number = a");
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "db1");
+      EXPECT_EQ(resp.original_accessed_tables(0).original_table(), "o");
     }
     for (const std::string sql : {
            "SELECT a FROM db1.o",

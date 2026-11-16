@@ -119,12 +119,13 @@ bool anyStreamTableExpression(const DB::IAST &node) {
   return found;
 }
 
-// A `LOCAL` or `NATURAL` join. ClickHouse 26.8 reads `LOCAL` / `NATURAL`
-// after a table expression as join keywords and prints them, where 25.8 and
-// 26.3 read a bare `local` / `natural` there as the table's alias (and 26.3
-// printed no LOCAL): `FROM numbers(3) local JOIN t` would reach such a backend
-// as `numbers(3) AS local` and a plain join. A NATURAL join has no ON / USING
-// those servers accept.
+// A `LOCAL` or `NATURAL` join. ClickHouse 26.8 reads `LOCAL` after an
+// aliased table expression (`t AS x LOCAL JOIN u`) and `NATURAL` as join
+// keywords and prints them, which no backend before 26.8 reads the same way.
+// A bare `local` straight after a table expression (`FROM numbers(3) local
+// JOIN t`) is the table's alias in upstream 26.8 as in 25.8 / 26.3, so it
+// parses to a plain join and is not refused here. A NATURAL join has no ON /
+// USING those servers accept.
 bool anyLocalOrNaturalJoin(const DB::IAST &node) {
   if (const auto *join = node.as<DB::ASTTableJoin>();
       join && (join->locality == DB::JoinLocality::Local || join->is_natural))
