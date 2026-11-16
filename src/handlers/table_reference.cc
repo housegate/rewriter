@@ -163,17 +163,6 @@ bool unmodelledClickHouse268Shape(const DB::IAST &ast) {
         return true;
     }
   }
-  // `ALTER TABLE … MODIFY SENTIO BINARY TYPE ORIGIN '…'`: the fork's
-  // privileged one-time registration of how a table's stored binary type
-  // headers are read. Every tenant reaches ClickHouse as one shared user, so
-  // ClickHouse's privilege check separates nothing; a tenant must never
-  // issue it.
-  if (const auto *alter = ast.as<DB::ASTAlterQuery>(); alter && alter->command_list) {
-    for (const auto &child : alter->command_list->children) {
-      const auto *command = child ? child->as<DB::ASTAlterCommand>() : nullptr;
-      if (command && command->type == DB::ASTAlterCommand::MODIFY_SENTIO_BINARY_TYPE_ORIGIN) return true;
-    }
-  }
   // `DESCRIBE TEMPORARY TABLE t` names a session temporary table, which the
   // DESCRIBE handler would resolve as a table of the session database.
   if (const auto *describe = ast.as<DB::ASTDescribeQuery>(); describe && describe->temporary) return true;

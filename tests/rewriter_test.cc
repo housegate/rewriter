@@ -2124,22 +2124,13 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
 }
 
 // ============================================================================
-// ClickHouse 26.3 dependency coverage — Decimal512 syntax.
+// Decimal512 syntax pass-through.
 //
-// Parser-only SQL tests cannot prove that Decimal512 is implemented: ClickHouse
-// accepts unknown type and function names syntactically. The first test therefore
-// references the fork-only C++ type directly; compiling this test is the actual
-// dependency-pin guard. The SQL cases protect the rewriter-facing syntax paths.
+// The rewriter links upstream ClickHouse, which has no Decimal512 type; the
+// parser accepts unknown type and function names syntactically, so these
+// statements still reach the rewrite paths unchanged. Whether the type exists
+// is the backend's decision, not the rewriter's.
 // ============================================================================
-
-TEST(ClickHouseDependency, Decimal512TypeIsAvailable) {
-  DB::DataTypeDecimal512 type(/*precision=*/154, /*scale=*/18);
-
-  EXPECT_EQ(type.getTypeId(), DB::TypeIndex::Decimal512);
-  EXPECT_EQ(type.getPrecision(), 154u);
-  EXPECT_EQ(type.getScale(), 18u);
-  EXPECT_EQ(DB::DataTypeDecimal512::maxPrecision(), 154u);
-}
 
 TEST(ClickHouseDependency, Decimal512SelectParsesSuccessfully) {
   auto resp = RunNoOptions(
