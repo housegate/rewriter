@@ -155,8 +155,8 @@ jobs:
           fi
           # One persistent ClickHouse checkout per gitlink, created on first
           # use, so a submodule bump never moves another commit's tree (or a
-          # developer's). Only the fork is ever fetched into it.
-          clickhouse_remote=https://github.com/sentioxyz/ClickHouse.git
+          # developer's). Only upstream ClickHouse is ever fetched into it.
+          clickhouse_remote=https://github.com/ClickHouse/ClickHouse.git
           clickhouse_root=$HOME/ci/clickhouse
           shared_clickhouse=$clickhouse_root/$expected_clickhouse
           if [ ! -d "$shared_clickhouse/.git" ] || [ -L "$shared_clickhouse" ]; then
@@ -168,7 +168,7 @@ jobs:
             mv "$staging" "$shared_clickhouse"
           fi
           if [ "$(git -C "$shared_clickhouse" remote get-url origin)" != "$clickhouse_remote" ]; then
-            echo 'error: the ClickHouse checkout does not fetch from the fork' >&2
+            echo 'error: the ClickHouse checkout does not fetch from upstream ClickHouse' >&2
             exit 1
           fi
           if [ ! -L clickHouse ] || [ "$(readlink -f clickHouse)" != "$shared_clickhouse" ]; then

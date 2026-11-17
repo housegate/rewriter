@@ -119,12 +119,13 @@ bool anyStreamTableExpression(const DB::IAST &node) {
   return found;
 }
 
-// A `LOCAL` or `NATURAL` join. ClickHouse 26.8 reads `LOCAL` / `NATURAL`
-// after a table expression as join keywords and prints them, where 25.8 and
-// 26.3 read a bare `local` / `natural` there as the table's alias (and 26.3
-// printed no LOCAL): `FROM numbers(3) local JOIN t` would reach such a backend
-// as `numbers(3) AS local` and a plain join. A NATURAL join has no ON / USING
-// those servers accept.
+// A `LOCAL` or `NATURAL` join. ClickHouse 26.8 reads `LOCAL` after an
+// aliased table expression (`t AS x LOCAL JOIN u`) and `NATURAL` as join
+// keywords and prints them, which no backend before 26.8 reads the same way.
+// A bare `local` straight after a table expression (`FROM numbers(3) local
+// JOIN t`) is the table's alias in upstream 26.8 as in 25.8 / 26.3, so it
+// parses to a plain join and is not refused here. A NATURAL join has no ON /
+// USING those servers accept.
 bool anyLocalOrNaturalJoin(const DB::IAST &node) {
   if (const auto *join = node.as<DB::ASTTableJoin>();
       join && (join->locality == DB::JoinLocality::Local || join->is_natural))
@@ -161,17 +162,6 @@ bool unmodelledClickHouse268Shape(const DB::IAST &ast) {
     for (const auto &target : create->targets->targets) {
       if ((target.kind != DB::ViewTarget::To && target.kind != DB::ViewTarget::Inner) || target.inner_columns)
         return true;
-    }
-  }
-  // `ALTER TABLE … MODIFY SENTIO BINARY TYPE ORIGIN '…'`: the fork's
-  // privileged one-time registration of how a table's stored binary type
-  // headers are read. Every tenant reaches ClickHouse as one shared user, so
-  // ClickHouse's privilege check separates nothing; a tenant must never
-  // issue it.
-  if (const auto *alter = ast.as<DB::ASTAlterQuery>(); alter && alter->command_list) {
-    for (const auto &child : alter->command_list->children) {
-      const auto *command = child ? child->as<DB::ASTAlterCommand>() : nullptr;
-      if (command && command->type == DB::ASTAlterCommand::MODIFY_SENTIO_BINARY_TYPE_ORIGIN) return true;
     }
   }
   // `DESCRIBE TEMPORARY TABLE t` names a session temporary table, which the
@@ -351,8 +341,10 @@ std::optional<std::string> stringLiteral(const DB::ASTPtr &node) {
 bool isStringLookupName(const std::string &name) {
   const std::string lower = lowerName(name);
   if (lower == "joinget" || lower == "joingetornull") return true;
+  // ClickHouse 26.7's naiveBayesClassifier family reads the NAIVE_BAYES
+  // dictionary its first argument names, like dictGet.
   for (const char *prefix : {"dictget", "dicthas", "dictgethierarchy", "dictisin",
-         "dictgetchildren", "dictgetdescendants", "hascolumnintable"})
+         "dictgetchildren", "dictgetdescendants", "hascolumnintable", "naivebayesclassifier"})
     if (lower.rfind(prefix, 0) == 0) return true;
   return false;
 }
@@ -1505,18 +1497,64 @@ std::string stringLookupUnresolvedMessage(const std::string &function, const std
   return function + " target \"" + arg + "\" does not resolve through the caller's databases";
 }
 
-std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
-  // ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
-  // current_database for currentDatabase; currentSchemas and current_schemas;
-  // user and current_user for currentUser; fullHostName for FQDN.
+bool isExternalCallFunctionName(const std::string &name) {
+  static const std::set<std::string> external = {"aigenerate", "aiclassify", "aiextract", "aitranslate", "aiembed",
+    "aifilter", "airedact", "aisimilarity"};
+  return external.contains(lowerName(name));
+}
+
+namespace {
+
+bool tokensHoldIdentifierParameter(const std::vector<DB::Token> &tokens);
+
+// ClickHouse 26.3 / 26.8 registrations and aliases: DATABASE, SCHEMA and
+// current_database for currentDatabase; currentSchemas and current_schemas;
+// user and current_user for currentUser; fullHostName for FQDN.
+// authenticatedUser (alias authUser) returns the physical user too. ClickHouse
+// 26.8: pgGetUserById returns the session's initial user; currentRequestURL /
+// currentHandler name the gateway's HTTP request.
+bool isDeploymentIdentityFunctionName(const std::string &name) {
   static const std::set<std::string> identity = {"currentdatabase", "database", "schema", "current_database",
     "currentschemas", "current_schemas", "currentuser", "user", "current_user", "session_user", "hostname",
-    "fqdn", "fullhostname", "serveruuid", "getmacro",
-    // authenticatedUser (alias authUser) returns the physical user too.
-    "authenticateduser", "authuser",
-    // ClickHouse 26.8: pgGetUserById returns the session's initial user;
-    // currentRequestURL / currentHandler name the gateway's HTTP request.
+    "fqdn", "fullhostname", "serveruuid", "getmacro", "authenticateduser", "authuser",
     "pggetuserbyid", "pg_get_userbyid", "currentrequesturl", "currenthandler"};
+  return identity.contains(lowerName(name));
+}
+
+// A name refused when it appears bare (not followed by a call's parentheses):
+// only the names a ClickHouse 26.8.37.168 server calls by a bare name, plus
+// every AI function. currentDatabase / currentUser and the 26.6 / 26.8
+// functions that allow omitting their parentheses (session_user,
+// currentRequestURL, currentHandler) are called by their bare name. Since 26.5
+// a bare function name as a higher-order function's first argument
+// (`arrayMap(f, arr)`) is that function applied to the lambda arguments when
+// it takes arguments: currentSchemas / current_schemas and pgGetUserById /
+// pg_get_userbyid reveal the physical database and the shared user that way,
+// and the AI functions call out (isExternalCallFunctionName).
+//
+// Measured NOT callable bare on 26.8.37.168, so left out (a column of that
+// name stays an ordinary column; their call form `name(...)` is still
+// refused): hostName, FQDN, fullHostName, serverUUID, authenticatedUser,
+// authUser (`SELECT hostName` and `arrayMap(hostName, ['x'])` are
+// UNKNOWN_IDENTIFIER: no argument, parentheses not optional); getMacro
+// (`arrayMap(getMacro, ['x'])` is ILLEGAL_COLUMN: the argument must be a
+// constant String); joinGet, dictGet*, hasColumnInTable,
+// naiveBayesClassifier* (`arrayMap(dictGet, ['d'], ['a'], [1])` is
+// ILLEGAL_TYPE_OF_ARGUMENT, `arrayMap(dictGetString, …)` and
+// `arrayMap(naiveBayesClassifier, …)` ILLEGAL_COLUMN: the target must be a
+// constant). Re-measure on a ClickHouse bump. The column-name aliases user,
+// database and schema stay accepted bare (a known residual). A column of a
+// refused name is refused too, deliberately.
+bool isBareRefusedName(const std::string &name) {
+  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user",
+    "session_user", "currentrequesturl", "currenthandler", "currentschemas", "current_schemas", "pggetuserbyid",
+    "pg_get_userbyid"};
+  return bare.contains(lowerName(name)) || isExternalCallFunctionName(name);
+}
+
+} // namespace
+
+std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
   std::vector<DB::Token> tokens;
   significantTokens(sql, tokens);  // a lexer error leaves the tokens before it
   for (size_t i = 0; i + 1 < tokens.size(); ++i) {
@@ -1537,26 +1575,101 @@ std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql) {
     } else {
       continue;
     }
-    if (identity.contains(lowerName(name))) return name;
+    if (isDeploymentIdentityFunctionName(name) || isExternalCallFunctionName(name)) return name;
   }
   return std::nullopt;
 }
 
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast) {
-  static const std::set<std::string> bare = {"currentdatabase", "current_database", "currentuser", "current_user"};
   if (!ast) return std::nullopt;
+  // A statement's own target names (`CREATE TABLE session_user …`,
+  // `INSERT INTO current_user …`) are object names, not expressions.
+  std::set<const DB::IAST *> targets;
+  if (const auto *q = dynamic_cast<const DB::ASTQueryWithTableAndOutput *>(ast.get())) {
+    targets.insert(q->table.get());
+    targets.insert(q->database.get());
+  }
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    targets.insert(insert->table.get());
+    targets.insert(insert->database.get());
+  }
   std::vector<const DB::IAST *> stack{ast.get()};
   while (!stack.empty()) {
     const DB::IAST *node = stack.back();
     stack.pop_back();
+    // The column, index, constraint and projection an ALTER action names
+    // (`DROP COLUMN session_user`, `RENAME COLUMN session_user TO s2`,
+    // `ADD COLUMN c AFTER session_user`) are object names too, as a column
+    // declaration's name already is (rewriter-go reads them the same way).
+    if (const auto *command = node->as<DB::ASTAlterCommand>()) {
+      for (const DB::IAST *name : {command->column, command->rename_to, command->index, command->constraint,
+                                   command->projection})
+        if (name) targets.insert(name);
+    }
     if (const auto *id = dynamic_cast<const DB::ASTIdentifier *>(node);
         id && !dynamic_cast<const DB::ASTTableIdentifier *>(node) && !id->isParam() && id->name_parts.size() == 1
-        && bare.contains(lowerName(id->name())))
+        && !targets.contains(node) && isBareRefusedName(id->name()))
       return id->name();
+    // `* APPLY(f)` / `COLUMNS(…) APPLY f` calls f on every column; its name
+    // is a plain string, not an identifier (measured on 26.8.37.168:
+    // `SELECT * APPLY(pgGetUserById) FROM (SELECT toUInt32(0) AS a)` returns
+    // the shared user). A lookup name there is T6's (findApplyLookup).
+    if (const auto *apply = node->as<DB::ASTColumnsApplyTransformer>();
+        apply && !apply->lambda && (isDeploymentIdentityFunctionName(apply->func_name)
+                                    || isExternalCallFunctionName(apply->func_name)))
+      return apply->func_name;
     for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)
       if (*it) stack.push_back(it->get());
   }
+  // An INSERT's inline Values text, which the parser keeps as raw bytes: the
+  // Values reader evaluates its expressions (measured: `INSERT INTO t (s)
+  // VALUES (SESSION_USER)` and the same with a SETTINGS clause store the
+  // shared user). Read as tokens, a bare word or quoted identifier not after
+  // a `.` (a qualified name's last part); one followed by `.` is refused, like
+  // the AST walk refuses `SESSION_USER.1` (it reads the function's result).
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    const char *begin = nullptr;
+    const char *end = nullptr;
+    if (insertValuesText(*insert, &begin, &end)) {
+      std::vector<DB::Token> tokens;
+      significantTokens(std::string_view(begin, static_cast<size_t>(end - begin)), tokens);
+      for (size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0 && tokens[i - 1].type == DB::TokenType::Dot) continue;
+        std::string name;
+        if (tokens[i].type == DB::TokenType::BareWord) {
+          name.assign(tokens[i].begin, tokens[i].end);
+        } else if (tokens[i].type == DB::TokenType::QuotedIdentifier) {
+          const auto decoded = decodeIdentifierToken(tokens[i]);
+          if (!decoded) continue;
+          name = *decoded;
+        } else {
+          continue;
+        }
+        if (isBareRefusedName(name)) return name;
+      }
+    }
+  }
   return std::nullopt;
+}
+
+bool hasIdentifierQueryParameter(const DB::ASTPtr &ast) {
+  if (!ast) return false;
+  if (anyIdentifierSubstitution(*ast)) return true;
+  // An INSERT's inline Values text is raw bytes the AST does not hold; the
+  // Values reader substitutes an Identifier parameter there too (measured on
+  // 26.8.37.168: `INSERT INTO t (a, s) VALUES (2, {f:Identifier})` and the
+  // `FORMAT Values` spelling, with f = session_user, stored `default`).
+  // A text the lexer cannot read fails closed.
+  if (const auto *insert = ast->as<DB::ASTInsertQuery>()) {
+    const char *begin = nullptr;
+    const char *end = nullptr;
+    if (insertValuesText(*insert, &begin, &end)) {
+      std::vector<DB::Token> tokens;
+      if (!significantTokens(std::string_view(begin, static_cast<size_t>(end - begin)), tokens)) return true;
+      return tokensHoldIdentifierParameter(tokens);
+    }
+  }
+  return false;
 }
 
 std::string deploymentIdentityCallMessage(const std::string &name) {

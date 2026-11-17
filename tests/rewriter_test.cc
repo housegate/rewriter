@@ -2124,22 +2124,13 @@ static WriteOpResult RunWriteOp(const std::string &sql) {
 }
 
 // ============================================================================
-// ClickHouse 26.3 dependency coverage — Decimal512 syntax.
+// Decimal512 syntax pass-through.
 //
-// Parser-only SQL tests cannot prove that Decimal512 is implemented: ClickHouse
-// accepts unknown type and function names syntactically. The first test therefore
-// references the fork-only C++ type directly; compiling this test is the actual
-// dependency-pin guard. The SQL cases protect the rewriter-facing syntax paths.
+// The rewriter links upstream ClickHouse, which has no Decimal512 type; the
+// parser accepts unknown type and function names syntactically, so these
+// statements still reach the rewrite paths unchanged. Whether the type exists
+// is the backend's decision, not the rewriter's.
 // ============================================================================
-
-TEST(ClickHouseDependency, Decimal512TypeIsAvailable) {
-  DB::DataTypeDecimal512 type(/*precision=*/154, /*scale=*/18);
-
-  EXPECT_EQ(type.getTypeId(), DB::TypeIndex::Decimal512);
-  EXPECT_EQ(type.getPrecision(), 154u);
-  EXPECT_EQ(type.getScale(), 18u);
-  EXPECT_EQ(DB::DataTypeDecimal512::maxPrecision(), 154u);
-}
 
 TEST(ClickHouseDependency, Decimal512SelectParsesSuccessfully) {
   auto resp = RunNoOptions(
@@ -6361,10 +6352,20 @@ TEST(TableRefParam, PreflightSeesEveryTableOfAMultiTableDrop) {
   EXPECT_FALSE(rewriter_handlers::preflightTableReferences(ast, &req, &resp));
 }
 
-TEST(TableRefParam, ValueAndColumnParametersStayAllowed) {
-  for (const char *sql : {"SELECT * FROM db1.o WHERE a = {v:UInt64}", "SELECT {c:Identifier} FROM db1.o"}) {
+// A value parameter stays allowed. An Identifier parameter in an expression
+// used to be allowed as a column; ClickHouse 26.8 substitutes it before
+// analysis, so it can name a function the request does not show (`SELECT
+// {f:Identifier}` with f = session_user returns the shared user), and since
+// Step 5 fix round 1 (internal design doc 2026-11-14 official ClickHouse
+// switch) it is refused, `statement is not supported`, after the other checks.
+TEST(TableRefParam, ValueParametersStayAllowedIdentifierExpressionsAreRefused) {
+  EXPECT_EQ(RunTableRef("SELECT * FROM db1.o WHERE a = {v:UInt64}").code(), rewriter::RewriteCode::Success);
+  for (const char *sql : {"SELECT {c:Identifier} FROM db1.o", "UPDATE db1.o SET b = {c:Identifier} WHERE 1"}) {
     SCOPED_TRACE(sql);
-    EXPECT_EQ(RunTableRef(sql).code(), rewriter::RewriteCode::Success);
+    const auto resp = RunTableRef(sql);
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement);
+    EXPECT_EQ(resp.message(), rewriter_handlers::kUnsupportedStatementMessage);
+    EXPECT_EQ(resp.sql_after_rewrite(), sql);
   }
 }
 
@@ -9307,7 +9308,6 @@ TEST(TableRefUngoverned, MutationsCreateExpressionsFollowRewriterGo) {
     for (const char *sql : {
            "DELETE FROM db1.o WHERE a IN (SELECT a FROM values('a UInt8', 1))",
            "UPDATE db1.o SET b = (SELECT count() FROM VALUES('a UInt8', 1)) WHERE 1",
-           "UPDATE db1.o SET b = {c:Identifier} WHERE 1",
            "DELETE FROM db1.o WHERE a IN numbers(3)",
            "DELETE FROM db1.o WHERE a IN -`db2.x`",
            "DELETE FROM db1.o WHERE a IN (1 AS z)",
@@ -11828,10 +11828,18 @@ TEST(TableRefFidelity, ExplainAndTypeArgReadsAreRefused) {
 
 // ClickHouse 26.8 shapes inside admitted statement classes that no handler
 // models are refused with T7 in both SI states before any name is examined
-// (unmodelledClickHouse268Shape): a STREAM table expression at any depth,
-// the fork's privileged `MODIFY SENTIO BINARY TYPE ORIGIN` registration, and
-// `DESCRIBE TEMPORARY TABLE`. The same statements without the 26.8 clause
-// keep their ordinary answers.
+// (unmodelledClickHouse268Shape): a STREAM table expression at any depth, a
+// LOCAL or NATURAL join, a MergeTree UNIQUE KEY and `DESCRIBE TEMPORARY
+// TABLE`. The same statements without the 26.8 clause keep their ordinary
+// answers.
+//
+// A bare `local` after a table expression is not a LOCAL join: upstream
+// ClickHouse 26.8.37.168 reads it as the table's alias (`EXPLAIN SYNTAX`
+// prints `numbers(3) AS local ALL INNER JOIN ...`), and the backends run the
+// same parser, so the rewriter answers it as the ordinary aliased join.
+//
+// `ALTER ... MODIFY SENTIO BINARY TYPE ORIGIN` is not ClickHouse syntax; it
+// stays a fail-closed regression: a syntax error that names no table.
 TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
   for (const bool si : {false, true}) {
     for (const std::string sql : {
@@ -11846,12 +11854,8 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
            "SELECT a FROM db1.t STREAM",
            "INSERT INTO db1.q SELECT a FROM db1.o STREAM",
            "CREATE VIEW db1.v AS SELECT a FROM db1.o STREAM",
-           "ALTER TABLE db1.o MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
-           "ALTER TABLE db1.t MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
-           "ALTER TABLE db1.o MODIFY COMMENT 'c', MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
            "DESCRIBE TEMPORARY TABLE o",
            "DESC TEMPORARY TABLE o",
-           "SELECT * FROM numbers(3) local JOIN db1.o ON number = a",
            "SELECT * FROM db1.o AS x LOCAL JOIN db1.p AS y ON x.a = y.a",
            "SELECT * FROM db1.o AS x NATURAL JOIN db1.p AS y",
            "SELECT a FROM db1.o WHERE a IN (SELECT a FROM db1.o AS x LOCAL JOIN db1.p AS y USING (a))",
@@ -11867,6 +11871,30 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
       EXPECT_EQ(resp.original_accessed_tables_size(), 0);
     }
     for (const std::string sql : {
+           "ALTER TABLE db1.o MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.t MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+           "ALTER TABLE db1.o MODIFY COMMENT 'c', MODIFY SENTIO BINARY TYPE ORIGIN 'sentio_legacy_v0'",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::SyntaxError);
+      EXPECT_EQ(resp.original_accessed_tables_size(), 0);
+    }
+    // A bare `local` alias, and the same join with an explicit alias.
+    for (const std::string sql : {
+           "SELECT * FROM numbers(3) local JOIN db1.o ON number = a",
+           "SELECT * FROM numbers(3) AS local JOIN db1.o ON number = a",
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(),
+                "SELECT * FROM numbers(3) AS local INNER JOIN phys.`db1.o` AS `db1.o` ON number = a");
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "db1");
+      EXPECT_EQ(resp.original_accessed_tables(0).original_table(), "o");
+    }
+    for (const std::string sql : {
            "SELECT a FROM db1.o",
            "SELECT a FROM db1.o AS stream",
            "ALTER TABLE db1.o MODIFY COMMENT 'c'",
@@ -11876,6 +11904,185 @@ TEST(TableRefFidelity, ClickHouse268ShapesAreRefused) {
       EXPECT_EQ(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success) << RunTableRef(sql, si).message();
     }
   }
+}
+
+// ClickHouse 26.7 made naiveBayesClassifier / naiveBayesClassifierWithProb /
+// naiveBayesClassifierWithAllProbs read a NAIVE_BAYES dictionary named by
+// their first argument, resolved like a dictGet target (an unqualified name in
+// the current database, the physical one; measured on 26.8.37.168:
+// `naiveBayesClassifier('nosuch', 't')` is `Dictionary (\`nosuch\`) not
+// found`). They join the T6 string-lookup family, refused statement-wide
+// (internal design doc 2026-11-14 official ClickHouse switch, Step 5);
+// naiveBayesNgrams reads no dictionary.
+TEST(TableRefLookup, NaiveBayesClassifierIsAStringLookup) {
+  struct Case { const char *sql; std::string message; };
+  const std::vector<Case> refused = {
+    {"SELECT naiveBayesClassifier('d', s) FROM db1.o", "naiveBayesClassifier target \"d\""},
+    {"SELECT naiveBayesClassifier('db2.d', s) FROM db1.o", "naiveBayesClassifier target \"db2.d\""},
+    {"SELECT naiveBayesClassifierWithProb(db1.d, s) FROM db1.o", "naiveBayesClassifierWithProb target \"db1.d\""},
+    {"SELECT naiveBayesClassifierWithAllProbs('db1.d', 'text')", "naiveBayesClassifierWithAllProbs target \"db1.d\""},
+    {"INSERT INTO db1.o (s) VALUES (naiveBayesClassifier('d', 'x'))", "naiveBayesClassifier target \"d\""},
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &c : refused) {
+      SCOPED_TRACE(std::string(c.sql) + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(c.sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::InvalidRewriteRequest) << resp.message();
+      EXPECT_EQ(resp.message(), c.message + " does not resolve through the caller's databases");
+      EXPECT_EQ(resp.sql_after_rewrite(), c.sql);
+    }
+    // A protected database in the target is T3, before T6.
+    const auto phys = RunTableRef("SELECT naiveBayesClassifier('phys.d', s) FROM db1.o", si);
+    EXPECT_EQ(phys.code(), rewriter::RewriteCode::InvalidRewriteRequest);
+    EXPECT_EQ(phys.message(), "protected database phys is not addressable");
+    EXPECT_EQ(RunTableRef("SELECT naiveBayesNgrams('text', 3)", si).code(), rewriter::RewriteCode::Success);
+  }
+}
+
+// Statement forms and clauses ClickHouse 26.4 – 26.8 added, as the rewriter
+// answers them with the embedded upstream 26.8.37.168 parser (internal design
+// doc 2026-11-14 official ClickHouse switch, Step 5). Each is pinned in both
+// SI states. The parser lowers several of them to standard SQL that every
+// name check reads, so they are rewritten (`|>` pipe operators and a SELECT
+// that starts with FROM become nested subqueries, `x = SOME([…])` becomes
+// `has`, `expr AT LOCAL` becomes `toTimeZone`, a string literal in a table
+// position is the table of that name, as the 26.8 server reads it: measured,
+// `USE phys; SELECT * FROM 'db1.o'` reads phys.`db1.o`). rewriter-go's parser
+// does not take these and refuses them (`statement is not supported`), a
+// declared engine-local difference. Everything that reaches outside the
+// tenant's databases or that no handler models is refused.
+TEST(TableRefFidelity, ClickHouse264To268StatementForms) {
+  const std::vector<std::pair<std::string, std::string>> rewritten = {
+    {"FROM db1.o |> WHERE a > 1", "SELECT * FROM (SELECT * FROM phys.`db1.o` AS `db1.o`) WHERE a > 1"},
+    {"SELECT a FROM db1.o |> AGGREGATE count() AS c GROUP BY a",
+     "SELECT a, count() AS c FROM (SELECT a FROM phys.`db1.o` AS `db1.o`) GROUP BY a"},
+    {"FROM db1.o |> EXTEND a + 1 AS b", "SELECT *, a + 1 AS b FROM (SELECT * FROM phys.`db1.o` AS `db1.o`)"},
+    {"FROM o", "SELECT * FROM phys.`db1.o` AS o"},
+    {"INSERT INTO db1.p FROM db1.o |> SELECT a",
+     "INSERT INTO phys.`db1.p` SELECT a FROM (SELECT * FROM phys.`db1.o` AS `db1.o`)"},
+    {"SELECT * FROM 'data.csv'", "SELECT * FROM phys.`db1.data.csv` AS `data.csv`"},
+    {"SELECT * FROM 'db2.x'", "SELECT * FROM phys.`db1.db2.x` AS `db2.x`"},
+    {"SELECT a = SOME([1, 2]) FROM db1.o", "SELECT has([1, 2], a) FROM phys.`db1.o` AS `db1.o`"},
+    {"SELECT a < ALL([1, 2]) FROM db1.o", "SELECT arrayAll(lambda(tuple(_a), a < _a), [1, 2]) FROM phys.`db1.o` AS `db1.o`"},
+    {"SELECT now() AT LOCAL", "SELECT toTimeZone(now(), timeZone())"},
+    {"SELECT a FROM db1.o ORDER BY a LIMIT -1 WITH TIES",
+     "SELECT a FROM phys.`db1.o` AS `db1.o` ORDER BY a ASC LIMIT -1  WITH TIES"},
+    {"SELECT a FROM db1.o LIMIT -2 BY a", "SELECT a FROM phys.`db1.o` AS `db1.o` LIMIT -2 BY a"},
+    {"SELECT any(a) OVER (ORDER BY a GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM db1.o",
+     "SELECT any(a) OVER (ORDER BY a ASC GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM phys.`db1.o` AS `db1.o`"},
+    {"ALTER TABLE db1.o MODIFY PROJECTION p (SELECT a ORDER BY a) WITH SETTINGS (index_granularity = 1)",
+     "ALTER TABLE phys.`db1.o` (MODIFY PROJECTION p (SELECT a ORDER BY a) WITH SETTINGS (index_granularity = 1))"},
+    {"CREATE TABLE db1.n (p MultiPoint) ENGINE = Memory", "CREATE TABLE phys.`db1.n` (`p` MultiPoint) ENGINE = Memory"},
+  };
+  // Accepted in both engines (the output is not pinned here; rewriter-go's is
+  // pinned in its own tests).
+  const std::vector<std::string> accepted = {
+    "SELECT * LIKE 'a%' FROM db1.o",
+    "SELECT o.* ILIKE 'a%' FROM db1.o",
+    "SELECT a FROM db1.o WHERE s LIKE 'a!_%' ESCAPE '!'",
+    "SELECT date_part('year', now())",
+    "SELECT EXTRACT(EPOCH FROM now())",
+    "SELECT now() AT TIME ZONE 'UTC'",
+    "SELECT [1, 2, 3][[1, 2]]",
+    "SELECT sumTuple((a, a)) FROM db1.o",
+    "SELECT arrayMap(negate, [1, 2])",
+    "SELECT notHas([1], 2)",
+    "SELECT parseQueryToJSON('SELECT 1')",
+    "ALTER TABLE db1.o MODIFY CONSTRAINT c CHECK a > 1",
+    "ALTER TABLE db1.o MODIFY COLUMN e ADD ENUM VALUES ('c' = 3)",
+    "ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a > 1)",
+    "ALTER TABLE db1.o ADD COLUMN b UInt8 NOT NULL",
+    "CREATE OR REPLACE MATERIALIZED VIEW db1.mv TO db1.p AS SELECT a FROM db1.o",
+    "CREATE MATERIALIZED VIEW db1.mv TO db1.p POPULATE AS SELECT a FROM db1.o",
+    "SELECT a FROM db1.o SETTINGS run_query_in_background = 1",
+    "SELECT a FROM db1.o SETTINGS page = 2",
+  };
+  struct Refused { std::string sql; rewriter::RewriteCode code; std::string message; };
+  const auto unsupported = rewriter::RewriteCode::UnsupportedStatement;
+  const auto invalid = rewriter::RewriteCode::InvalidRewriteRequest;
+  const std::string unmapped_db2 =
+    "database \"db2\" does not resolve through the caller's databases (it is not mapped for this account, or the "
+    "account has no access)";
+  const std::vector<Refused> refused = {
+    {"FROM db2.x |> SELECT a", invalid, unmapped_db2},
+    {"SELECT a FROM db1.o |> WHERE a IN (SELECT a FROM db2.x)", invalid, unmapped_db2},
+    {"SELECT a FROM db1.o WHERE a IN (FROM db2.x |> SELECT a)", invalid, unmapped_db2},
+    {"SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS v(id, val)", unsupported,
+     "table function SQLStandardValues is not recognised"},
+    {"SELECT * FROM bigquery('p', 'd', 't')", unsupported, "table function bigquery is not recognised"},
+    {"SELECT * FROM filesystem('/etc')", unsupported, "table function filesystem is not recognised"},
+    {"SELECT * FROM eval('SELECT 1')", unsupported, "table function eval is not recognised"},
+    {"SELECT * FROM timeSeriesSamples(db1, ts)", unsupported, "table function timeSeriesSamples is not recognised"},
+    {"CREATE TABLE db1.n (a UInt8) ENGINE = QueryRunner", unsupported, "table engine QueryRunner is not accepted"},
+    {"CREATE TABLE db1.n (a UInt8) ENGINE = BigQuery('p', 'd', 't')", unsupported,
+     "table engine BigQuery is not accepted"},
+    {"CREATE TABLE db1.n (a UInt8) ENGINE = PaimonLocal('/x')", unsupported, "table engine PaimonLocal is not accepted"},
+    {"ALTER TABLE db1.o MODIFY CONSTRAINT c CHECK a IN (SELECT a FROM db2.x)", unsupported, "statement is not supported"},
+    {"ALTER TABLE db1.o MODIFY PROJECTION p (SELECT a WHERE a IN (SELECT a FROM db2.x))", unsupported,
+     "statement is not supported"},
+    {"ALTER TABLE db1.o ADD PROJECTION p (SELECT a WHERE a IN (SELECT a FROM db2.x))", unsupported,
+     "statement is not supported"},
+    {"CREATE TABLE db1.n (a UInt8, PROJECTION p (SELECT a WHERE a IN (SELECT 1 FROM db2.x))) ENGINE = MergeTree "
+     "ORDER BY a", unsupported, "statement is not supported"},
+    {"SELECT a FROM db1.o SETTINGS max_threads = {t:UInt64}", unsupported, "statement is not supported"},
+    {"SELECT a FROM db1.o SETTINGS enable_json_ast_dialect = 1", unsupported,
+     "table setting enable_json_ast_dialect is not accepted"},
+    {"SELECT a FROM system.user_query_log", unsupported, "system table system.user_query_log is not accessible"},
+    {"SELECT * FROM system.handlers", unsupported, "system table system.handlers is not accessible"},
+  };
+  // Refused whatever the message (an unmodelled statement class, or a
+  // statement the 26.8 parser does not take).
+  const std::vector<std::string> not_success = {
+    "CREATE HANDLER h URL '/x' AS SELECT 1",
+    "CREATE HANDLER h URL '/x' AS SELECT a FROM db2.x",
+    "DROP HANDLER IF EXISTS h",
+    "CREATE HYPOTHETICAL INDEX i ON db1.o (a) TYPE minmax",
+    "EXPLAIN WHATIF SELECT a FROM db1.o",
+    "EXPLAIN ANALYZE SELECT a FROM db2.x",
+    "CREATE USER u VALID FOR INTERVAL 1 DAY",
+    "ALTER USER u SET max_threads = 1",
+    "SYSTEM PAUSE VIEW db1.v",
+    "SYSTEM UNLOAD DICTIONARY db1.d",
+    "SYSTEM STOP db1.o",
+    "SYSTEM START LISTEN TCP",
+    "SET max_threads = {t:UInt64}",
+    "CREATE DATABASE d2 ENGINE = URL('https://x/')",
+    "CREATE TABLE db1.n ENGINE = Remote('h', db1.o)",
+    "CREATE TABLE db1.n ENGINE = RemoteSecure('h', db1.o)",
+    "SELECT * FROM remote('h', db1.o, SETTINGS skip_unavailable_shards = 1)",
+    "SELECT * FROM postgresql('h:5432', query('SELECT 1'), 'u', 'p')",
+    "SELECT * FROM mysql('h:3306', (SELECT 1), 'u', 'p')",
+    "SELECT * FROM mergeTreeCodecBlockCounts(db1, o)",
+  };
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, want] : rewritten) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(), want);
+    }
+    for (const auto &sql : accepted) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    }
+    for (const auto &c : refused) {
+      SCOPED_TRACE(c.sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(c.sql, si);
+      EXPECT_EQ(resp.code(), c.code) << resp.message();
+      EXPECT_EQ(resp.message(), c.message);
+    }
+    for (const auto &sql : not_success) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      EXPECT_NE(RunTableRef(sql, si).code(), rewriter::RewriteCode::Success);
+    }
+  }
+  // `SET TIME ZONE` is the session SET of session_timezone, which only the
+  // inactive surface models.
+  const auto tz = RunTableRef("SET TIME ZONE 'UTC'");
+  EXPECT_EQ(tz.code(), rewriter::RewriteCode::Success) << tz.message();
+  EXPECT_EQ(tz.sql_after_rewrite(), "SET session_timezone = 'UTC'");
+  EXPECT_NE(RunTableRef("SET TIME ZONE 'UTC'", /*si=*/true).code(), rewriter::RewriteCode::Success);
 }
 
 #if !REWRITER_RELEASE_MAIN

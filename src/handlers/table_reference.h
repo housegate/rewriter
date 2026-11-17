@@ -87,15 +87,44 @@ bool columnDeclarationHasSettings(const DB::ASTPtr &ast);
 // In dynamic mode the caller refuses an accepted statement holding one, last,
 // in both SI states, with deploymentIdentityCallMessage.
 std::optional<std::string> firstDeploymentIdentityCall(const std::string &sql);
+// ClickHouse 26.8's AI functions (aiGenerate, aiClassify, aiExtract,
+// aiTranslate, aiEmbed, aiFilter, aiRedact, aiSimilarity; the AI* aliases
+// match case-insensitively): they send their text to the LLM provider of a
+// named collection, an outbound call no tenant policy governs. Refused like a
+// deployment-identity call, with the same message, as a call
+// (firstDeploymentIdentityCall) and as a bare name
+// (firstBareDeploymentIdentityName). rewriter-go engine.ExternalCallFunction.
+bool isExternalCallFunctionName(const std::string &name);
 // The first unqualified bare identifier, in pre-order over `ast` (a parsed,
 // registered tree, before any handler rewrites it), named case-insensitively
 // currentDatabase, current_database, currentUser or current_user: ClickHouse's
 // analyzer resolves these as the function when no column or alias of that
 // name is in scope (they allow omitting parentheses). The aliases user,
 // DATABASE and SCHEMA resolve the same way but are ordinary column names and
-// are left alone, a known residual. rewriter-go
-// engine.FirstDeploymentIdentityName (its AST walk).
+// are left alone, a known residual. The ClickHouse 26.6 / 26.8 functions that
+// allow omitting parentheses (session_user, currentRequestURL,
+// currentHandler) are matched too, and so are the names a 26.5+ higher-order
+// function applies when written bare as its first argument
+// (`arrayMap(currentSchemas, [true])`): currentSchemas, current_schemas,
+// pgGetUserById, pg_get_userbyid and the AI functions. A column of one of
+// these names is refused too, deliberately (a statement's own target name
+// excepted). The other identity names and the string-lookup names were
+// measured not callable bare and stay ordinary column names
+// (isBareRefusedName). An `APPLY(f)` column transformer naming an identity or AI function is
+// returned too (its name is a string, not an identifier), and so is a bare
+// refused name in an INSERT's inline Values text. rewriter-go
+// engine.FirstDeploymentIdentityName (its AST walk and opaque-text scan).
 std::optional<std::string> firstBareDeploymentIdentityName(const DB::ASTPtr &ast);
+// Whether `ast` holds an Identifier query parameter (`{f:Identifier}`) in any
+// position. ClickHouse substitutes it before analysis, so in an expression it
+// is a bare name the request's SQL does not show (measured on 26.8.37.168:
+// `SELECT {f:Identifier}` with f = session_user returns the shared user, and
+// `arrayMap({f:Identifier}, [true])` with f = currentSchemas the physical
+// database), and the request carries no parameter values. In dynamic mode the
+// caller refuses an accepted statement holding one with `statement is not
+// supported`, after the identity checks (T2 refuses a database or table
+// position earlier). rewriter-go engine.IdentifierParameterInText.
+bool hasIdentifierQueryParameter(const DB::ASTPtr &ast);
 std::string deploymentIdentityCallMessage(const std::string &name);
 // ClickHouse 26.8 gives MergeTree, Memory, Log, View, MaterializedView and
 // system tables a `_database` virtual column holding the physical database
@@ -290,8 +319,9 @@ bool rejectShowBody(const DB::IAST &show, const std::string &sql,
                     const rewriter::RewriteTableDynamicArgs *dynamic,
                     rewriter::RewriteSQLResponse *response);
 
-// joinGet / joinGetOrNull and the dictGet / dictHas / … / hasColumnInTable
-// families (rewriter-go IsStringLookup), matched case-insensitively.
+// joinGet / joinGetOrNull and the dictGet / dictHas / … / hasColumnInTable /
+// naiveBayesClassifier families (rewriter-go IsStringLookup), matched
+// case-insensitively.
 bool isStringLookupFunction(const std::string &name);
 
 // rewriter-go OpaqueInsertQueryText: for an INSERT whose column list is
