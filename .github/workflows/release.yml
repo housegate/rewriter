@@ -12,13 +12,19 @@ on:
         description: 'Docker tag to publish (default: strip leading v from ref)'
         required: false
 
-# No step uses GITHUB_TOKEN; the build host is reached over SSH only.
+# The build host is reached over SSH only and never sees GITHUB_TOKEN. The one
+# step that uses the token runs on the runner and pushes the image the build
+# host produced to ghcr.io, which is why the job holds packages:write.
 permissions: {}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 120s lock wait + the 85-minute critical section, then the image copy
+    # from the build host and the ghcr.io push.
+    timeout-minutes: 100
+    permissions:
+      packages: write
     # Keep releases in the same non-evicting queue as CI. GitHub supports
     # queue:max as of 2026-08; actionlint 1.7.12 needs the same narrow ignore
     # documented in ci.yml until its schema catches up.
@@ -94,6 +100,7 @@ jobs:
           printf -v ref_q '%q' "$REF"
           printf -v version_q '%q' "$VERSION"
           printf -v image_q '%q' "$IMAGE_REPOSITORY"
+          run_key="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [ -z "$BUILD_HOST" ] || [ -z "$BUILD_HOST_USER" ] || \
              [ -z "$IMAGE_REPOSITORY" ]; then
             echo 'error: the BUILD_HOST, BUILD_HOST_USER and IMAGE_REPOSITORY secrets must be set' >&2
@@ -102,22 +109,29 @@ jobs:
           ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=10 "${BUILD_HOST_USER}@${BUILD_HOST}" \
-            "bash -s -- $ref_q $version_q $image_q" <<'REMOTE'
+            "bash -s -- $ref_q $version_q $image_q $run_key" <<'REMOTE'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
           ref=$1
           version=$2
           export REWRITER_IMAGE_REPO=$3
+          if [[ ! "$4" =~ ^[0-9]+-[0-9]+$ ]]; then
+            echo 'error: run key must be <run id>-<run attempt>' >&2
+            exit 1
+          fi
+          # The image this run builds, saved for the runner to push to ghcr.io.
+          image_tar=$HOME/ci/rewriter-release-images/$4.tar
 
           lock_path=$HOME/ci/rewriter-build-box.lock
           echo 'Waiting up to 120s for the defensive build-host lock.'
           if ! flock --exclusive --wait 120 --close "$lock_path" \
             timeout --signal=TERM --kill-after=30s 85m \
-            bash -s -- "$ref" "$version" <<'CRITICAL'
+            bash -s -- "$ref" "$version" "$image_tar" <<'CRITICAL'
           set -euo pipefail
           export GIT_NO_REPLACE_OBJECTS=1
           ref=$1
           version=$2
+          image_tar=$3
           echo 'Acquired the shared build-box lock.'
 
           cd "$HOME/ci/rewriter"
@@ -1418,6 +1432,13 @@ jobs:
             exit 1
           fi
           ./scripts.sh docker build "$version"
+          # Save the image under this lock, before any push, so the runner
+          # publishes to ghcr.io the same image the private registry gets.
+          # Releases are serialized by the build-box concurrency group, so any
+          # archive already here was left by a run that died before fetching.
+          mkdir -p "$(dirname "$image_tar")"
+          find "$(dirname "$image_tar")" -maxdepth 1 -type f -name '*.tar' -delete
+          docker save --output "$image_tar" "${REWRITER_IMAGE_REPO}:${version}"
           ./scripts.sh docker push "$version"
           CRITICAL
           then
@@ -1426,14 +1447,56 @@ jobs:
           fi
           REMOTE
 
+      - name: Fetch the image from the build host
+        # GITHUB_TOKEN must not reach the shared build host, so the image comes
+        # to the runner instead of the build host pushing to ghcr.io itself.
+        env:
+          BUILD_HOST: ${{ secrets.BUILD_HOST }}
+          BUILD_HOST_USER: ${{ secrets.BUILD_HOST_USER }}
+        run: |
+          set -euo pipefail
+          run_key="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh -p 30100 -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 "${BUILD_HOST_USER}@${BUILD_HOST}" \
+            "bash -s -- $run_key" > "$RUNNER_TEMP/rewriter-image.tar" <<'REMOTE'
+          set -euo pipefail
+          image_tar=$HOME/ci/rewriter-release-images/$1.tar
+          cat "$image_tar"
+          rm -f "$image_tar"
+          REMOTE
+          docker load --input "$RUNNER_TEMP/rewriter-image.tar"
+          rm -f "$RUNNER_TEMP/rewriter-image.tar"
+
+      - name: Push the image to ghcr.io
+        id: ghcr
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # ghcr.io requires a lowercase image path.
+          ghcr_image=$(printf 'ghcr.io/%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          docker tag "${IMAGE_REPOSITORY}:${VERSION}" "${ghcr_image}:${VERSION}"
+          printf '%s' "$GHCR_TOKEN" | \
+            docker login ghcr.io --username "$ACTOR" --password-stdin
+          docker push "${ghcr_image}:${VERSION}"
+          docker logout ghcr.io
+          echo "image=${ghcr_image}:${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Summary
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           REF: ${{ steps.ver.outputs.ref }}
+          GHCR_IMAGE: ${{ steps.ghcr.outputs.image }}
         run: |
           {
             echo "## Release $VERSION"
             echo ""
             echo "- Ref: \`$REF\`"
             echo "- Image tag: \`$VERSION\`"
+            echo "- Public image: \`$GHCR_IMAGE\`"
           } >> "$GITHUB_STEP_SUMMARY"
