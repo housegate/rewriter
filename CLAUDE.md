@@ -72,7 +72,7 @@ Under the hood `build` runs `cmake -B build -GNinja -DENABLE_RUST=OFF -DENABLE_T
 
 ### Cutting a release
 
-Don't bump versions by hand. Use the `cut-release` workflow (`Actions → cut-release → Run workflow`). It tags `main` as `vX.Y.Z` in UTC — first cut of a new UTC day bumps Y (minor), subsequent cuts same day bump Z (patch) — then dispatches `release.yml` which builds + pushes the docker image on the build host.
+Don't bump versions by hand. Use the `cut-release` workflow (`Actions → cut-release → Run workflow`). It tags `main` as `vX.Y.Z` in UTC — first cut of a new UTC day bumps Y (minor), subsequent cuts same day bump Z (patch) — then dispatches `release.yml` which builds the docker image on the build host, pushes it to the private registry from there, and pushes the same image to `ghcr.io/housegate/rewriter` from the runner.
 
 ### Submodule patches and the build tree (important)
 
