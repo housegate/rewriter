@@ -1409,8 +1409,14 @@ jobs:
           test -x /usr/bin/clang-22
           test -x /usr/bin/clang++-22
           migrate_release_cache
+          # The shared compiler cache (utils/ccache.conf) is what lets this
+          # workdir reuse ClickHouse objects compiled in any other checkout.
+          # Counters are informational only; zeroing them never drops entries.
+          ./scripts.sh ccache --zero-stats >/dev/null
           # rebuild fails when rewriter_tests does not compile or link.
           CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
+          echo 'Shared ccache statistics for this build:'
+          ./scripts.sh ccache --show-stats
           require_release_cache_policy
           test -x build/tests/rewriter_tests || {
             echo 'error: build/tests/rewriter_tests was not produced' >&2
