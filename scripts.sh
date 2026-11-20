@@ -12,6 +12,8 @@ Commands:
   rebuild                   Incremental build (fast, recommended for day-to-day work).
   test                      Build and run unit tests.
   clean                     Remove build/ and restore submodules to their pinned commits.
+  ccache [args]             Run ccache against the shared rewriter cache
+                            (utils/ccache.conf), e.g. -s, -z, -p. Defaults to -s.
   docker list               List local Docker images.
   docker build <version>    Build a Docker image tagged <version>.
   docker push  <version>    Push the image for <version> to the remote registry.
@@ -338,6 +340,20 @@ clean() {
     echo ">>> Done."
 }
 
+# Run ccache with the same configuration the build's compiler launcher uses
+# (see the REWRITER_SHARED_CCACHE block in CMakeLists.txt), so stats, zeroing
+# and config dumps refer to the shared cache rather than the host default.
+ccache_cmd() {
+    if ! command -v ccache >/dev/null; then
+        echo "Error: ccache is not installed; run ./scripts.sh prepare" >&2
+        exit 1
+    fi
+    if [ $# -eq 0 ]; then
+        set -- --show-stats
+    fi
+    CCACHE_CONFIGPATH="$PWD/utils/ccache.conf" ccache "$@"
+}
+
 test() {
     build
     ctest --test-dir build --output-on-failure
@@ -464,6 +480,9 @@ case "$cmd" in
         ;;
     test)
         test
+        ;;
+    ccache)
+        ccache_cmd "$@"
         ;;
     docker)
         if [[ $# -lt 1 ]]; then

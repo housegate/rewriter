@@ -141,6 +141,40 @@ set(CMAKE_MODULE_LINKER_FLAGS
         "${CMAKE_MODULE_LINKER_FLAGS} ${_LLD_PARALLEL}"
         CACHE STRING "Global module linker flags" FORCE)
 
+# Shared compiler cache. ClickHouse's cmake/ccache.cmake would otherwise use
+# the host's default ccache config, which hashes absolute paths, so every new
+# checkout (one per feature, plus the CI and release workdirs) recompiled all
+# of ClickHouse. Setting the launcher here makes ccache.cmake keep it, and it
+# also covers this project's own targets. utils/ccache.conf holds the policy;
+# CCACHE_DEPEND=true keeps ClickHouse's depend mode for correct #embed
+# tracking. An explicit -DCMAKE_<LANG>_COMPILER_LAUNCHER or
+# -DREWRITER_SHARED_CCACHE=OFF opts out.
+option(REWRITER_SHARED_CCACHE "Use utils/ccache.conf as the compiler cache" ON)
+if (REWRITER_SHARED_CCACHE AND NOT CMAKE_C_COMPILER_LAUNCHER AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(REWRITER_CCACHE_EXECUTABLE ccache)
+    if (REWRITER_CCACHE_EXECUTABLE)
+        execute_process(
+            COMMAND "${REWRITER_CCACHE_EXECUTABLE}" --version
+            OUTPUT_VARIABLE _rewriter_ccache_version_output
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REGEX MATCH "ccache version ([0-9.]+)" _ "${_rewriter_ccache_version_output}")
+        # 4.0 is the first release with depend mode and ${VAR} expansion in
+        # config values; older ones fall back to ClickHouse's own handling.
+        if (CMAKE_MATCH_1 VERSION_GREATER_EQUAL "4.0")
+            set(_rewriter_ccache_launcher
+                env
+                "CCACHE_CONFIGPATH=${CMAKE_CURRENT_SOURCE_DIR}/utils/ccache.conf"
+                CCACHE_DEPEND=true
+                "${REWRITER_CCACHE_EXECUTABLE}")
+            set(CMAKE_C_COMPILER_LAUNCHER ${_rewriter_ccache_launcher})
+            set(CMAKE_CXX_COMPILER_LAUNCHER ${_rewriter_ccache_launcher})
+            message(STATUS "Using shared ccache ${CMAKE_MATCH_1} with utils/ccache.conf")
+        else ()
+            message(STATUS "ccache '${CMAKE_MATCH_1}' is older than 4.0; not using utils/ccache.conf")
+        endif ()
+    endif ()
+endif ()
+
 # Add ClickHouse submodule
 add_subdirectory(clickHouse)
 no_warning(enum-constexpr-conversion)

@@ -1391,9 +1391,15 @@ jobs:
           }
 
           require_cache_policy
+          # The shared compiler cache (utils/ccache.conf) is what lets this
+          # workdir reuse ClickHouse objects compiled in any other checkout.
+          # Counters are informational only; zeroing them never drops entries.
+          ./scripts.sh ccache --zero-stats >/dev/null
           # rebuild fails when rewriter_tests does not compile or link, so a
           # stale cached test executable cannot make this workflow green.
           CC=/usr/bin/clang-22 CXX=/usr/bin/clang++-22 ./scripts.sh rebuild
+          echo 'Shared ccache statistics for this build:'
+          ./scripts.sh ccache --show-stats
           require_cache_policy
           test -x build/tests/rewriter_tests || {
             echo 'error: build/tests/rewriter_tests was not produced' >&2
