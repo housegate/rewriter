@@ -17792,6 +17792,7 @@
     "want_stmt": ""
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -17836,7 +17837,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))",
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.'))",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))",
     "want_stmt": "SELECT",
     "want_table_rewrites": {
       "db1.o": "phys.db1.o"
@@ -43020,6 +43022,7 @@
     "want_stmt": ""
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43058,10 +43061,12 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT name FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_go": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43100,7 +43105,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT * FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_go": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
@@ -43261,6 +43267,7 @@
     "want_stmt": "SHOW_TABLES"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43303,10 +43310,12 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT name FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_go": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43349,10 +43358,12 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT * FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_go": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43391,10 +43402,12 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_sql_cpp": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE (database = 'phys') AND (name LIKE 'db1.%') AND (is_temporary = 0)",
+    "want_sql_go": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43433,10 +43446,12 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_sql_cpp": "SELECT \"table\", name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS columns WHERE (database = 'phys') AND (\"table\" LIKE 'db1.%') ORDER BY \"table\" ASC, position ASC",
+    "want_sql_go": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43475,10 +43490,12 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_sql_cpp": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS p WHERE (p.database = 'phys') AND (p.\"table\" = 'db1.o') AND p.active GROUP BY p.partition",
+    "want_sql_go": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43517,7 +43534,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_cpp": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_go": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
     "want_stmt": "SELECT"
   },
   {
@@ -43563,6 +43581,7 @@
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43607,7 +43626,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT \"table\" FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations)",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
     "want_stmt": "SELECT",
     "want_table_rewrites": {
       "db1.o": "phys.db1.o"
@@ -43649,6 +43669,7 @@
     "want_no_contract_ack": true
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43691,10 +43712,12 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_sql_cpp": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE (database = 'phys') AND (name LIKE 'db1.%') AND (is_temporary = 0)",
+    "want_sql_go": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43737,10 +43760,12 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_sql_cpp": "SELECT \"table\", name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS columns WHERE (database = 'phys') AND (\"table\" LIKE 'db1.%') ORDER BY \"table\" ASC, position ASC",
+    "want_sql_go": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43783,10 +43808,12 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_sql_cpp": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS p WHERE (p.database = 'phys') AND (p.\"table\" = 'db1.o') AND p.active GROUP BY p.partition",
+    "want_sql_go": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43829,7 +43856,8 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_cpp": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_go": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
     "want_stmt": "SELECT"
   },
   {
@@ -43879,6 +43907,7 @@
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43927,7 +43956,8 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT \"table\" FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations)",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
     "want_stmt": "SELECT",
     "want_table_rewrites": {
       "db1.o": "phys.db1.o"
