@@ -34,6 +34,45 @@ bool systemTableAllowed(const std::string &table);
 // awaiting a filtered read name housegate/housegate#218.
 std::string systemTableRefusedMessage(const std::string &table);
 
+// Step 2 (housegate/housegate#218), rewriter-go
+// nameresolve.SystemTableTenantFiltered: a read of system.<table> (the
+// decoded name) is served from a tenant-filtered derived table in dynamic
+// mode. These are the class (c) tables of the allowlist: tables, columns,
+// data_skipping_indices, projections, parts, mutations and databases.
+bool systemTableTenantFiltered(const std::string &table);
+
+// rewriter-go handlers.systemTenantTable: the decoded class (c) table a read
+// target names when it is served tenant-filtered, that is a table qualified
+// with `system` whose name ClickHouse decodes to a systemTableTenantFiltered
+// table. `database` / `table` are the AST's name parts (decoded once by
+// ClickHouse's parser); a name still holding a backslash is decoded again,
+// as the allowlist decodes it. An unqualified name is never one: `system`
+// is never a mapped logical database.
+std::optional<std::string> systemTenantTable(const std::string &database, const std::string &table);
+
+// rewriter-go nameresolve.SystemTableTenantFilterSQL: the derived-table body
+// that replaces a read of system.<table> (systemTableTenantFiltered) in
+// dynamic mode:
+//
+//   SELECT * FROM system.<table> WHERE <filter>
+//
+// For a table with a tenant column (`name` for tables, `table` for the
+// others) the filter keeps the rows of every logical database in
+// database_map: `database = '<physical>' AND startsWith(<column>,
+// '<prefix>')` per logical, OR-ed in (physical, logical) order, each term
+// parenthesised when there are several. For system.databases it is `name IN
+// ('<physical>', …)`. An empty database_map (an unauthenticated session)
+// renders `WHERE 0`. The prefix is buildDynamicTablePrefix's, which always
+// ends in "." while logical names never contain a dot. The filter sits
+// inside the derived table, out of reach of the caller's select-list
+// aliases (measured on 26.8.37.168: a predicate in the caller's own WHERE
+// resolves `name` against `SELECT 'l1.x' AS name` first).
+std::string systemTableTenantFilterSQL(const std::string &table, const rewriter::RewriteTableDynamicArgs &args);
+
+// The parsed derived table (an ASTSubquery, no alias) of
+// systemTableTenantFilterSQL.
+DB::ASTPtr buildSystemTenantDerivedTable(const std::string &table, const rewriter::RewriteTableDynamicArgs &args);
+
 // rewriter-go nameresolve.MetadataDatabaseRefused: information_schema in
 // either spelling ClickHouse accepts. Every table of it is refused.
 bool metadataDatabaseRefused(const std::string &database);

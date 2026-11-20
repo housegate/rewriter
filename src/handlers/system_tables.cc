@@ -20,6 +20,7 @@
 #include <Parsers/ASTShowFunctionsQuery.h>
 #include <Parsers/ASTShowProcesslistQuery.h>
 #include <Parsers/ASTShowSettingQuery.h>
+#include <Parsers/ASTSubquery.h>
 #include <Parsers/ASTViewTargets.h>
 #include <Parsers/Access/ASTShowAccessEntitiesQuery.h>
 #include <Parsers/Access/ASTShowAccessQuery.h>
@@ -27,11 +28,15 @@
 #include <Parsers/Access/ASTShowGrantsQuery.h>
 #include <Parsers/Access/ASTShowPrivilegesQuery.h>
 #include <Parsers/Lexer.h>
+#include <Parsers/ParserSelectWithUnionQuery.h>
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <set>
+#include <utility>
 
+#include "ASTTransformers.h"
 #include "handlers/common.h"
 #include "handlers/cte_scope.h"
 #include "handlers/sql_tokens.h"
@@ -56,12 +61,24 @@ const std::set<std::string> &systemTableAllowlist() {
     // class (b*): global topology, read by the Sentio driver on every connect
     "clusters",
     // class (c): per-database metadata the Sentio driver reads by physical
-    // name. They still show every tenant's names (and parts partition
-    // values, mutations command text): a known residual that step 2
-    // (housegate/housegate#218) closes by serving them as a filtered logical
-    // rewrite.
+    // name. In dynamic mode each read of one is served from a
+    // tenant-filtered derived table (systemTableTenantFilterSQL, step 2,
+    // housegate/housegate#218): only the rows of the caller's own logical
+    // databases reach it, in ClickHouse's physical shape.
     "tables", "columns", "data_skipping_indices", "projections", "parts", "databases", "mutations"};
   return allowlist;
+}
+
+// rewriter-go systemTableTenantColumn: each class (c) table of the allowlist
+// mapped to the column that carries a physical table name, which starts with
+// the owning logical database's prefix (buildDynamicTablePrefix).
+// system.databases has no such column ("" here): its rows are filtered by
+// `name` against the physical databases of the caller's database_map.
+const std::map<std::string, std::string> &systemTableTenantColumn() {
+  static const std::map<std::string, std::string> columns = {
+    {"tables", "name"}, {"columns", "table"}, {"data_skipping_indices", "table"}, {"projections", "table"},
+    {"parts", "table"}, {"mutations", "table"}, {"databases", ""}};
+  return columns;
 }
 
 // rewriter-go systemTableAwaitingFilteredRead: the class (c) tables no known
@@ -434,6 +451,56 @@ std::string systemTableRefusedMessage(const std::string &table) {
   if (systemTableAwaitingFilteredRead().count(table))
     message += "; tenant-filtered metadata reads are tracked in " + std::string(kFilteredReadIssue);
   return message;
+}
+
+bool systemTableTenantFiltered(const std::string &table) {
+  return systemTableTenantColumn().count(table) > 0;
+}
+
+std::optional<std::string> systemTenantTable(const std::string &database, const std::string &table) {
+  if (clickHouseIdentifierValue(database) != kSystemDatabase) return std::nullopt;
+  std::string decoded = clickHouseIdentifierValue(table);
+  if (!systemTableTenantFiltered(decoded)) return std::nullopt;
+  return decoded;
+}
+
+std::string systemTableTenantFilterSQL(const std::string &table, const rewriter::RewriteTableDynamicArgs &args) {
+  const auto column_it = systemTableTenantColumn().find(table);
+  const std::string column = column_it == systemTableTenantColumn().end() ? "" : column_it->second;
+  std::vector<std::pair<std::string, std::string>> entries;  // (physical, logical)
+  std::set<std::string> physicals;
+  for (const auto &[logical, physical] : args.database_map()) {
+    if (logical.empty() || physical.empty()) continue;
+    entries.emplace_back(physical, logical);
+    physicals.insert(physical);
+  }
+  std::string body = "SELECT * FROM " + std::string(kSystemDatabase) + "." + table + " WHERE ";
+  if (entries.empty()) return body + "0";
+  if (column.empty()) {
+    std::vector<std::string> names;
+    names.reserve(physicals.size());
+    for (const auto &p : physicals) names.push_back("'" + escapeSqlLiteral(p) + "'");
+    std::sort(names.begin(), names.end());
+    std::string list;
+    for (const auto &n : names) list += (list.empty() ? "" : ", ") + n;
+    return body + "name IN (" + list + ")";
+  }
+  std::sort(entries.begin(), entries.end());
+  std::string filter;
+  for (const auto &[physical, logical] : entries) {
+    std::string term = "database = '" + escapeSqlLiteral(physical) + "' AND startsWith(" + column + ", '" +
+                       escapeSqlLiteral(buildDynamicTablePrefix(logical, args)) + "')";
+    if (entries.size() > 1) term = "(" + term + ")";
+    filter += (filter.empty() ? "" : " OR ") + term;
+  }
+  return body + filter;
+}
+
+DB::ASTPtr buildSystemTenantDerivedTable(const std::string &table, const rewriter::RewriteTableDynamicArgs &args) {
+  const std::string sql = systemTableTenantFilterSQL(table, args);
+  DB::ParserSelectWithUnionQuery parser;
+  DB::ASTPtr select = parseBounded(parser, sql.data(), sql.data() + sql.size());
+  return DB::makeRewriterAST<DB::ASTSubquery>(select);
 }
 
 bool metadataDatabaseRefused(const std::string &database) {
