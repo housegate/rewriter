@@ -351,7 +351,7 @@ ccache_cmd() {
     if [ $# -eq 0 ]; then
         set -- --show-stats
     fi
-    CCACHE_CONFIGPATH="$PWD/utils/ccache.conf" ccache "$@"
+    CCACHE_CONFIGPATH="$(cd "$(dirname "$0")" && pwd -P)/utils/ccache.conf" ccache "$@"
 }
 
 test() {
