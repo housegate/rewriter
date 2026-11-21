@@ -17837,8 +17837,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (system.tables)",
-    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN system.tables",
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.'))",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.'))",
     "want_stmt": "SELECT",
     "want_table_rewrites": {
       "db1.o": "phys.db1.o"
@@ -43022,6 +43022,7 @@
     "want_stmt": ""
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43049,7 +43050,7 @@
         ]
       }
     },
-    "name": "si_tr_sys_tables_allowed_passthrough",
+    "name": "si_tr_sys_tables_allowed_filtered",
     "sql": "SELECT name FROM system.tables WHERE database = 'phys'",
     "want_accessed": [
       {
@@ -43060,10 +43061,12 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT name FROM system.tables WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT name FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_go": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V1",
     "dynamic": {
       "database_map": {
@@ -43091,7 +43094,7 @@
         ]
       }
     },
-    "name": "si_tr_sys_mutations_allowed_passthrough",
+    "name": "si_tr_sys_mutations_allowed_filtered",
     "sql": "SELECT * FROM system.mutations WHERE database = 'phys'",
     "want_accessed": [
       {
@@ -43102,7 +43105,8 @@
     ],
     "want_code": "Success",
     "want_no_contract_ack": true,
-    "want_sql": "SELECT * FROM system.mutations WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT * FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_go": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
     "want_stmt": "SELECT"
   },
   {
@@ -43263,6 +43267,7 @@
     "want_stmt": "SHOW_TABLES"
   },
   {
+    "allow_sql_divergence": true,
     "contract_version": "V2",
     "dynamic": {
       "database_map": {
@@ -43295,7 +43300,7 @@
         ]
       }
     },
-    "name": "si_tr_sys_tables_allowed_v2_passthrough",
+    "name": "si_tr_sys_tables_allowed_v2_filtered",
     "sql": "SELECT name FROM system.tables WHERE database = 'phys'",
     "want_accessed": [
       {
@@ -43305,7 +43310,554 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT name FROM system.tables WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT name FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_sql_go": "SELECT name FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys'",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_mutations_allowed_v2_filtered",
+    "sql": "SELECT * FROM system.mutations WHERE database = 'phys'",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "mutations",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "SELECT * FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_sql_go": "SELECT * FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations WHERE database = 'phys'",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_tables_filtered_driver_load",
+    "sql": "SELECT name, engine, comment FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "tables",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE (database = 'phys') AND (name LIKE 'db1.%') AND (is_temporary = 0)",
+    "want_sql_go": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_columns_filtered_driver_load",
+    "sql": "SELECT table, name, type, default_expression, comment, compression_codec FROM system.columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "columns",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "SELECT \"table\", name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS columns WHERE (database = 'phys') AND (\"table\" LIKE 'db1.%') ORDER BY \"table\" ASC, position ASC",
+    "want_sql_go": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_filtered_alias",
+    "sql": "SELECT p.partition, sum(p.rows) FROM system.parts AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "parts",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS p WHERE (p.database = 'phys') AND (p.\"table\" = 'db1.o') AND p.active GROUP BY p.partition",
+    "want_sql_go": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_tables_filtered_select_alias_shadow",
+    "sql": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM system.tables",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "tables",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_go": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
+    "want_stmt": "SELECT"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_databases_filtered",
+    "sql": "SELECT name FROM system.databases",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "databases",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT * FROM system.databases WHERE name IN ('phys')) AS databases",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_mutations_filtered_in_subquery",
+    "sql": "SELECT * FROM db1.o WHERE a IN (SELECT table FROM system.mutations)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      },
+      {
+        "original_database": "system",
+        "original_table": "mutations",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT \"table\" FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations)",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
+    "want_stmt": "SELECT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_final_rejected",
+    "reject": true,
+    "sql": "SELECT * FROM system.parts FINAL",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported",
+    "want_no_contract_ack": true
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_tables_filtered_driver_load_v2",
+    "sql": "SELECT name, engine, comment FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "tables",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables WHERE (database = 'phys') AND (name LIKE 'db1.%') AND (is_temporary = 0)",
+    "want_sql_go": "SELECT name, engine, comment FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables WHERE database = 'phys' AND name LIKE 'db1.%' AND is_temporary = 0",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_columns_filtered_driver_load_v2",
+    "sql": "SELECT table, name, type, default_expression, comment, compression_codec FROM system.columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "columns",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "SELECT \"table\", name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS columns WHERE (database = 'phys') AND (\"table\" LIKE 'db1.%') ORDER BY \"table\" ASC, position ASC",
+    "want_sql_go": "SELECT table, name, type, default_expression, comment, compression_codec FROM (SELECT * FROM system.columns WHERE database = 'phys' AND startsWith(table, 'db1.')) AS columns WHERE database = 'phys' AND table LIKE 'db1.%' ORDER BY table, position",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_filtered_alias_v2",
+    "sql": "SELECT p.partition, sum(p.rows) FROM system.parts AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "parts",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS p WHERE (p.database = 'phys') AND (p.\"table\" = 'db1.o') AND p.active GROUP BY p.partition",
+    "want_sql_go": "SELECT p.partition, sum(p.rows) FROM (SELECT * FROM system.parts WHERE database = 'phys' AND startsWith(table, 'db1.')) AS p WHERE p.database = 'phys' AND p.table = 'db1.o' AND p.active GROUP BY p.partition",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_tables_filtered_select_alias_shadow_v2",
+    "sql": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM system.tables",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "tables",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql_cpp": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE (database = 'phys') AND startsWith(name, 'db1.')) AS tables",
+    "want_sql_go": "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables",
     "want_stmt": "SELECT"
   },
   {
@@ -43341,9 +43893,62 @@
         ]
       }
     },
-    "name": "si_tr_sys_mutations_allowed_v2_passthrough",
-    "sql": "SELECT * FROM system.mutations WHERE database = 'phys'",
+    "name": "si_tr_sys_databases_filtered_v2",
+    "sql": "SELECT name FROM system.databases",
     "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "databases",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_sql": "SELECT name FROM (SELECT * FROM system.databases WHERE name IN ('phys')) AS databases",
+    "want_stmt": "SELECT"
+  },
+  {
+    "allow_sql_divergence": true,
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_mutations_filtered_in_subquery_v2",
+    "sql": "SELECT * FROM db1.o WHERE a IN (SELECT table FROM system.mutations)",
+    "want_accessed": [
+      {
+        "original_database": "db1",
+        "original_table": "o",
+        "logical_database": "db1",
+        "physical_database": "phys"
+      },
       {
         "original_database": "system",
         "original_table": "mutations",
@@ -43351,7 +43956,89 @@
       }
     ],
     "want_code": "Success",
-    "want_sql": "SELECT * FROM system.mutations WHERE database = 'phys'",
+    "want_sql_cpp": "SELECT * FROM phys.\"db1.o\" AS \"db1.o\" WHERE a IN (SELECT \"table\" FROM (SELECT * FROM system.mutations WHERE (database = 'phys') AND startsWith(\"table\", 'db1.')) AS mutations)",
+    "want_sql_go": "SELECT * FROM phys.\"db1.o\" \"db1.o\" WHERE a IN (SELECT table FROM (SELECT * FROM system.mutations WHERE database = 'phys' AND startsWith(table, 'db1.')) AS mutations)",
+    "want_stmt": "SELECT",
+    "want_table_rewrites": {
+      "db1.o": "phys.db1.o"
+    }
+  },
+  {
+    "contract_version": "V2",
+    "dynamic": {
+      "database_map": {
+        "db1": "phys"
+      },
+      "known_physical_databases": [
+        "phys"
+      ],
+      "upstream_logical_database_in_context": "db1",
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {
+          "db1.t": {
+            "safe_table": "hg_safe.db1__t",
+            "unsafe_table": "hg_unsafe.db1__t"
+          }
+        },
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_parts_final_rejected_v2",
+    "reject": true,
+    "sql": "SELECT * FROM system.parts FINAL",
+    "want_code": "UnsupportedStatement",
+    "want_message_contains": "statement is not supported"
+  },
+  {
+    "contract_version": "V1",
+    "dynamic": {
+      "database_map": {},
+      "known_physical_databases": [
+        "phys"
+      ],
+      "delim": "_",
+      "protected_databases": [
+        "phys",
+        "hg_safe",
+        "hg_unsafe",
+        "hg_promote"
+      ],
+      "storage_integrity": {
+        "tables": {},
+        "read_mode": "SAFE",
+        "reserved_row_id_column": "_hg_row_id",
+        "reserved_databases": [
+          "hg_safe",
+          "hg_unsafe",
+          "hg_promote"
+        ]
+      }
+    },
+    "name": "si_tr_sys_tables_filtered_no_database",
+    "sql": "SELECT name FROM system.tables",
+    "want_accessed": [
+      {
+        "original_database": "system",
+        "original_table": "tables",
+        "logical_database": "system"
+      }
+    ],
+    "want_code": "Success",
+    "want_no_contract_ack": true,
+    "want_sql": "SELECT name FROM (SELECT * FROM system.tables WHERE 0) AS tables",
     "want_stmt": "SELECT"
   },
   {

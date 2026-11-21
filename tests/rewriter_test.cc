@@ -2,6 +2,7 @@
 #include "rewriter-server.h"
 #include "handlers/common.h"
 #include "handlers/storage_integrity.h"
+#include "handlers/system_tables.h"
 #include "handlers/table_reference.h"
 #include "si_corpus.h"
 #include "si_normalize.h"
@@ -6751,8 +6752,13 @@ TEST(TableRefSources, InOperandsAreRewrittenAndReported) {
      "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (phys.`db1.b`)", {{"", "b"}, {"db1", "o"}}},
     {"WITH c AS (SELECT 1 AS a) SELECT * FROM db1.o WHERE a IN c",
      "WITH c AS (SELECT 1 AS a) SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (c)", {{"db1", "o"}}},
+    // a class (c) system table is read tenant-filtered (housegate/housegate#218)
     {"SELECT * FROM db1.o WHERE a IN system.tables",
-     "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (system.tables)", {{"db1", "o"}, {"system", "tables"}}},
+     "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (SELECT * FROM system.tables WHERE (database = 'phys') AND "
+     "startsWith(name, 'db1.'))",
+     {{"db1", "o"}, {"system", "tables"}}},
+    {"SELECT * FROM db1.o WHERE a IN system.one",
+     "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (system.one)", {{"db1", "o"}, {"system", "one"}}},
     {"SELECT * FROM db1.o WHERE a IN db1.t",
      "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (SELECT * EXCEPT (_hg_row_id) FROM hg_safe.db1__t)",
      {{"db1", "o"}, {"db1", "t"}}, true},
@@ -10713,6 +10719,10 @@ TEST(TableRefSystemTables, AllowlistIsExact) {
   ASSERT_EQ(allowed.size(), 41u);
   for (const bool si : {false, true}) {
     for (const auto &table : allowed) {
+      // The class (c) tables are allowed and served tenant-filtered (step 2,
+      // TableRefSystemTablesFilter); every other allowed table is forwarded
+      // unchanged.
+      if (rewriter_handlers::systemTableTenantFiltered(table)) continue;
       const std::string sql = "SELECT * FROM system." + table;
       ExpectAllowed(sql, si, sql);
     }
@@ -10816,6 +10826,202 @@ TEST(TableRefSystemTables, SynthesizedSQLKeepsWorking) {
   const auto describe = RunTableRef("DESCRIBE TABLE db1.t", true);
   EXPECT_EQ(describe.code(), rewriter::RewriteCode::Success) << describe.message();
   EXPECT_NE(describe.sql_after_rewrite().find("FROM system.columns"), std::string::npos) << describe.sql_after_rewrite();
+}
+
+// System tables, step 2 (housegate/housegate#218; rewriter-go
+// native_systemtables_filter_test.go): in dynamic mode a read of an allowed
+// class (c) table — system.tables, columns, data_skipping_indices,
+// projections, parts, mutations, databases — is served from a derived table
+// that keeps only the rows of the caller's own logical databases, in
+// ClickHouse's physical shape:
+//
+//   FROM system.tables  →  FROM (SELECT * FROM system.tables WHERE database = 'phys' AND startsWith(name, 'db1.')) AS tables
+//
+// The filter is inside the derived table, out of reach of the caller's
+// aliases; the derived table is aliased with the caller's alias, else the
+// short table name, so `tables.name` keeps resolving. The expected texts are
+// this engine's formatter spelling (comparisons parenthesised inside AND /
+// OR, `INNER JOIN`, the identifier `table` always quoted); rewriter-go prints
+// the same statements without them.
+namespace {
+
+// The derived table for system.<table> under AddTableRefOption: database_map
+// {db1: phys}, delim "_".
+std::string FilteredSystemTable(const std::string &table) {
+  const std::string column = table == "tables" ? "name" : "`table`";
+  return "(SELECT * FROM system." + table + " WHERE (database = 'phys') AND startsWith(" + column + ", 'db1.'))";
+}
+
+}  // namespace
+
+TEST(TableRefSystemTablesFilter, EveryClassCTable) {
+  for (const bool si : {false, true}) {
+    for (const std::string table : {"tables", "columns", "data_skipping_indices", "projections", "parts", "mutations"}) {
+      const std::string sql = "SELECT * FROM system." + table;
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_EQ(resp.sql_after_rewrite(), "SELECT * FROM " + FilteredSystemTable(table) + " AS " + table);
+      EXPECT_TRUE(resp.table_rewrites().empty());
+      ASSERT_EQ(resp.original_accessed_tables_size(), 1);
+      EXPECT_EQ(resp.original_accessed_tables(0).original_database(), "system");
+      EXPECT_EQ(resp.original_accessed_tables(0).original_table(), table);
+    }
+    ExpectAllowed("SELECT name FROM system.databases", si,
+                  "SELECT name FROM (SELECT * FROM system.databases WHERE name IN ('phys')) AS databases");
+  }
+}
+
+TEST(TableRefSystemTablesFilter, Positions) {
+  const std::string ft = FilteredSystemTable("tables");
+  const std::string fc = FilteredSystemTable("columns");
+  for (const bool si : {false, true}) {
+    for (const auto &[sql, want] : std::vector<std::pair<std::string, std::string>>{
+           // the caller's WHERE stays outside the derived table
+           {"SELECT name FROM system.tables WHERE database = 'phys' AND name LIKE 'db1.%'",
+            "SELECT name FROM " + ft + " AS tables WHERE (database = 'phys') AND (name LIKE 'db1.%')"},
+           // the caller's select-list aliases cannot reach the filter
+           {"SELECT 'db1.x' AS name, 'phys' AS database, engine FROM system.tables",
+            "SELECT 'db1.x' AS name, 'phys' AS database, engine FROM " + ft + " AS tables"},
+           {"SELECT t.name FROM system.tables AS t", "SELECT t.name FROM " + ft + " AS t"},
+           {"SELECT tables.name FROM system.tables", "SELECT tables.name FROM " + ft + " AS tables"},
+           {"SELECT name FROM `system`.`tables`", "SELECT name FROM " + ft + " AS tables"},
+           {"SELECT name FROM system.`tables\\N`", "SELECT name FROM " + ft + " AS tables"},
+           {"SELECT * FROM db1.o JOIN system.columns AS c ON c.name = o.a",
+            "SELECT * FROM phys.`db1.o` AS `db1.o` INNER JOIN " + fc + " AS c ON c.name = o.a"},
+           {"SELECT t.name, c.name FROM system.tables AS t JOIN system.columns AS c ON c.table = t.name",
+            "SELECT t.name, c.name FROM " + ft + " AS t INNER JOIN " + fc + " AS c ON c.`table` = t.name"},
+           {"SELECT n FROM (SELECT name AS n FROM system.tables)",
+            "SELECT n FROM (SELECT name AS n FROM " + ft + " AS tables)"},
+           {"WITH x AS (SELECT name FROM system.tables) SELECT * FROM x",
+            "WITH x AS (SELECT name FROM " + ft + " AS tables) SELECT * FROM x"},
+           {"SELECT name FROM system.tables UNION ALL SELECT name FROM system.columns",
+            "SELECT name FROM " + ft + " AS tables UNION ALL SELECT name FROM " + fc + " AS columns"},
+           {"SELECT (SELECT count() FROM system.tables) AS n", "SELECT (SELECT count() FROM " + ft + " AS tables) AS n"},
+           {"SELECT * FROM db1.o WHERE a IN (SELECT name FROM system.tables)",
+            "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN (SELECT name FROM " + ft + " AS tables)"},
+           {"SELECT * FROM db1.o WHERE a IN system.tables",
+            "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN " + ft},
+           {"SELECT * FROM view(SELECT name FROM system.tables)",
+            "SELECT * FROM view(SELECT name FROM " + ft + " AS tables)"},
+         }) {
+      ExpectAllowed(sql, si, want);
+    }
+  }
+  // Write statements' read bodies run the SELECT pipeline (SI off: the SI
+  // surface refuses the write shapes it does not model).
+  ExpectAllowed("INSERT INTO db1.o SELECT name FROM system.tables", false,
+                "INSERT INTO phys.`db1.o` SELECT name FROM " + ft + " AS tables");
+  ExpectAllowed("CREATE VIEW db1.v AS SELECT name FROM system.tables", false,
+                "CREATE VIEW phys.`db1.v` AS SELECT name FROM " + ft + " AS tables");
+  ExpectAllowed("CREATE TABLE db1.n ENGINE = Memory AS SELECT name FROM system.tables", false,
+                "CREATE TABLE phys.`db1.n` ENGINE = Memory AS SELECT name FROM " + ft + " AS tables");
+}
+
+// The sessions HouseGate builds: several logical databases, several physical
+// databases, an unauthenticated session (empty map: nothing is shown).
+TEST(TableRefSystemTablesFilter, DatabaseMap) {
+  struct Case {
+    std::map<std::string, std::string> dbs;
+    std::string sql;
+    std::string want;
+  };
+  for (const auto &c : std::vector<Case>{
+         {{{"db2", "phys"}, {"db1", "phys"}}, "SELECT name FROM system.tables",
+          "SELECT name FROM (SELECT * FROM system.tables WHERE ((database = 'phys') AND startsWith(name, 'db1.')) OR "
+          "((database = 'phys') AND startsWith(name, 'db2.'))) AS tables"},
+         {{{"db1", "phys"}, {"a", "other"}}, "SELECT name FROM system.databases",
+          "SELECT name FROM (SELECT * FROM system.databases WHERE name IN ('other', 'phys')) AS databases"},
+         {{}, "SELECT name FROM system.tables", "SELECT name FROM (SELECT * FROM system.tables WHERE 0) AS tables"},
+         {{}, "SELECT name FROM system.databases",
+          "SELECT name FROM (SELECT * FROM system.databases WHERE 0) AS databases"},
+       }) {
+    SCOPED_TRACE(c.sql + " / " + std::to_string(c.dbs.size()) + " databases");
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(c.sql);
+    auto *dyn = AddTableRefOption(req, false);
+    dyn->clear_database_map();
+    for (const auto &[logical, physical] : c.dbs) (*dyn->mutable_database_map())[logical] = physical;
+    dyn->set_upstream_logical_database_in_context("");
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    EXPECT_EQ(resp.sql_after_rewrite(), c.want);
+  }
+}
+
+// A shape the derived table cannot carry is refused rather than forwarded
+// unfiltered, and the table functions that would read a class (c) table
+// directly stay refused by T5.
+TEST(TableRefSystemTablesFilter, RefusedShapes) {
+  for (const bool si : {false, true}) {
+    for (const std::string sql : {"SELECT * FROM system.parts FINAL", "SELECT * FROM system.parts SAMPLE 0.5",
+                                  "SELECT * FROM db1.o JOIN system.parts AS p FINAL USING (a)",
+                                  "SELECT * FROM (SELECT * FROM system.mutations FINAL)"}) {
+      ExpectRefusal(sql, si, rewriter::RewriteCode::UnsupportedStatement,
+                    std::string(rewriter_handlers::kUnsupportedStatementMessage));
+    }
+    for (const auto &[sql, fn] : std::vector<std::pair<std::string, std::string>>{
+           {"SELECT * FROM remote('127.0.0.1', system.tables)", "remote"},
+           {"SELECT * FROM remote('127.0.0.1', system, tables)", "remote"},
+           {"SELECT * FROM cluster('default', system.parts)", "cluster"},
+           {"SELECT * FROM clusterAllReplicas('default', system.mutations)", "clusterAllReplicas"},
+           {"SELECT * FROM loop(system.tables) LIMIT 1", "loop"},
+         }) {
+      SCOPED_TRACE(sql + (si ? " [V2]" : " [inactive]"));
+      const auto resp = RunTableRef(sql, si);
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::UnsupportedStatement) << resp.message();
+      EXPECT_EQ(resp.message(), "table function " + fn + " is not accepted");
+    }
+    // A merge() pattern is never an allowlist match: the system-table step
+    // refuses it before T5.
+    ExpectRefusal("SELECT * FROM merge(system, '^tables$')", si, rewriter::RewriteCode::UnsupportedStatement,
+                  "system table system.^tables$ is not accessible");
+  }
+  // An INSERT … SELECT body is checked too.
+  ExpectRefusal("INSERT INTO db1.o SELECT name FROM system.tables FINAL", false,
+                rewriter::RewriteCode::UnsupportedStatement, std::string(rewriter_handlers::kUnsupportedStatementMessage));
+}
+
+// Like step 1, the filter applies to dynamic mode only. HouseGate always
+// sends dynamic args; a static-mode or option-less request has no tenant to
+// filter for.
+TEST(TableRefSystemTablesFilter, StaticAndNoRewriteUntouched) {
+  const std::string sql = "SELECT name FROM system.tables WHERE database = 'phys'";
+  rewriter::RewriteSQLRequest none;
+  none.set_sql(sql);
+  const auto none_resp = RunDirectRewrite(none);
+  EXPECT_EQ(none_resp.code(), rewriter::RewriteCode::Success) << none_resp.message();
+  EXPECT_EQ(none_resp.sql_after_rewrite(), sql);
+  rewriter::RewriteSQLRequest stat;
+  stat.set_sql(sql);
+  AddEmptyStaticOption(stat);
+  const auto stat_resp = RunDirectRewrite(stat);
+  EXPECT_EQ(stat_resp.code(), rewriter::RewriteCode::Success) << stat_resp.message();
+  EXPECT_EQ(stat_resp.sql_after_rewrite(), sql);
+}
+
+// applyRewriteOptions re-runs the dynamic walk after a CommonTableExprRewrite
+// option that follows the TableNameRewrite option; a derived table the first
+// walk injected is not wrapped a second time.
+TEST(TableRefSystemTablesFilter, CTEOptionReapplyWrapsOnce) {
+  const std::string ft = FilteredSystemTable("tables");
+  for (const auto &[sql, want] : std::vector<std::pair<std::string, std::string>>{
+         {"SELECT name FROM system.tables", "SELECT name FROM " + ft + " AS tables"},
+         {"SELECT * FROM db1.o WHERE a IN system.tables", "SELECT * FROM phys.`db1.o` AS `db1.o` WHERE a IN " + ft},
+       }) {
+    SCOPED_TRACE(sql);
+    rewriter::RewriteSQLRequest req;
+    req.set_sql(sql);
+    AddTableRefOption(req, false);
+    auto *cte = req.add_options();
+    cte->set_op(rewriter::RewriteOp::CommonTableExprRewrite);
+    auto &body = (*cte->mutable_common_table_expr_args()->mutable_cte_map())["unused"];
+    body.set_alias("unused");
+    body.set_sql("SELECT 1");
+    const auto resp = RunDirectRewrite(std::move(req));
+    EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+    EXPECT_EQ(resp.sql_after_rewrite(), want);
+  }
 }
 
 TEST(TableRefSystemTables, RefusedEverywhere) {
@@ -12572,6 +12778,38 @@ TEST(DriverCompat, EveryDriverStatementIsAccepted) {
     }
   }
   EXPECT_EQ(grouped_in, 8u);  // 4 statements, both SI states
+}
+
+// rewriter-go TestSystemTablesFilter_DriverStatements: every driver statement
+// that reads a class (c) system table keeps its own filter and gains the
+// tenant filter for its one logical database, hw1kzqe3_0 → devnet2
+// (housegate/housegate#218 step 2).
+TEST(DriverCompat, ClassCSystemTableReadsAreTenantFiltered) {
+  size_t n = 0;
+  for (const auto &st : LoadDriverStatements()) {
+    if (st.expect == "filter") continue;
+    std::string table;
+    for (const std::string t : {"tables", "columns", "data_skipping_indices", "projections", "parts", "mutations",
+                                "databases"}) {
+      const std::string from = "FROM system." + t;
+      if (st.sql.find(from + " ") != std::string::npos
+          || (st.sql.size() >= from.size() && st.sql.compare(st.sql.size() - from.size(), from.size(), from) == 0))
+        table = t;
+    }
+    if (table.empty()) continue;
+    ++n;
+    const std::string column = table == "tables" ? "name" : "`table`";
+    const std::string derived = "(SELECT * FROM system." + table + " WHERE (database = 'devnet2') AND startsWith(" +
+                                column + ", 'hw1kzqe3_0.')) AS " + table;
+    for (const bool si : {false, true}) {
+      SCOPED_TRACE(st.source + (si ? " [V2] " : " [inactive] ") + st.sql);
+      const auto resp = RunDirectRewrite(DriverSessionRequest(st.sql, si));
+      EXPECT_EQ(resp.code(), rewriter::RewriteCode::Success) << resp.message();
+      EXPECT_NE(resp.sql_after_rewrite().find("FROM " + derived + " WHERE (database = 'devnet2') AND "), std::string::npos)
+        << resp.sql_after_rewrite();
+    }
+  }
+  EXPECT_EQ(n, 16u);
 }
 
 // Fix round 2 (re-review R1-N-1): a statement may preserve at most

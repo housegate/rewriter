@@ -188,6 +188,46 @@ bool hasUnsupportedStorageIntegrityWrapper(
   return false;
 }
 
+bool tableExpressionIsSystemTenantTable(const DB::ASTTableExpression &table_expression) {
+  const auto *identifier = table_expression.database_and_table_name
+    ? table_expression.database_and_table_name->as<DB::ASTTableIdentifier>()
+    : nullptr;
+  if (!identifier) return false;
+  const auto [database, table] = inOperandTarget(*identifier);
+  return systemTenantTable(database, table).has_value();
+}
+
+// rewriter-go rejectSystemTenantWrappers: a read of a tenant-filtered system
+// table (step 2, housegate/housegate#218) that carries FINAL, SAMPLE or an
+// alias column list. The derived table that filters it cannot keep those
+// semantics, and forwarding the table unfiltered is not an option.
+bool hasUnsupportedSystemTenantWrapper(const DB::ASTPtr &ast) {
+  if (!ast) return false;
+  if (const auto *table_expression = ast->as<DB::ASTTableExpression>()) {
+    if (tableExpressionIsSystemTenantTable(*table_expression)
+        && (table_expression->final || table_expression->sample_size || table_expression->sample_offset))
+      return true;
+  }
+  if (const auto *select = ast->as<DB::ASTSelectQuery>(); select && select->aliases()) {
+    const auto *last = lastTableExpression(*select);
+    if (last && tableExpressionIsSystemTenantTable(*last)) return true;
+  }
+  for (const auto &child : ast->children)
+    if (hasUnsupportedSystemTenantWrapper(child)) return true;
+  return false;
+}
+
+// T7 `statement is not supported` for hasUnsupportedSystemTenantWrapper, in
+// dynamic mode and both SI states, before the rewrite walk.
+bool rejectSystemTenantWrappers(const DB::ASTPtr &ast, const TableRewriteSelection &selection,
+                                rewriter::RewriteSQLResponse *response) {
+  if (selection.mode != TableRewriteMode::Dynamic || !hasUnsupportedSystemTenantWrapper(ast)) return false;
+  response->clear_table_rewrites();
+  response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+  response->set_message(std::string(kUnsupportedStatementMessage));
+  return true;
+}
+
 bool responseTouchesStorageIntegrity(
   const rewriter::RewriteSQLResponse &response) {
   for (const auto &entry : response.original_accessed_tables())
@@ -418,6 +458,50 @@ void doTableNameRewrite(
   }
 }
 
+// The tenant-filtered system derived tables (buildSystemTenantDerivedTable)
+// the current applyRewriteOptions call injected (rewriter-go marks them with
+// opaqueDerivedTableKey). applyRewriteOptions re-runs the dynamic walk after
+// a CommonTableExprRewrite option inlined its bodies; without this set that
+// re-walk would wrap the derived table's own `FROM system.<t>` a second
+// time. The set holds the nodes themselves, so no injected address can be
+// reused while it lives, and it lives only for one applyRewriteOptions call.
+struct InjectedSystemTenantTables {
+  std::vector<DB::ASTPtr> nodes;
+  std::unordered_set<const DB::IAST *> addresses;
+};
+thread_local InjectedSystemTenantTables *injected_system_tenant_tables = nullptr;
+
+class InjectedSystemTenantTablesScope {
+public:
+  InjectedSystemTenantTablesScope() : previous_(injected_system_tenant_tables) {
+    injected_system_tenant_tables = &tables_;
+  }
+  ~InjectedSystemTenantTablesScope() { injected_system_tenant_tables = previous_; }
+  InjectedSystemTenantTablesScope(const InjectedSystemTenantTablesScope &) = delete;
+  InjectedSystemTenantTablesScope &operator=(const InjectedSystemTenantTablesScope &) = delete;
+
+private:
+  InjectedSystemTenantTables tables_;
+  InjectedSystemTenantTables *previous_;
+};
+
+bool isInjectedSystemTenantTable(const DB::IAST *node) {
+  return injected_system_tenant_tables && injected_system_tenant_tables->addresses.count(node) > 0;
+}
+
+// Step 2 (housegate/housegate#218): the derived table that serves a read of
+// a class (c) system table, recorded as injected. Nothing goes into
+// table_rewrites: the table read is unchanged.
+DB::ASTPtr injectSystemTenantDerivedTable(const std::string &table,
+                                          const rewriter::RewriteTableDynamicArgs &args) {
+  DB::ASTPtr subquery = buildSystemTenantDerivedTable(table, args);
+  if (injected_system_tenant_tables) {
+    injected_system_tenant_tables->nodes.push_back(subquery);
+    injected_system_tenant_tables->addresses.insert(subquery.get());
+  }
+  return subquery;
+}
+
 // `first_unresolved`, when set, receives the refusal message of the first
 // read-position table (document order) the walk cannot resolve: an
 // unqualified name that does not resolve through the logical context (spec
@@ -433,6 +517,9 @@ void dynamicRewriteWalk(
   const CTEAliasScope &cte_scope,
   std::optional<std::string> *first_unresolved = nullptr) {
   if (!ast) return;
+  // A tenant-filtered system derived table this rewrite injected is engine
+  // output, already filtered.
+  if (isInjectedSystemTenantTable(ast.get())) return;
   // With `first_unresolved` set the walk only checks: it never mutates the
   // tree, so it can run on the live AST (a clone would share the subtrees a
   // registered tree adopted as children, registerFieldOnlyChildren).
@@ -458,7 +545,11 @@ void dynamicRewriteWalk(
       const auto [origin_db, origin_table] = inOperandTarget(*id);
       const bool is_cte_ref = origin_db.empty() && cte_scope.bindsInOperand(origin_table);
       if (!origin_table.empty() && !is_cte_ref) {
-        if (auto hit = lookupStorageIntegrity(origin_db, origin_table, args)) {
+        // A class (c) system table is read through its tenant-filtered
+        // derived table (step 2, housegate/housegate#218).
+        if (const auto system_table = systemTenantTable(origin_db, origin_table)) {
+          if (!check_only) operand = injectSystemTenantDerivedTable(*system_table, args);
+        } else if (auto hit = lookupStorageIntegrity(origin_db, origin_table, args)) {
           if (!check_only) operand = buildStorageIntegrityDerivedTable(*hit->table, args.storage_integrity());
           if (out_table_rewrites)
             (*out_table_rewrites)[origin_full_name] = hit->table->safe_table();
@@ -509,6 +600,23 @@ void dynamicRewriteWalk(
         // tenant db2's x), two or more split at the first part. table_rewrites
         // keys stay the written name.
         const auto [origin_db, origin_table] = inOperandTarget(*identifier);
+
+        // A class (c) system table is read through its tenant-filtered
+        // derived table (step 2, housegate/housegate#218), aliased with the
+        // caller's alias, else the short table name: ClickHouse resolves
+        // `tables.name` against a derived table aliased `tables` but not
+        // against one aliased `system.tables` (measured on 26.8.37.168).
+        if (const auto system_table = systemTenantTable(origin_db, origin_table)) {
+          if (check_only) return;
+          auto subquery = injectSystemTenantDerivedTable(*system_table, args);
+          table_expression->children.clear();
+          table_expression->database_and_table_name = nullptr;
+          table_expression->table_function = nullptr;
+          table_expression->subquery = subquery;
+          table_expression->children.push_back(subquery);
+          subquery->setAlias(origin_alias.empty() ? *system_table : origin_alias);
+          return;
+        }
 
         if (auto hit = lookupStorageIntegrity(origin_db, origin_table, args)) {
           if (check_only) return;
@@ -970,6 +1078,9 @@ DB::ASTPtr applyRewriteOptions(
   DB::ASTPtr ast,
   const std::vector<ParsedCTEASTMap> *preparsed_cte_ast_maps,
   std::map<std::string, std::string> *out_table_rewrites) {
+  // The tenant-filtered system derived tables this call injects are not
+  // re-walked by the post-CTE re-apply below.
+  const InjectedSystemTenantTablesScope injected_system_tenant_scope;
 
   std::map<std::string, DB::CommonTableExpr> cte_map_;
   std::unordered_map<std::string, std::string> table_name_map_;
@@ -1250,6 +1361,9 @@ void handleSelectQuery(DB::ASTPtr ast,
     }
   }
 
+  // A tenant-filtered system table read with FINAL / SAMPLE / an alias
+  // column list (rewriter-go rewriteSelectCore, before the walker).
+  if (rejectSystemTenantWrappers(ast, selection, response)) return;
   // T6 after the SI checks (rewriter-go rewriteSelectCore order), before the
   // table rewrite.
   if (!rewriteHasColumnInTable(ast, selection, response)) return;
@@ -1443,6 +1557,7 @@ void rewriteEmbeddedBody(
 
   const auto body_code = kind == EmbeddedBodyKind::View ? rewriter::RewriteCode::InvalidRewriteRequest
                                                         : rewriter::RewriteCode::UnsupportedStatement;
+  if (rejectSystemTenantWrappers(body, selection, response)) return;
   if (!rewriteHasColumnInTable(body, selection, response, body_code)) return;
   // The write statement's own targets were resolved first; this refusal is
   // the statement's final answer, so it drops their table_rewrites too.
