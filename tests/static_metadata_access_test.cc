@@ -113,6 +113,7 @@ TEST(StaticMetadataAccess, MetadataReadsAreRefused) {
     "SELECT dictGet(concat('sys', 'tem.x'), 'a', 1)",
     "SELECT * FROM dictionary('system.x')",
     "SELECT joinGet('system.t', 'a', 1)",
+    "SELECT naiveBayesClassifier('system.model', 'text')",
     "SELECT hasColumnInTable('system', 'users', 'name')",
     "SELECT hasColumnInTable('host', 'default', 't', 'c')",
     // Statements over them.
@@ -145,6 +146,7 @@ TEST(StaticMetadataAccess, MetadataReadsAreRefused) {
     "USE system",
     "USE `INFORMATION_SCHEMA`",
     "DROP TABLE system.tables",
+    "DROP DATABASE system",
     "INSERT INTO system.query_log VALUES (1)",
     "CREATE TABLE copy AS system.query_log",
     "RENAME TABLE system.query_log TO leak",

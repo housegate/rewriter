@@ -152,10 +152,13 @@ bool tableReaderMayReachMetadata(const DB::ASTFunction &fn, const std::string &n
 }
 
 // String lookups that read a table or dictionary by name: the dict* family
-// (dictGet*, dictHas, dictIsIn, …, and the dictionary() table function) and
-// joinGet*, whose first argument is "[db.]name".
+// (dictGet*, dictHas, dictIsIn, …, and the dictionary() table function),
+// joinGet* and ClickHouse 26.7's naiveBayesClassifier* (it reads the
+// NAIVE_BAYES dictionary it names), whose first argument is "[db.]name"
+// (rewriter-go engine.IsStringLookup).
 bool stringLookupMayReachMetadata(const DB::ASTFunction &fn, const std::string &name) {
-  if (name.starts_with("dict") || name == "joinget" || name == "joingetornull")
+  if (name.starts_with("dict") || name == "joinget" || name == "joingetornull"
+      || name.starts_with("naivebayesclassifier"))
     return argumentCount(fn) < 1 || qualifiedArgumentMayBeProtected(fn, 0);
   if (name == "hascolumnintable") {
     // hasColumnInTable([hostname[, user[, password]],] database, table, column):
