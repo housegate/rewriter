@@ -23,6 +23,7 @@
 #include "handlers/common.h"
 #include "handlers/exists.h"
 #include "handlers/materialize.h"
+#include "handlers/metadata_access.h"
 #include "handlers/name_rewrite.h"
 #include "handlers/grant.h"
 #include "handlers/join_swap.h"
@@ -232,6 +233,12 @@ void RewriterServiceImpl::doRewrite(
     }
   } _access_log{sql_id, response, t0, original_query.size()};
 
+  // RewriteSQLRequest.refuse_metadata_access (handlers/metadata_access.h).
+  // Acknowledged before any exit path, so the caller can tell an engine that
+  // honours the flag from one that silently ignores it.
+  const bool refuse_metadata = request->refuse_metadata_access();
+  if (refuse_metadata) response->set_metadata_access_refusal_applied(true);
+
   // Positive SI proof (V1 or V2) is selected by the same last-wins
   // table-rewrite option as the handlers. V2 activates the surface by
   // version, V1 only with a non-empty table map. Validate the entire active
@@ -400,6 +407,14 @@ void RewriterServiceImpl::doRewrite(
         response->set_existence_clause(rewriter::EXISTENCE_CLAUSE_IF_EXISTS);
     }
 
+    // The caller's opt-in metadata refusal, ahead of every other policy:
+    // a static-mode caller gets no table-reference policy at all.
+    if (refuse_metadata && rewriter_handlers::readsMetadata(ast, original_query)) {
+      response->set_code(rewriter::RewriteCode::UnsupportedStatement);
+      response->set_message(std::string(rewriter_handlers::kMetadataAccessDisabledMessage));
+      return;
+    }
+
     // Spec 2026-09-26 §5: the table-reference policy runs before any handler
     // can rewrite a name it refuses.
     std::optional<rewriter_handlers::SystemTableRefusal> deferred_system_table;
@@ -526,6 +541,28 @@ void RewriterServiceImpl::doRewrite(
       else if (identifier_parameter)
         refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
                                 std::string(rewriter_handlers::kUnsupportedStatementMessage));
+    }
+    // The rewrite options are caller input too: an injected CTE body or a map
+    // target must not turn an accepted statement into a metadata read. The
+    // output is parsed again and checked like the input; output the parser
+    // cannot read is refused (fail closed).
+    if (refuse_metadata && response->code() == rewriter::RewriteCode::Success) {
+      bool reads = true;
+      const String &rewritten = response->sql_after_rewrite();
+      try {
+        DB::ParserQuery rewritten_parser(rewritten.data() + rewritten.size(), false);
+        DB::ASTPtr rewritten_ast = rewriter_handlers::parseBounded(
+          rewritten_parser, rewritten.data(), rewritten.data() + rewritten.size());
+        if (rewritten_ast) {
+          rewriter_handlers::registerFieldOnlyChildren(*rewritten_ast);
+          reads = rewriter_handlers::readsMetadata(rewritten_ast, rewritten);
+        }
+      } catch (const DB::Exception &) {
+        reads = true;
+      }
+      if (reads)
+        refuseAcceptedStatement(rewriter::RewriteCode::UnsupportedStatement,
+                                std::string(rewriter_handlers::kMetadataAccessDisabledMessage));
     }
   } catch (const DB::Exception &e) {
     // SQL length is useful to distinguish "empty/truncated request" from real

@@ -34,6 +34,7 @@ clickhouse_add_executable(rewriter_tests
     dos_hardening_test.cc
     error_redaction_test.cc
     metadata_access_test.cc
+    static_metadata_access_test.cc
     large_in_list_test.cc
     $<TARGET_OBJECTS:rewriter_core>
 )

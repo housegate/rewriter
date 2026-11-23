@@ -256,6 +256,7 @@ add_library(rewriter_core OBJECT
     src/handlers/name_rewrite.cc
     src/handlers/storage_integrity.cc
     src/handlers/table_reference.cc
+    src/handlers/metadata_access.cc
     src/handlers/system_tables.cc
     src/handlers/describe.cc
     src/handlers/exists.cc
