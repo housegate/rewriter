@@ -3,6 +3,16 @@
 
 #include <Parsers/ASTAlterQuery.h>
 #include <Parsers/ASTCreateQuery.h>
+#include <Parsers/ASTDescribeCacheQuery.h>
+#include <Parsers/ASTShowEngineQuery.h>
+#include <Parsers/ASTShowFunctionsQuery.h>
+#include <Parsers/ASTShowProcesslistQuery.h>
+#include <Parsers/ASTShowSettingQuery.h>
+#include <Parsers/Access/ASTShowAccessEntitiesQuery.h>
+#include <Parsers/Access/ASTShowAccessQuery.h>
+#include <Parsers/Access/ASTShowCreateAccessEntityQuery.h>
+#include <Parsers/Access/ASTShowGrantsQuery.h>
+#include <Parsers/Access/ASTShowPrivilegesQuery.h>
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTIdentifier.h>
@@ -131,6 +141,13 @@ bool tableReaderMayReachMetadata(const DB::ASTFunction &fn, const std::string &n
   // ENGINE = Distributed(cluster, db, table, …) / Buffer(db, table, …).
   if (name == "distributed") return count < 3 || databaseArgumentMayBeProtected(fn, 1);
   if (name == "buffer") return count < 2 || databaseArgumentMayBeProtected(fn, 0);
+  // Foreign-connector functions that a ClickHouse loopback (its own MySQL /
+  // PostgreSQL listener, a JDBC / ODBC datasource pointing back at it) turns
+  // into a (database, table) read; the arities rewriter-go's namespace decoder
+  // models (engine.decodeNamespaceFunctionRefDetail).
+  if (name == "mysql" || name == "postgresql") return count < 3 || databaseArgumentMayBeProtected(fn, 1);
+  if (name == "mongodb") return count >= 6 && databaseArgumentMayBeProtected(fn, 1);
+  if (name == "jdbc" || name == "odbc") return count == 3 && databaseArgumentMayBeProtected(fn, 1);
   return false;
 }
 
@@ -172,9 +189,19 @@ bool nodeReadsMetadata(const DB::IAST &node) {
   if (const auto *fn = node.as<DB::ASTFunction>()) {
     if (isMetadataFunction(*fn)) return true;
   }
-  // SHOW TABLES / DATABASES / DICTIONARIES / CLUSTERS / SETTINGS / MERGES /
-  // CACHES all read system tables.
-  if (node.as<DB::ASTShowTablesQuery>()) return true;
+  // Every SHOW form that reads a system table or access storage: SHOW TABLES /
+  // DATABASES / DICTIONARIES / CLUSTERS / SETTINGS / MERGES / CACHES,
+  // PROCESSLIST, USERS / ROLES / QUOTAS / …, GRANTS, ACCESS, SHOW CREATE USER
+  // / ROLE / …, FUNCTIONS, ENGINES, SETTING, PRIVILEGES, and DESCRIBE
+  // FILESYSTEM CACHE. SHOW CREATE TABLE and SHOW COLUMNS / INDEX are checked
+  // by their target below.
+  if (node.as<DB::ASTShowTablesQuery>() || node.as<DB::ASTShowProcesslistQuery>()
+      || node.as<DB::ASTShowAccessEntitiesQuery>() || node.as<DB::ASTShowGrantsQuery>()
+      || node.as<DB::ASTShowAccessQuery>() || node.as<DB::ASTShowCreateAccessEntityQuery>()
+      || node.as<DB::ASTShowFunctionsQuery>() || node.as<DB::ASTShowEnginesQuery>()
+      || node.as<DB::ASTShowSettingQuery>() || node.as<DB::ASTShowPrivilegesQuery>()
+      || node.as<DB::ASTDescribeCacheQuery>())
+    return true;
   // DESCRIBE / EXISTS / SHOW CREATE / DROP / TRUNCATE / ALTER / … targets,
   // database-level forms (SHOW CREATE DATABASE system) included.
   if (const auto *query = dynamic_cast<const DB::ASTQueryWithTableAndOutput *>(&node)) {

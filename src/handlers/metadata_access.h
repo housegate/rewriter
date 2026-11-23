@@ -22,10 +22,11 @@ constexpr std::string_view kMetadataAccessDisabledMessage = "metadata access is 
 // Whether a statement reads ClickHouse metadata, as
 // RewriteSQLRequest.refuse_metadata_access documents: a reference to the
 // `system` / `information_schema` database (case-insensitive) in a table,
-// target, USE, SHOW COLUMNS / INDEX or IN-operand position; SHOW TABLES /
-// DATABASES; a table function or table engine that can reach those
-// databases; a string lookup naming them; a call or bare name revealing the
-// deployment (version() and the dynamic-mode identity list).
+// target, USE, SHOW COLUMNS / INDEX or IN-operand position; every SHOW form
+// backed by a system table or access storage; a table function or table
+// engine that can reach those databases (loopback connectors included); a
+// string lookup naming them; a call or bare name revealing the deployment
+// (version() and the dynamic-mode identity list).
 //
 // `ast` is a parsed tree with its field-only members registered
 // (registerFieldOnlyChildren), so walking `children` reaches every subtree;
